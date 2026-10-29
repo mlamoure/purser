@@ -1,0 +1,57 @@
+!Option:AutoSwitch
+!Account
+NChecking
+TBank
+^
+NHarbor
+TBank
+^
+!Clear:AutoSwitch
+!Account
+NChecking
+TBank
+^
+!Type:Bank
+D1/15'26
+T2,200.00
+PSynthetic Employer Payroll
+L--Split--
+SSalary
+ESemi-monthly gross
+$3,200.00
+STaxes:Federal
+$-500.00
+S[Harbor]
+ESavings sweep
+$-500.00
+C*
+^
+D1/20'26
+T-120.00
+PSynthetic Grocer
+L--Split--
+SGroceries
+$-80.00
+SHousehold
+$-40.00
+C*
+^
+D1/25'26
+T-60.00
+PSynthetic Pharmacy
+L--Split--
+SHealth
+$-45.00
+C*
+^
+!Account
+NHarbor
+TBank
+^
+!Type:Bank
+D1/15'26
+T500.00
+PSavings sweep
+L[Checking]
+C*
+^

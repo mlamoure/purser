@@ -1,0 +1,52 @@
+{{- if .Values.worker.enabled }}
+{{- include "purser.validate" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "purser.fullname" . }}-worker
+  labels:
+    {{- include "purser.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  # One replica and Recreate by design: exactly one scheduler, with no
+  # overlap during a rollout, avoids distributed locks.
+  replicas: {{ .Values.worker.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "purser.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        {{- include "purser.labels" . | nindent 8 }}
+        app.kubernetes.io/component: worker
+      annotations:
+        {{- if not .Values.existingSecret }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "purser.podSpecCommon" . | nindent 6 }}
+      containers:
+        - name: worker
+          image: {{ include "purser.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["worker"]
+          # The worker serves no port, so it has no HTTP probe; a crash
+          # (e.g. a failed migration) exits the process and the kubelet
+          # restarts it.
+          envFrom:
+            - secretRef:
+                name: {{ include "purser.secretName" . }}
+          env:
+            {{- include "purser.env" . | trim | nindent 12 }}
+          securityContext: {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          resources: {{- toYaml .Values.worker.resources | nindent 12 }}
+{{- end }}

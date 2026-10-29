@@ -1,0 +1,8 @@
+# Astro build output + generated caches
+dist/
+.astro/
+node_modules/
+
+# Synced from ../frontend/openapi.json by scripts/sync-openapi.mjs — never edit,
+# never commit; the checked-in source of truth is frontend/openapi.json.
+public/openapi.json

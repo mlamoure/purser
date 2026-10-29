@@ -1,0 +1,150 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PURSER",
+      "label": "Purser (PostgreSQL)",
+      "description": "Read-only purser_read connection to the Purser database",
+      "type": "datasource",
+      "pluginId": "postgres",
+      "pluginName": "PostgreSQL"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "postgres",
+      "name": "PostgreSQL",
+      "version": "1.0.0"
+    }
+  ],
+  "uid": "purser-net-worth",
+  "title": "Purser \u00b7 Net worth over time",
+  "description": "Nightly-materialized net worth series with per-snapshot holdings.",
+  "tags": [
+    "purser"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5m",
+  "time": {
+    "from": "now-90d",
+    "to": "now+30d"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Net worth",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "${DS_PURSER}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT as_of AS time, net_worth FROM readmodel.v1_net_worth_daily WHERE $__timeFilter(as_of) ORDER BY as_of",
+          "rawQuery": true,
+          "datasource": {
+            "type": "postgres",
+            "uid": "${DS_PURSER}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 2,
+      "title": "Assets vs liabilities",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "${DS_PURSER}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT as_of AS time, assets, liabilities FROM readmodel.v1_net_worth_daily WHERE $__timeFilter(as_of) ORDER BY as_of",
+          "rawQuery": true,
+          "datasource": {
+            "type": "postgres",
+            "uid": "${DS_PURSER}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 3,
+      "title": "Holdings (latest)",
+      "type": "table",
+      "datasource": {
+        "type": "postgres",
+        "uid": "${DS_PURSER}"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 10,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT account_path, symbol, quantity, cost_basis, market_value FROM readmodel.v1_holdings_latest ORDER BY market_value DESC NULLS LAST",
+          "rawQuery": true,
+          "datasource": {
+            "type": "postgres",
+            "uid": "${DS_PURSER}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {}
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  }
+}

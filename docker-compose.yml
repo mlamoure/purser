@@ -1,0 +1,44 @@
+# Docker Compose: `docker compose up` brings up Purser + Postgres.
+# Migrations run automatically on startup.
+
+services:
+  purser:
+    build: .
+    image: purser:dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PURSER_DATABASE_URL: postgresql+psycopg://purser:${POSTGRES_PASSWORD:-purser}@postgres:5432/purser
+      # REQUIRED. Generate once with `purser keygen`, record it somewhere
+      # safe, and export it (or put it in .env — see .env.example). Compose
+      # refuses to start without it.
+      PURSER_ENCRYPTION_KEY: ${PURSER_ENCRYPTION_KEY:?generate with 'purser keygen' and record it — see https://mlamoure.github.io/purser/tutorials/ai-setup/}
+      PURSER_PUBLIC_URL: ${PURSER_PUBLIC_URL:-http://localhost:8000}
+    ports:
+      - "${PURSER_BIND_ADDRESS:-127.0.0.1}:8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: purser
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-purser}
+      POSTGRES_DB: purser
+    volumes:
+      - purser-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U purser -d purser"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  purser-pgdata:

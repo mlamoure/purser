@@ -1,0 +1,8 @@
+Scheduled,Date,Payee,Category,Amount,Memo,Clr,Account
+,2024-03-01,Acme Payroll,Salary,2500.00,,R,Checking
+,2024-03-04,Grocery Mart,Groceries,-85.43,weekly shop,c,Checking
+,2024-03-08,Check 1001 Landlord Properties,Housing:Rent,-1200.00,March rent,,Checking
+,2024-03-10,Move to savings,[Savings],-500.00,,c,Checking
+S,2024-04-01,Check 1002 Landlord Properties,Housing:Rent,-1200.00,April rent,,Checking
+,2024-03-10,Move from checking,[Checking],500.00,,R,Savings
+,2024-03-15,Interest,Interest Inc,1.25,,,Savings

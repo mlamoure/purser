@@ -1,0 +1,177 @@
+# EXPERIMENTAL. This chart is outside Purser's supported release matrix:
+# Docker Compose is the supported deployment. The defaults below are
+# secure-by-default, but the chart has not been qualified against a cluster.
+
+image:
+  # The published image. To run your own build instead, point this at the
+  # registry you push it to.
+  repository: ghcr.io/mlamoure/purser
+  # Empty means "v" + the chart's appVersion, the tag the release workflow
+  # publishes (e.g. v2026.10.0).
+  tag: ""
+  # Optional "sha256:..." digest. When set the image is pinned to it; the tag
+  # stays in the reference for readability only.
+  digest: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# Secrets. Either name an existing Secret (recommended), or let the chart
+# create one from `secrets`. The chart refuses to render without an
+# encryption key and a database URL; it ships no default for either.
+#
+# An existing Secret must carry PURSER_ENCRYPTION_KEY and PURSER_DATABASE_URL.
+# Every other key in it reaches the pods as an environment variable too, so
+# PURSER_OIDC_CLIENT_SECRET or PURSER_AI_API_KEY can live there.
+existingSecret: ""
+secrets:
+  # REQUIRED unless existingSecret is set. Generate with `purser keygen` and
+  # record it somewhere safe: encrypted data is unrecoverable without it.
+  encryptionKey: ""
+  # REQUIRED unless existingSecret is set or postgres.mode=bundled (then the
+  # chart derives it). Form: postgresql+psycopg://USER:PASSWORD@HOST:5432/DB
+  databaseUrl: ""
+  # Further secret environment variables, e.g. PURSER_OIDC_CLIENT_SECRET,
+  # PURSER_AI_API_KEY. Rendered into the chart's Secret, never into env.
+  extra: {}
+
+# Plain (non-secret) settings, passed to both Deployments. A key set here
+# always wins over a value the chart would derive (PURSER_PUBLIC_URL from the
+# ingress, PURSER_DISABLE_SCHEDULER for the worker split). The chart refuses
+# secret-shaped keys (…SECRET, …PASSWORD, …TOKEN, …API_KEY, the encryption key,
+# the database URL): those belong in secrets.extra or existingSecret.
+env:
+  PURSER_LOG_LEVEL: INFO
+  # External URL of the instance: secure cookies (https), the OIDC redirect
+  # URI, and the MCP endpoint's Host/Origin allowlist (/mcp answers 421 to any
+  # other host). With ingress.enabled the chart derives
+  # https://INGRESS_HOST; set it here when users reach Purser at another URL.
+  # PURSER_PUBLIC_URL: https://purser.example.com
+  # Behind an ingress, trust the controller's forwarded client address so
+  # sign-in throttling counts real clients (uvicorn's trusted-proxy list):
+  # FORWARDED_ALLOW_IPS: 10.0.0.0/8
+
+serviceAccount:
+  create: true
+  name: ""
+  # Purser never talks to the Kubernetes API, so no token is mounted.
+  automountToken: false
+
+# The image runs as the unprivileged user purser (UID/GID 999). The root
+# filesystem is read-only; /tmp is a size-limited emptyDir.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 999
+  runAsGroup: 999
+  fsGroup: 999
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  privileged: false
+  capabilities:
+    drop: ["ALL"]
+
+tmpSizeLimit: 64Mi
+
+# Sized from measurements: an idle API process holds about 155 MiB and an idle
+# worker about 95 MiB. Request bodies are capped at 32 MiB
+# (PURSER_MAX_REQUEST_BYTES), which bounds an import's peak.
+api:
+  # Must stay 1 unless worker.enabled: every API pod without a worker runs
+  # the scheduler. Sign-in throttle counts are per pod.
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  # Startup runs database migrations before the server listens; allow up to
+  # startupProbe.failureThreshold x periodSeconds for them.
+  startupProbe:
+    periodSeconds: 10
+    failureThreshold: 30
+  readinessProbe:
+    periodSeconds: 10
+    failureThreshold: 3
+  livenessProbe:
+    periodSeconds: 20
+    failureThreshold: 3
+
+# Optional role split (same image, `purser worker`). Enabling it sets
+# PURSER_DISABLE_SCHEDULER=true on the API pods, so only the worker runs
+# jobs. The worker is pinned to one replica and the Recreate strategy, so
+# exactly one scheduler ever runs. Both roles migrate at startup; a Postgres
+# advisory lock makes them take turns.
+worker:
+  enabled: false
+  replicas: 1
+  resources:
+    requests:
+      cpu: 50m
+      memory: 192Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+service:
+  type: ClusterIP
+  port: 8000
+
+ingress:
+  enabled: false
+  className: ""
+  host: purser.example.com
+  annotations: {}
+  # Terminate TLS here or in front of the ingress; PURSER_PUBLIC_URL is
+  # derived as https://host either way. Example:
+  # tls:
+  #   - secretName: purser-tls
+  #     hosts: [purser.example.com]
+  tls: []
+
+networkPolicy:
+  # Restrict ingress to the API port, and (with bundled Postgres) the
+  # database to this release's Purser pods. Egress is not restricted:
+  # Purser calls your bank feed, OIDC provider, AI provider and webhooks.
+  enabled: false
+  # NetworkPolicy peers allowed to reach the API, e.g. the ingress
+  # controller's namespace. Empty: only pods in this namespace.
+  apiIngressFrom: []
+  # - namespaceSelector:
+  #     matchLabels:
+  #       kubernetes.io/metadata.name: ingress-nginx
+
+postgres:
+  # external (default) -> bring your own database via secrets.databaseUrl
+  #   or existingSecret. For CloudNativePG, point the URL at the cluster's
+  #   read-write service (e.g. postgresql+psycopg://purser:...@purser-rw:5432/purser).
+  #   The database needs the ltree and pgcrypto extensions.
+  # bundled -> a single-replica, unbacked-up StatefulSet in this release, for
+  #   evaluation only.
+  mode: external
+  image: postgres:16
+  database: purser
+  username: purser
+  # bundled only: no default. Set a password (16+ characters of A-Z a-z 0-9
+  # . _ ~ -; `openssl rand -hex 24`) or name an existing Secret holding it.
+  password: ""
+  existingSecret: ""
+  existingSecretKey: POSTGRES_PASSWORD
+  storage: 5Gi
+  storageClassName: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi

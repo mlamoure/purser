@@ -1,0 +1,26 @@
+Purser is deploying. This chart is EXPERIMENTAL and outside the supported
+release matrix; Docker Compose is the supported deployment.
+
+1. Port-forward to reach the first-run wizard:
+   kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "purser.fullname" . }} 8000:{{ .Values.service.port }}
+   open http://localhost:8000
+
+2. Agents connect to the MCP endpoint at /mcp with a Bearer API token
+   (create one in the admin UI).
+
+3. RECORD your PURSER_ENCRYPTION_KEY somewhere safe: archived bank data
+   is encrypted with it and unrecoverable without it.
+
+Image: {{ include "purser.image" . }}
+Postgres mode: {{ .Values.postgres.mode }}
+{{- if eq .Values.postgres.mode "external" }}
+PURSER_DATABASE_URL must point at a Postgres with the ltree and pgcrypto
+extensions (CloudNativePG: the cluster's -rw service).
+{{- else }}
+WARNING: the bundled Postgres is a single pod with no backups. Use it for
+evaluation only, and back it up yourself if it holds data you keep.
+{{- end }}
+{{- if and .Values.ingress.enabled (not .Values.ingress.tls) }}
+NOTE: ingress.tls is empty. PURSER_PUBLIC_URL is https://{{ .Values.ingress.host }},
+so TLS must terminate in front of this ingress; otherwise set ingress.tls.
+{{- end }}

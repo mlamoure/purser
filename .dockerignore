@@ -1,0 +1,16 @@
+.git/
+.venv/
+.env
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+tests/
+dist/
+build/
+node_modules/
+frontend/node_modules/
+docs/node_modules/
+docs/dist/
+docs/.astro/

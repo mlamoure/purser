@@ -1,0 +1,67 @@
+# Documentation site: builds docs/ for both hosting targets (site root and the
+# /purser subpath) and deploys the /purser build to GitHub Pages at
+# https://mlamoure.github.io/purser/ on pushes to main.
+#
+# Gate: the repository variable PURSER_DOCS_PUBLICATION_ENABLED must be 'true'
+# (Settings -> Secrets and variables -> Actions -> Variables) for anything to
+# run; Pages must use "GitHub Actions" as its source. Unset, the workflow is a
+# no-op, so a fork never builds or deploys.
+#
+# Actions are pinned by full commit SHA; the comment names the release.
+name: Documentation
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions: {}
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    if: vars.PURSER_DOCS_PUBLICATION_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      matrix:
+        base: ['', '/purser']
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: docs/package-lock.json
+      - run: npm ci --no-fund
+        working-directory: docs
+      - run: npm audit --audit-level=high
+        working-directory: docs
+      - run: npm run build
+        working-directory: docs
+        env:
+          DOCS_SITE: https://mlamoure.github.io
+          DOCS_BASE: ${{ matrix.base }}
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        if: matrix.base != ''
+        with:
+          path: docs/dist
+  deploy:
+    if: >-
+      vars.PURSER_DOCS_PUBLICATION_ENABLED == 'true' &&
+      github.event_name != 'pull_request' &&
+      github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

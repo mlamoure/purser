@@ -1,0 +1,116 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PURSER",
+      "label": "Purser (PostgreSQL)",
+      "description": "Read-only purser_read connection to the Purser database",
+      "type": "datasource",
+      "pluginId": "postgres",
+      "pluginName": "PostgreSQL"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "postgres",
+      "name": "PostgreSQL",
+      "version": "1.0.0"
+    }
+  ],
+  "uid": "purser-upcoming-bills",
+  "title": "Purser \u00b7 Upcoming bills & forecast",
+  "description": "Deterministic projection from expected schedule instances.",
+  "tags": [
+    "purser"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5m",
+  "time": {
+    "from": "now-90d",
+    "to": "now+30d"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Projected balances (60 days)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "postgres",
+        "uid": "${DS_PURSER}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "rawSql": "SELECT day AS time, account_path, projected_balance FROM readmodel.v1_forecast_daily ORDER BY day",
+          "rawQuery": true,
+          "datasource": {
+            "type": "postgres",
+            "uid": "${DS_PURSER}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {}
+    },
+    {
+      "id": 2,
+      "title": "Upcoming expected transactions",
+      "type": "table",
+      "datasource": {
+        "type": "postgres",
+        "uid": "${DS_PURSER}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 24,
+        "h": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawSql": "SELECT t.date, p.amount, a.path AS account_path FROM transactions t JOIN postings p ON p.transaction_id = t.id JOIN accounts a ON a.id = p.account_id AND NOT a.is_virtual WHERE t.status = 'expected' AND t.superseded_by IS NULL ORDER BY t.date LIMIT 20",
+          "rawQuery": true,
+          "datasource": {
+            "type": "postgres",
+            "uid": "${DS_PURSER}"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {}
+        },
+        "overrides": []
+      },
+      "options": {}
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  }
+}

@@ -1,0 +1,70 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "purser.fullname" . }}-api
+  labels:
+    {{- include "purser.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "purser.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - port: http
+      from:
+        {{- with .Values.networkPolicy.apiIngressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- else }}
+        - podSelector: {}
+        {{- end }}
+{{- if .Values.worker.enabled }}
+---
+# The worker serves nothing: refuse all ingress to it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "purser.fullname" . }}-worker
+  labels:
+    {{- include "purser.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "purser.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  policyTypes: ["Ingress"]
+{{- end }}
+{{- if eq .Values.postgres.mode "bundled" }}
+---
+# Only this release's Purser pods reach the bundled database.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "purser.fullname" . }}-postgres
+  labels:
+    {{- include "purser.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "purser.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: postgres
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - port: postgres
+      from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/instance
+                operator: In
+                values: [{{ .Release.Name | quote }}]
+              - key: app.kubernetes.io/component
+                operator: In
+                values: ["api", "worker"]
+{{- end }}
+{{- end }}

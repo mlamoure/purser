@@ -1,0 +1,31 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: oklch(0.985 0.002 250);
+  --color-foreground: oklch(0.2 0.02 260);
+  --color-card: oklch(1 0 0);
+  --color-muted: oklch(0.96 0.005 250);
+  --color-muted-foreground: oklch(0.5 0.02 260);
+  --color-border: oklch(0.91 0.008 250);
+  --color-primary: oklch(0.45 0.15 165);
+  --color-primary-foreground: oklch(0.99 0 0);
+  --color-destructive: oklch(0.55 0.2 25);
+  --color-ring: oklch(0.45 0.15 165);
+  --radius: 0.5rem;
+}
+
+/* The forecast's estimate range band (#247), light and dark. */
+:root {
+  --chart-band: oklch(0.6 0.13 250 / 0.16);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --chart-band: oklch(0.7 0.12 250 / 0.3);
+  }
+}
+
+body {
+  @apply bg-background text-foreground antialiased;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}

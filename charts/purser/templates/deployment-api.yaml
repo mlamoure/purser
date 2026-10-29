@@ -1,0 +1,75 @@
+{{- include "purser.validate" . }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "purser.fullname" . }}-api
+  labels:
+    {{- include "purser.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ .Values.api.replicas }}
+  {{- if not .Values.worker.enabled }}
+  # This pod runs the scheduler: never let an old and a new one overlap.
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "purser.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        {{- include "purser.labels" . | nindent 8 }}
+        app.kubernetes.io/component: api
+      annotations:
+        {{- /* Roll the pods when the chart-managed Secret changes. */}}
+        {{- if not .Values.existingSecret }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- include "purser.podSpecCommon" . | nindent 6 }}
+      containers:
+        - name: purser
+          image: {{ include "purser.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve"]
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: {{ include "purser.secretName" . }}
+          env:
+            {{- include "purser.env" . | trim | nindent 12 }}
+            {{- /* The worker Deployment owns the scheduler (issue #160). */}}
+            {{- if and .Values.worker.enabled (not (hasKey (.Values.env | default dict) "PURSER_DISABLE_SCHEDULER")) }}
+            - name: PURSER_DISABLE_SCHEDULER
+              value: "true"
+            {{- end }}
+          securityContext: {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          # /healthz answers 200 only when the database answers. The server
+          # listens only after startup migrations finish, so the startup probe
+          # gives them time; liveness checks the process alone, so a database
+          # outage marks the pod unready instead of restarting it.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: {{ .Values.api.startupProbe.periodSeconds }}
+            failureThreshold: {{ .Values.api.startupProbe.failureThreshold }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: {{ .Values.api.readinessProbe.periodSeconds }}
+            failureThreshold: {{ .Values.api.readinessProbe.failureThreshold }}
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: http }
+            periodSeconds: {{ .Values.api.livenessProbe.periodSeconds }}
+            failureThreshold: {{ .Values.api.livenessProbe.failureThreshold }}
+            timeoutSeconds: 5
+          resources: {{- toYaml .Values.api.resources | nindent 12 }}

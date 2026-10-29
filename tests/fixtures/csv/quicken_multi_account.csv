@@ -1,0 +1,6 @@
+Date,Payee,Amount,Category,Memo,Account
+2020-01-05,Acme Payroll,2500.00,Salary,,Checking
+2020-01-10,Grocery Mart,"(85.43)",Groceries,weekly shop,Checking
+2020-02-01,Move to savings,-500.00,[Savings],,Checking
+2020-02-01,Move from checking,500.00,[Checking],,Savings
+2020-03-01,Interest,1.50,Interest Inc,,Savings

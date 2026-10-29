@@ -1,0 +1,54 @@
+!Account
+NChecking
+TBank
+^
+!Type:Bank
+D1/2'24
+T1000.00
+POpening Balance
+L[Checking]
+^
+D1/5/2024
+T2500.00
+CX
+PAcme Payroll
+LSalary
+^
+D1/8/2024
+T-85.43
+C*
+PGrocery Mart
+LGroceries
+^
+D1/12/2024
+T-42.10
+Cc
+PCorner Pharmacy
+LHealth
+^
+D1/15/2024
+T-60.00
+CR
+PCity Utilities
+LUtilities
+^
+D1/20/2024
+T-1,200.00
+PCheck 1001 Landlord Properties
+LHousing:Rent
+^
+!Account
+NCash
+TCash
+^
+!Type:Cash
+D1/9/2024
+T-12.50
+PFarmers Market
+LGroceries
+^
+D1/16/2024
+T-8.75
+PCoffee Cart
+LDining
+^

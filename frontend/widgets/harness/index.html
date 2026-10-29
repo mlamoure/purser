@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Purser widget harness (dev only)</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        max-width: 860px;
+        margin: 0 auto;
+        padding: 1.5rem;
+        background: #faf9f5;
+      }
+      body.dark {
+        background: #161514;
+        color: #f1efe8;
+      }
+      .controls {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+        margin-bottom: 1rem;
+      }
+      select {
+        font: inherit;
+        padding: 4px 8px;
+      }
+      pre#log {
+        font-size: 11px;
+        color: #888780;
+        max-height: 180px;
+        overflow: auto;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="controls">
+      <strong>Purser widget harness</strong>
+      <label
+        >widget
+        <select id="widget">
+          <option value="forecast" selected>forecast</option>
+          <option value="recurring">recurring</option>
+          <option value="net-worth">net-worth</option>
+          <option value="spending">spending</option>
+          <option value="digest">digest</option>
+          <option value="balance-history">balance-history</option>
+        </select>
+      </label>
+      <label
+        >theme
+        <select id="theme">
+          <option value="light" selected>light</option>
+          <option value="dark">dark</option>
+        </select>
+      </label>
+    </div>
+    <div id="frame-holder"></div>
+    <pre id="log"></pre>
+    <script type="module" src="./main.ts"></script>
+    <script>
+      document.getElementById("theme").addEventListener("change", (e) => {
+        document.body.classList.toggle("dark", e.target.value === "dark");
+      });
+    </script>
+  </body>
+</html>

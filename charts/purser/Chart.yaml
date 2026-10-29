@@ -1,0 +1,15 @@
+apiVersion: v2
+name: purser
+description: >-
+  EXPERIMENTAL, outside the supported release matrix (Docker Compose is the
+  supported deployment). Purser, the finance backend for the personal agent
+  stack: one image, an api role (serve) and an optional worker, against an
+  external Postgres (or a bundled one for evaluation).
+type: application
+version: 2026.10.0
+# Kept equal to pyproject.toml's version (tests/test_helm_chart.py); the
+# default image tag is "v" + appVersion.
+appVersion: "2026.10.0"
+kubeVersion: ">=1.25.0-0"
+annotations:
+  purser/support: experimental

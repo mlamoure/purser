@@ -1,0 +1,56 @@
+---
+title: Purser
+description: AI-native, self-hosted personal finance — a double-entry ledger your agent can operate safely over MCP and REST.
+template: splash
+hero:
+  tagline: The finance backend for the personal agent stack. A correct, auditable, source-traceable ledger — built to be operated by your AI agent.
+  actions:
+    - text: Set up with your AI
+      link: ./tutorials/ai-setup/
+      icon: right-arrow
+    - text: Quickstart
+      link: ./tutorials/quickstart/
+      icon: right-arrow
+      variant: secondary
+    - text: Connect an agent
+      link: ./how-to/connect-an-agent/
+      icon: rocket
+      variant: minimal
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+Purser is set up by your AI agent. Hand it one sentence:
+
+```text
+Set up Purser for me by following https://mlamoure.github.io/purser/tutorials/ai-setup/
+```
+
+The agent follows [Set up Purser with your AI](./tutorials/ai-setup/): it
+installs Purser with Docker, stops at the few steps only you can take, and
+connects itself over MCP. To install by hand, follow the
+[Quickstart](./tutorials/quickstart/).
+
+Found a bug or a security issue? See
+[Reporting bugs and vulnerabilities](./explanation/security/#reporting-bugs-and-vulnerabilities).
+
+<CardGrid stagger>
+  <Card title="Agent-first interfaces" icon="rocket">
+    MCP and REST are the primary interfaces; the web UI is administrative only.
+    Aggregate tools compute financial answers server-side; your agent interprets
+    them. Optional server-side AI supports categorization and review. Start with the [MCP tool catalog](./reference/mcp-tools/).
+  </Card>
+  <Card title="The books cannot be silently wrong" icon="approve-check">
+    Double-entry core behind a flat API. Posted transactions are immutable;
+    corrections are linked reversals. See [the ledger](./explanation/ledger/).
+  </Card>
+  <Card title="Own the raw feed" icon="download">
+    Every bank payload is archived append-only before anything touches it.
+    The ledger is a projection and is re-derivable from source bytes.
+  </Card>
+  <Card title="Trust is a feature list" icon="seti:lock">
+    Scoped tokens, attributable and reversible agent writes, full audit of
+    every mutation and read. Hand an agent your finances and know exactly what
+    it did and what it saw.
+  </Card>
+</CardGrid>

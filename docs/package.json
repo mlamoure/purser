@@ -1,0 +1,29 @@
+{
+  "name": "purser-docs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "predev": "node scripts/sync-openapi.mjs",
+    "dev": "astro dev",
+    "prebuild": "node scripts/sync-openapi.mjs",
+    "build": "astro build",
+    "preview": "astro preview",
+    "sync-openapi": "node scripts/sync-openapi.mjs",
+    "check-site": "node scripts/check-site.mjs",
+    "postbuild": "node scripts/agent-links.mjs && npm run check-site"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.42.0",
+    "astro": "^7.1.0",
+    "sharp": "^0.35.3",
+    "starlight-links-validator": "^0.27.0",
+    "starlight-llms-txt": "^0.12.0",
+    "starlight-md-txt": "^0.1.0",
+    "starlight-openapi": "^0.27.0"
+  },
+  "overrides": {
+    "httpsnippet": {
+      "form-data": "4.0.6"
+    }
+  }
+}

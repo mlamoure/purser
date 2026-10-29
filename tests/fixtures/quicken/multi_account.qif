@@ -1,0 +1,67 @@
+!Account
+NChecking
+TBank
+^
+!Type:Bank
+D1/2'23
+T2500.00
+POpening Balance
+L[Checking]
+^
+D1/15'23
+T-1,200.00
+PLandlord Properties LLC
+MJanuary rent
+LHousing:Rent
+^
+D1/20/2023
+T-85.43
+PSafeway
+LGroceries
+^
+D2/1'23
+T-500.00
+PTransfer to savings
+L[Savings]
+^
+D2/15/2023
+T-1,200.00
+PLandlord Properties LLC
+MFebruary rent
+LHousing:Rent
+^
+D3/1/2024
+T3000.00
+PAcme Corp Payroll
+LSalary
+^
+!Account
+NSavings
+TBank
+^
+!Type:Bank
+D1/2'23
+T1000.00
+POpening Balance
+L[Savings]
+^
+D2/1'23
+T500.00
+PTransfer from checking
+L[Checking]
+^
+D6/15/2024
+T-2,000.00
+PTransfer to checking
+L[Checking]
+^
+!Account
+NChecking
+TBank
+^
+!Type:Bank
+D6/15/2024
+T2,000.00
+PTransfer from savings
+L[Savings]
+^

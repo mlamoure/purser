@@ -1,0 +1,19 @@
+# Extended topology: API + dedicated worker (same image, `purser worker`).
+#   docker compose -f docker-compose.yml -f docker-compose.split.yml up -d
+# The worker owns the scheduler; run exactly one worker replica.
+services:
+  purser:
+    environment:
+      # API-only process: jobs run in the worker below.
+      PURSER_DISABLE_SCHEDULER: "1"
+  worker:
+    build: .
+    image: purser:dev
+    restart: unless-stopped
+    command: ["worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PURSER_DATABASE_URL: postgresql+psycopg://purser:${POSTGRES_PASSWORD:-purser}@postgres:5432/purser
+      PURSER_ENCRYPTION_KEY: ${PURSER_ENCRYPTION_KEY:?generate with 'purser keygen' and record it — see https://mlamoure.github.io/purser/tutorials/ai-setup/}

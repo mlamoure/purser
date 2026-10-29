@@ -1,0 +1,37 @@
+# Retired/renamed feature language that must not appear in docs prose
+# (docs/src/content/docs/). One case-insensitive extended regex per line;
+# '#' and blank lines are ignored. Checked by scripts/check_docs_content.sh
+# in the CI docs job.
+#
+# When a PR retires or renames a user-facing feature, add the term here in
+# the SAME PR (the contributor definition of done).
+
+# Direct-to-Bank pipeline — removed in 0.3.0 (#97)
+direct[ -]to[ -]bank
+bank[ -]skills?
+skill library
+
+# schedule.detected event — replaced by suggestion.created (suggestions
+# inbox, 0.16.0, #233)
+schedule\.detected
+
+# Deprecated one-release schedule wrappers — retired in 0.18 (#347): a
+# suggestion is decided with decide_suggestion / POST /suggestions/{id}/decide,
+# and a paused schedule resumes with end_schedule(action="resume") /
+# POST /schedules/{id}/resume.
+confirm_schedule
+schedules/\{[a-z_]+\}/(activate|reject)
+
+# The propose and commit scopes — replaced by one write scope (#436). Patterns
+# name the scopes, never the propose_rule / propose_memory tools or the
+# create_schedule `propose` argument.
+propose[- ]scop(e|ed)
+commit[- ]scop(e|ed)
+`(propose|commit)`[- ]scop(e|ed)
+read ?\+ ?propose
+propos(al|e)[- ]by[- ]default
+
+# The read:redacted scope — retired by minimal disclosure (#437): what it did
+# (external account identifiers omitted) is the default for every API token.
+read:redacted
+unredacted

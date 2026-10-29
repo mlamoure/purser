@@ -1,0 +1,89 @@
+!Option:AutoSwitch
+!Account
+NChecking
+TBank
+^
+NBrokerage
+TInvst
+^
+!Clear:AutoSwitch
+!Account
+NChecking
+TBank
+^
+!Type:Bank
+D1/2'26
+T2,500.00
+PSynthetic Employer Payroll
+LSalary
+C*
+^
+D1/5'26
+T-500.00
+PTransfer to brokerage
+L[Brokerage]
+C*
+^
+D1/10'26
+T-1,000.00
+PSynthetic Split Payment
+L--Split--
+SHousing:Rent
+$-800.00
+S[Brokerage]
+$-200.00
+C*
+^
+D1/15'26
+T50.00
+PTransfer from brokerage
+L[Brokerage]
+C*
+^
+!Account
+NBrokerage
+TInvst
+^
+!Type:Invst
+D1/5'26
+NXIn
+PTransfer from checking
+T500.00
+L[Checking]
+^
+D1/6'26
+NBuy
+YSYNTHETIC INDEX FUND
+I100.00
+Q4
+T400.00
+^
+D1/8'26
+NDiv
+YSYNTHETIC INDEX FUND
+T12.34
+^
+D1/9'26
+NSell
+YSYNTHETIC INDEX FUND
+I101.00
+Q1
+T101.00
+^
+D1/10'26
+NXIn
+PSplit from checking
+T200.00
+L[Checking]
+^
+D1/12'26
+NShrsIn
+YSYNTHETIC BOND FUND
+Q10
+^
+D1/15'26
+NXOut
+PTransfer to checking
+T50.00
+L[Checking]
+^
