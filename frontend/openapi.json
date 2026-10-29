@@ -8256,7 +8256,7 @@
     },
     "summary": "The finance backend for the personal agent stack.",
     "title": "Purser",
-    "version": "2026.10.0"
+    "version": "2026.10.1"
   },
   "openapi": "3.1.0",
   "paths": {

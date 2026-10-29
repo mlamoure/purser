@@ -21,7 +21,7 @@ MCP tool digests), or register webhooks.
 | `account.retired_rows_purged` | Import rows with no source fetch are removed by creation batch via the guarded `purge-retired-rows` CLI; the payload names the `batches` and counts `transactions_voided` and `transactions_deleted`. |
 | `balance.drift` | A synced account's feed-reported balance disagrees with the ledger (once per drift episode); the payload's `mode` names the basis the delta is measured on, `posted_only` or `pending_inclusive`, and `basis_pinned: true` appears only when that basis is the account's admin-set pin rather than learned. |
 | `bill.late` | An expected transaction (a schedule instance, a manual bill, or an uncleared imported row) passes its date unmatched. |
-| `forecast.shortfall` | A forecast projects an account below zero. |
+| `forecast.shortfall` | The nightly forecast scan (07:15 UTC) projects an account that has a floor (`min_balance`) below that floor within the next 30 days. Accounts without a floor are not scanned, even when projected below zero, and a `forecast_balance` call never emits it. Once per account and first shortfall date: the payload carries `account` (the path), `date` (the first day below the floor), `low` (the 30-day projected minimum) and `min_balance`. |
 | `match.proposed` | The matcher proposes an expected-vs-imported pair. |
 | `match.confirmed` | A match is confirmed. |
 | `pending.vanished` | A pending imported transaction disappears from the feed with no posted successor (none of the same amount on its account within 7 days), and is voided. `whats_new` counts these. |

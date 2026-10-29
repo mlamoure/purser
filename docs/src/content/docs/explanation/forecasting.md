@@ -30,10 +30,17 @@ planning cash.
 
 `forecast_balance(account, days)` (horizon defaults to 30 days) returns the daily
 series, the projected minimum (`low`), and the account floor (`min_balance`, null
-when unset). When the projection crosses that floor, Purser emits a
-`forecast.shortfall` event — so the warning reaches you through the event stream,
-a webhook, or the `whats_new` digest before the account actually runs dry, not
-after.
+when unset; the headline then measures against zero). Calling it only reads: it
+never emits an event.
+
+The warning comes from a nightly scan instead. At 07:15 UTC Purser forecasts the
+next 30 days of every open account that has a floor, and when a projection
+crosses that floor it emits a `forecast.shortfall` event, once per account and
+first shortfall date. The warning reaches you through the event stream, a
+webhook, or the `whats_new` digest before the account actually runs dry, not
+after. An account without a floor is never scanned, so set one on every account
+you want watched: the floor is the `min_balance` field given when the account is
+created (`POST /accounts`).
 
 ## Horizon semantics
 

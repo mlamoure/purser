@@ -8,7 +8,7 @@ description: >-
   forecasts) or record bills/transactions. Bootstraps agent access with a
   read + write token — the agent acts with the user's authority, and can
   request its own access but can never mint or widen it.
-version: 1.6.0
+version: 1.7.0
 ---
 
 # Purser — agent operations skill
@@ -27,11 +27,20 @@ takes an empty Docker host to a running, connected Purser and lists the
 expected output of every check. In short:
 
 1. Check prerequisites on the Docker host: Docker server `linux/amd64` or
-   `linux/arm64` (Apple Silicon), Compose v2, Git, port 8000 free, and no
-   existing `purser-pgdata` volume (an existing database needs its original
-   key — stop and ask).
-2. `git clone https://github.com/mlamoure/purser.git && cd purser`, then
-   `PURSER_ENCRYPTION_KEY=keygen docker compose build purser`.
+   `linux/arm64` (Apple Silicon included), Compose v2, curl, port 8000 free,
+   and no existing `purser-pgdata` volume (an existing database needs its
+   original key — stop and ask). Git is not needed.
+2. Download the release's compose file into a new directory and pull the
+   published image (nothing is built):
+
+   ```bash
+   mkdir purser && cd purser
+   curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.10.1/docker-compose.yml
+   PURSER_ENCRYPTION_KEY=keygen docker compose pull
+   ```
+
+   If `purser` already exists, stop and ask. The URL's tag is the release
+   (`vYYYY.M.PATCH`); the setup page always names the latest one.
 3. Generate the encryption key straight into `.env` without displaying it
    (never overwrite an existing `.env`; if one exists, stop and ask):
 
@@ -50,7 +59,8 @@ expected output of every check. In short:
 Use Docker Compose only: there is no native macOS installer, and Purser is not
 on PyPI, so never install the bare package name `purser`. When the host already
 keeps its Compose stacks in a repository, follow its conventions. Never delete a
-database volume to get past an error.
+database volume to get past an error. Build the image from a source clone only
+when the human asks for it (the setup page's "Build from source instead").
 
 ## 2. Human-required steps (never attempt these yourself)
 

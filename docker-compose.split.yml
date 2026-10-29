@@ -7,8 +7,9 @@ services:
       # API-only process: jobs run in the worker below.
       PURSER_DISABLE_SCHEDULER: "1"
   worker:
+    # The same image as the api service in docker-compose.yml.
+    image: ghcr.io/mlamoure/purser:v2026.10.1
     build: .
-    image: purser:dev
     restart: unless-stopped
     command: ["worker"]
     depends_on:

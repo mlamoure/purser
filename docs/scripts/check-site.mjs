@@ -35,9 +35,27 @@ for (const file of ids.keys()) {
 for (const name of ['llms.txt', 'llms-full.txt', 'llms-small.txt', 'openapi.json', 'pagefind/pagefind.js', 'favicon.svg']) await access(join(root, name));
 if (!(await readFile(join(root, 'llms.txt'), 'utf8')).includes(new URL(prefix, site).href)) failures.push('llms.txt lacks canonical base URL');
 if (!files.some(f => f.endsWith('.md.txt'))) failures.push('no per-page Markdown');
+// Agent surfaces: no relative links left, and every Markdown link into the site
+// names an emitted page (and anchor) — the HTML check above cannot see these
+// (#462). Only link targets are checked: a bare URL in prose or a code block
+// (the setup prompt) names the published site, whatever target this build has.
+const canonical = new URL(prefix, site).href;
 for (const file of files.filter(f => f.endsWith('.md.txt') || /llms.*\.txt$/.test(f))) {
   const text = await readFile(file, 'utf8');
-  if (/\]\((?:\.\.?\/)/.test(text)) failures.push(`${relative(root, file)}: relative agent link`);
+  const name = relative(root, file);
+  if (/\]\((?:\.\.?\/)/.test(text)) failures.push(`${name}: relative agent link`);
+  for (const match of text.matchAll(/\]\((https?:\/\/[^\s)]+)\)/g)) {
+    const value = match[1];
+    if (!value.startsWith(canonical)) {
+      if (value.startsWith(new URL(site).origin + '/')) failures.push(`${name}: outside base: ${value}`);
+      continue;
+    }
+    const target = new URL(value);
+    let path = join(root, decodeURIComponent(target.pathname.slice(prefix.length)));
+    if (target.pathname.endsWith('/')) path = join(path, 'index.html');
+    try { await access(path); } catch { failures.push(`${name}: missing: ${value}`); continue; }
+    if (target.hash && ids.has(path) && !ids.get(path).has(decodeURIComponent(target.hash.slice(1)))) failures.push(`${name}: missing anchor: ${value}`);
+  }
 }
 if (failures.length) throw new Error(failures.slice(0,30).join('\n') + `\n${failures.length} broken links`);
 console.log(`Verified ${ids.size} HTML pages, local assets, anchors, search and agent surfaces at ${new URL(prefix,site)}`);

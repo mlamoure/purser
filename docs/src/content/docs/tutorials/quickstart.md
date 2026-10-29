@@ -10,21 +10,27 @@ connected over MCP.
 [Set up Purser with your AI](../ai-setup/): it runs the same steps and tells
 you exactly when it needs you.
 
-**You need:** Docker with Compose (Linux amd64, or arm64 on an Apple Silicon
-Mac; see [Docker on macOS](../../how-to/macos-uvx/)) and Git; optionally, for
-live bank data, a [SimpleFIN Bridge](https://bridge.simplefin.org/) account.
+**You need:** Docker with Compose on linux/amd64 or linux/arm64 (including an
+Apple Silicon Mac; see [Docker on macOS](../../how-to/macos-uvx/)) and curl;
+optionally, for live bank data, a [SimpleFIN Bridge](https://bridge.simplefin.org/)
+account. You do not need Git, and nothing is built: Compose pulls the published
+image.
 
-## 1. Build and generate the encryption key
+## 1. Download the compose file and generate the encryption key
 
 ```bash
-git clone https://github.com/mlamoure/purser.git
-cd purser
-PURSER_ENCRYPTION_KEY=keygen docker compose build purser
+mkdir purser && cd purser
+curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.10.1/docker-compose.yml
+PURSER_ENCRYPTION_KEY=keygen docker compose pull
 PURSER_ENCRYPTION_KEY=keygen docker compose run --rm --no-deps purser keygen
 ```
 
-The temporary `keygen` value satisfies Compose interpolation for this utility.
-The command generates a key without starting the app or connecting to the database.
+The compose file belongs to the latest release, 2026.10.1, and names its image,
+`ghcr.io/mlamoure/purser:v2026.10.1` (linux/amd64 and linux/arm64). Every
+release publishes its own at the same address under its tag (`vYYYY.M.PATCH`).
+The temporary `keygen` value satisfies Compose interpolation for these utility
+commands. The last one generates a key without starting the app or connecting
+to the database.
 
 Record the generated key in a password manager, separately from your backups.
 Encrypted data, including the archived bank history, is unrecoverable without it.
@@ -32,7 +38,7 @@ Encrypted data, including the archived bank history, is unrecoverable without it
 ## 2. Start the application
 
 ```bash
-export PURSER_ENCRYPTION_KEY="<the generated key>"
+export PURSER_ENCRYPTION_KEY="YOUR_KEY"
 docker compose up -d
 curl http://localhost:8000/healthz
 ```
@@ -67,6 +73,20 @@ everything else:
 
 SimpleFIN setup tokens come from your SimpleFIN Bridge account page and are
 one-time secrets — paste them only into the wizard, never into a chat.
+
+## Build from source
+
+To run code from the repository instead of the published image, clone it and
+build (this needs Git), then continue with the key and step 2 in the clone:
+
+```bash
+git clone https://github.com/mlamoure/purser.git
+cd purser
+PURSER_ENCRYPTION_KEY=keygen docker compose build purser
+```
+
+The local build takes the image name from the compose file and stands in for
+that release's published image until `docker compose pull purser`.
 
 ## Where next
 

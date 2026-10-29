@@ -90,7 +90,11 @@ image you were running and the same key.
 1. Note the image you run now (the exact tag or digest), and keep your key.
 2. Take a backup (see [Back up](#back-up)) and check it restores, ideally into a
    scratch database.
-3. Change the image to the new version and restart. Migrations run
+3. Change the image to the new version and restart. With Docker Compose,
+   download the new release's `docker-compose.yml` (its URL carries the
+   release tag, as in the [Quickstart](../../tutorials/quickstart/)) over the
+   old one in the same directory, keeping `.env`, then run
+   `docker compose pull` and `docker compose up -d`. Migrations run
    automatically at startup. The API (`serve`) and the `worker` may start at the
    same time: they take turns on a database lock, so the migration runs once.
 4. Check the instance as in the restore drill: balances, historical totals and

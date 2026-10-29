@@ -1,10 +1,19 @@
-# Docker Compose: `docker compose up` brings up Purser + Postgres.
+# Docker Compose: `docker compose up -d` brings up Purser + Postgres.
 # Migrations run automatically on startup.
+#
+# This file is all an installation needs: download it from the release tag
+# (https://raw.githubusercontent.com/mlamoure/purser/v2026.10.1/docker-compose.yml)
+# into an empty directory. Compose pulls the published multi-arch image below
+# (linux/amd64 + linux/arm64) the first time it is missing locally; nothing is
+# built. In a clone of the repository, `docker compose build` builds the image
+# from source instead and tags it with the same name, which then takes the
+# place of the published one until `docker compose pull purser` fetches it again.
 
 services:
   purser:
+    # Kept equal to "v" + pyproject.toml's version (tests/test_compose.py).
+    image: ghcr.io/mlamoure/purser:v2026.10.1
     build: .
-    image: purser:dev
     restart: unless-stopped
     depends_on:
       postgres:

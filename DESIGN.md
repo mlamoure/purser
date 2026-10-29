@@ -66,14 +66,17 @@ This document is ground truth for v1.0. Implementation tracking: issue #14.
   never floats.
 - **Topology (default):** two containers — `purser` + `postgres` — via
   `docker compose up`. Release images are built natively for linux/amd64 and
-  linux/arm64 (#426); Apple Silicon verification of the published image is
-  pending. Native macOS installation is not supported. The retained Helm chart
-  is experimental.
+  linux/arm64 (#426); the published arm64 image is verified on Apple Silicon
+  (an Apple M1 with Colima and Docker, 2026-10-28). Native macOS installation is
+  not supported. The retained Helm chart is experimental.
 - **Releases:** calendar versions `YYYY.M.PATCH` with no zero padding (also
   valid semver and PEP 440), starting at 2026.10.0, which follows 0.18.0. One
-  version is carried by `pyproject.toml`, `purser.__version__` and the chart's
-  `appVersion`; the tag is `v<version>` and so is the image tag
-  (`ghcr.io/mlamoure/purser:v<version>`, linux/amd64 + linux/arm64).
+  version is carried by `pyproject.toml`, `purser.__version__`, the chart's
+  `appVersion` and the compose files' image; the tag is `v<version>` and so is
+  the image tag (`ghcr.io/mlamoure/purser:v<version>`, linux/amd64 +
+  linux/arm64). Setup downloads `docker-compose.yml` from the release tag and
+  pulls the image it names; nothing is built on the host (2026.10.1, #427). The
+  file keeps a `build:` section, so a source clone can still build locally.
 - **MCP:** standalone FastMCP 4 (on the official SDK v2), streamable HTTP, served
   from the same process, authenticated with the same scoped tokens as REST
   (decision 58).
@@ -3553,7 +3556,6 @@ issue #112.)*
 ## 14. Open items
 
 - Name diligence: PyPI / Docker namespace / domain checks for "purser"
-- Apple Silicon verification of the published arm64 image (#426); native macOS packaging is retired
 - Same-hash pending→posted edge inherited from SimpleFIN (posted twin dedups,
   pending voids as "vanished" with no replacement)
 - Key-rotation tooling: MultiFernet decrypt-with-old-keys already works
