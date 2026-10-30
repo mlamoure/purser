@@ -197,6 +197,18 @@ decision. A late bill the matcher has proposed a bank row for shows as that
 proposal's match card instead: accept it to mark the bill paid, or reject it
 so that row is never proposed for the bill again.
 
+## Low-balance warnings
+
+To be warned before an account runs low, give it a floor: in the app, **Set
+floor** in the account's register header; over REST, `PATCH /accounts/{id}`
+with `{"min_balance": "500.00"}`; or have your agent call
+`update_account(account, min_balance="500.00")`. Each night Purser projects the
+next 30 days of every account with a floor, schedules included, and emits a
+`forecast.shortfall` event when the projection drops below it. Clear the floor
+(`null`, or `""` in `update_account`) to stop the warnings. See
+[Shortfalls](../../explanation/forecasting/#shortfalls) for the sign rules and
+which account types take a floor.
+
 ## Detected schedules
 
 Purser also proposes schedules it finds for you. Every night (and on `POST

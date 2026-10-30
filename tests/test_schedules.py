@@ -2,7 +2,7 @@
 
 import itertools
 import uuid
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -17,7 +17,15 @@ from purser.core import forecasting as core_forecasting
 
 def _near_term_bymonthday() -> int:
     """A BYMONTHDAY whose next two monthly occurrences always fit the 60-day
-    materialization horizon, regardless of the date the suite runs.
+    materialization horizon, and whose first one falls in the digest's
+    seven-day bills window, regardless of the date or time zone the suite
+    runs in.
+
+    "Today" is the later of the two dates the code under test reads: the
+    schedule materializer anchors on the process-local date
+    (``date.today()``), while ``digest.whats_new`` (and net worth) read the
+    UTC date (#465). The two differ for part of every day outside UTC; the
+    later one keeps the first occurrence on or after both.
 
     Day of (today + 3), clamped to <= 28 so the day exists in every month.
     The first occurrence lands in [today, today+3] (clamping day 29-31 down
@@ -26,7 +34,8 @@ def _near_term_bymonthday() -> int:
     days failed deterministically when run just after the rule day: the
     first occurrence slid ~30 days out and the second past the horizon.
     """
-    return min((date.today() + timedelta(days=3)).day, 28)
+    today = max(date.today(), datetime.now(UTC).date())
+    return min((today + timedelta(days=3)).day, 28)
 
 
 class TestCoreForecasting:

@@ -67,6 +67,9 @@ CONVENTIONS = """\
   name changes; the path never does, so tools, rules and outside
   integrations that refer to the account keep working. The name is also a
   transfer signal in bank text. Categories are renamed in the app.
+  update_account(min_balance="500.00") sets the floor of a cash account or
+  card: the nightly forecast scan emits forecast.shortfall when the next 30
+  days project below it; min_balance="" clears it.
 - Transfers are ONE transaction with two real-account postings. A split loan
   payment (confirm_transfer with remainder_category) keeps both bank legs
   exact and adds one interest/fee category posting for the difference. An

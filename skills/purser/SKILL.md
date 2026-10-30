@@ -8,7 +8,7 @@ description: >-
   forecasts) or record bills/transactions. Bootstraps agent access with a
   read + write token — the agent acts with the user's authority, and can
   request its own access but can never mint or widen it.
-version: 1.7.2
+version: 1.8.0
 ---
 
 # Purser — agent operations skill
@@ -35,7 +35,7 @@ expected output of every check. In short:
 
    ```bash
    mkdir purser && cd purser
-   curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.10.3/docker-compose.yml
+   curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.10.4/docker-compose.yml
    PURSER_ENCRYPTION_KEY=keygen docker compose pull
    ```
 
@@ -129,6 +129,11 @@ An admin-scoped API token can mint tokens; do not give routine agents that scope
 - Aggregate questions (spending, net worth, forecasts, unmatched bills) each
   have a dedicated tool — never page transactions and sum them yourself.
 - Amounts are decimal strings; negative = money out.
+- Low-balance warnings ("warn me if checking goes under $500"): call
+  `update_account(account, min_balance="500.00")` (`write` scope). Purser's
+  nightly scan then emits `forecast.shortfall` when the next 30 days project
+  below it; `min_balance=""` clears it. A card is negative when owed, so
+  "past $4,500 owed" is `"-4500.00"`.
 - Bill emails: parse them client-side and call `create_schedule` /
   `create_transaction` (expected) — Purser never parses email server-side.
 - Card statement emails ("statement balance $8,347.00, payment due Oct 19"):

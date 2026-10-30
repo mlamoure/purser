@@ -39,8 +39,22 @@ crosses that floor it emits a `forecast.shortfall` event, once per account and
 first shortfall date. The warning reaches you through the event stream, a
 webhook, or the `whats_new` digest before the account actually runs dry, not
 after. An account without a floor is never scanned, so set one on every account
-you want watched: the floor is the `min_balance` field given when the account is
-created (`POST /accounts`).
+you want watched.
+
+The floor is the account's `min_balance`, a decimal string in ledger sign. Set
+it when you create the account (`POST /accounts`) or at any time after: the
+**Set floor** control in the account's register header, `PATCH /accounts/{id}`
+with `{"min_balance": "500.00"}`, or the MCP tool
+`update_account(account, min_balance="500.00")`, so an agent can act on "warn
+me if checking goes under $500". Changing it needs the `write` scope, like a
+rename, and is audited as an `account.update` with the old and new floor. The
+next nightly scan uses the new floor. Clearing it (`null` over REST, `""` in
+`update_account`, **Clear** in the app) takes the account out of the scan, so
+its warnings stop. A credit card is negative when owed, so "warn me past
+4,500.00 owed" is a floor of `-4500.00`; zero warns before an overdraft.
+Floors apply to checking, savings, cash and credit-card accounts. Brokerage,
+property and loan forecasts start from a market value or a stated valuation,
+so a floor there is refused (422).
 
 ## Horizon semantics
 

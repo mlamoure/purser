@@ -908,17 +908,25 @@ connection_id to sync every active connection.
 
 ## update_account
 
-Rename, re-describe or hide a real account (write scope); only the
-fields sent change. name is the display name only: the account's path,
-which tools, rules and outside integrations use to find it, never changes,
-so a rename breaks nothing that refers to the account. The name is also
+Rename, re-describe or hide a real account, or set its floor (write
+scope); only the fields sent change. name is the display name only: the
+account's path, which tools, rules and outside integrations use to find
+it, never changes, so a rename breaks nothing that refers to the account. The name is also
 what transfer auto-link looks for in bank text (a row that mentions the
 counterparty account's name is a transfer signal), so a rename changes
 which bank descriptions link to the account. description="" clears it.
 hidden=true hides the account in the app's account list only: it still
 syncs, counts in net worth, and is listed by list_accounts with
-hidden=true. Categories are renamed in the app, not here, and moving an
-account to another path is done in the app too.
+hidden=true. min_balance is the account's floor, a decimal string in
+ledger sign: use it when the user says "warn me if checking goes under
+$500" (min_balance="500.00"). Each night Purser projects the next 30 days
+and emits a forecast.shortfall event when the projection drops below the
+floor; forecast_balance shows it as min_balance. A credit card is
+negative when owed, so "warn me past $4,500 owed" is "-4500.00".
+min_balance="" clears the floor and stops the warnings. Checking,
+savings, cash and credit-card accounts only. Categories are renamed in
+the app, not here, and moving an account to another path is done in the
+app too.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -926,6 +934,7 @@ account to another path is done in the app too.
 | `name` | string \| null | no | `null` |
 | `description` | string \| null | no | `null` |
 | `hidden` | boolean \| null | no | `null` |
+| `min_balance` | string \| null | no | `null` |
 
 ## update_schedule
 

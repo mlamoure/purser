@@ -67,17 +67,17 @@ into it:
 
 ```bash
 mkdir purser && cd purser
-curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.10.3/docker-compose.yml
-grep -c 'image: ghcr.io/mlamoure/purser:v2026.10.3' docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.10.4/docker-compose.yml
+grep -c 'image: ghcr.io/mlamoure/purser:v2026.10.4' docker-compose.yml
 ```
 
 If `mkdir` reports that `purser` already exists, stop and ask the human: it may
 hold an earlier installation and its key. The last command must print `1`.
 Every later command runs in this `purser` directory.
 
-This page installs the latest release, 2026.10.3. Each release has its own
+This page installs the latest release, 2026.10.4. Each release has its own
 compose file at the same address under its own tag (`vYYYY.M.PATCH`), and that
-file names the matching image, here `ghcr.io/mlamoure/purser:v2026.10.3`,
+file names the matching image, here `ghcr.io/mlamoure/purser:v2026.10.4`,
 published for linux/amd64 and linux/arm64.
 
 ## 3. Pull the images

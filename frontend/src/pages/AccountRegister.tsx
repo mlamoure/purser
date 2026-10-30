@@ -680,6 +680,117 @@ function PaidPicker({
   );
 }
 
+// The account types a floor applies to (mirrors the server's FLOOR_TYPES,
+// #466): cash-flow accounts whose forecast projects their postings.
+const FLOOR_TYPES = new Set(["checking", "savings", "cash", "credit_card"]);
+// A decimal string with at most 4 places (NUMERIC(20,4)); the server checks too.
+const FLOOR_PATTERN = /^-?\d{1,16}(\.\d{1,4})?$/;
+
+/** A stored floor ("500.0000") as an editable string ("500.00"), by string
+ * operations only — money never passes through a float (guardrail 1). */
+function floorText(stored: string): string {
+  const m = /^(-?\d+)(?:\.(\d*))?$/.exec(stored.trim());
+  if (!m) return stored;
+  const places = (m[2] ?? "").replace(/0+$/, "").padEnd(2, "0");
+  return `${m[1]}.${places}`;
+}
+
+/** The account's floor (#466): the minimum balance the nightly forecast scan
+ * checks, emitting `forecast.shortfall` when the next 30 days project below
+ * it. Inline editor; Clear sends an explicit null, which ends the warnings. */
+function FloorEditor({
+  account,
+  onSaved,
+  onError,
+}: {
+  account: AccountOut;
+  onSaved: () => void;
+  onError: (message: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  const current = account.min_balance;
+
+  const save = useMutation({
+    mutationFn: async (min_balance: string | null) => {
+      const { error: err } = await api.PATCH("/accounts/{account_id}", {
+        params: { path: { account_id: account.id } },
+        body: { min_balance },
+      });
+      if (err) throw new Error(errorDetail(err));
+    },
+    onSuccess: () => {
+      setEditing(false);
+      onSaved();
+    },
+    onError: (e) => onError(e.message),
+  });
+
+  if (!editing)
+    return (
+      <span className="flex items-center gap-2 text-sm text-muted-foreground">
+        {current != null ? (
+          <>
+            Floor <span className="font-mono">{fmtAmount(current)}</span>
+          </>
+        ) : (
+          "No floor"
+        )}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            setValue(current != null ? floorText(current) : "");
+            setEditing(true);
+          }}
+        >
+          {current != null ? "Edit floor" : "Set floor…"}
+        </Button>
+      </span>
+    );
+
+  const trimmed = value.trim();
+  const valid = FLOOR_PATTERN.test(trimmed);
+  return (
+    <span className="flex flex-wrap items-center gap-2 text-sm">
+      <label className="flex items-center gap-2 text-muted-foreground">
+        Minimum balance
+        <Input
+          aria-label="Minimum balance"
+          className="w-32 font-mono"
+          inputMode="decimal"
+          autoFocus
+          placeholder="500.00"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+        />
+      </label>
+      <Button size="sm" disabled={!valid || save.isPending} onClick={() => save.mutate(trimmed)}>
+        Save
+      </Button>
+      {current != null && (
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={save.isPending}
+          onClick={() => save.mutate(null)}
+        >
+          Clear
+        </Button>
+      )}
+      <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
+        Cancel
+      </Button>
+      <span className="w-full text-xs text-muted-foreground">
+        Purser warns (forecast.shortfall) when the next 30 days project below this.
+        {account.type === "credit_card" &&
+          " A card is negative when owed: -4500.00 warns past 4,500 owed."}
+        {trimmed !== "" && !valid && " Enter an amount such as 500.00."}
+      </span>
+    </span>
+  );
+}
+
 /** Header actions for the account lifecycle (issue #124): inline rename,
  * hide/unhide, an expanding close panel, and reopen — no modal (the repo has
  * no dialog primitive), so the close flow is a Card-styled inline panel. */
@@ -839,6 +950,9 @@ function AccountHeader({ account }: { account: AccountOut | undefined }) {
             <Button size="sm" variant="outline" onClick={() => setClosing((v) => !v)}>
               Close…
             </Button>
+            {FLOOR_TYPES.has(account.type) && (
+              <FloorEditor account={account} onSaved={invalidate} onError={setError} />
+            )}
             {account.type === "brokerage" && isAdmin && (
               <label className="flex items-center gap-2 text-sm text-muted-foreground">
                 Holdings

@@ -38,12 +38,13 @@ export interface paths {
         head?: never;
         /**
          * Update Account
-         * @description Rename / re-describe / hide / move a real account.
+         * @description Rename / re-describe / hide / move a real account, or set its floor.
          *
-         *     A new ``path`` moves the account and every account beneath it, keeping
-         *     their relative paths; the move is audited (`account.move`) and emits
-         *     `account.moved`. Balances and history are unaffected: transactions point
-         *     at accounts by id.
+         *     ``min_balance`` sets (or, with null, clears) the floor the nightly
+         *     forecast scan checks; the next scan uses it. A new ``path`` moves the
+         *     account and every account beneath it, keeping their relative paths; the
+         *     move is audited (`account.move`) and emits `account.moved`. Balances and
+         *     history are unaffected: transactions point at accounts by id.
          */
         patch: operations["update_account_accounts__account_id__patch"];
         trace?: never;
@@ -2189,7 +2190,10 @@ export interface components {
             description?: string | null;
             /** External Id */
             external_id?: string | null;
-            /** Min Balance */
+            /**
+             * Min Balance
+             * @description The account's floor, in ledger sign: the nightly forecast scan emits `forecast.shortfall` when the 30-day projection drops below it (e.g. `500.00` to be warned before checking goes under $500; a credit card, negative when owed, takes a negative floor such as `-4500.00`). Checking, savings, cash and credit-card accounts only (422 otherwise); at most 4 decimal places.
+             */
             min_balance?: number | string | null;
             /** Name */
             name: string;
@@ -2290,6 +2294,8 @@ export interface components {
          *     ``drift_basis_override`` (§7.3, decision 83) is admin-only as well, with
          *     ``feed_start``'s explicit-null-clears rule. ``holdings_source`` (§8,
          *     decision 88) is admin-only too; absent/None leaves it unchanged.
+         *     ``min_balance`` (§3.4, #466) is write scope, with the explicit-null-clears
+         *     rule.
          */
         AccountUpdate: {
             /** Description */
@@ -2310,6 +2316,11 @@ export interface components {
              * @description Where this brokerage account's holdings come from: `feed` (the SimpleFIN snapshots) or `manual` (positions recorded by hand, priced daily, and projected into the same snapshots). Switching to `manual` keeps every feed snapshot as history; the first manual snapshot is dated the day after the last feed one. Switching back to `feed` needs a feed mapping (422 without one) and changes no snapshot: the hand-tracked holdings stay in effect until the first sync after the switch, which ends them from its own date (a position the feed does not report ends there); positions stay, read-only. Admin scope; brokerage accounts only (422 otherwise).
              */
             holdings_source?: ("feed" | "manual") | null;
+            /**
+             * Min Balance
+             * @description The account's floor, in ledger sign: the nightly forecast scan emits `forecast.shortfall` when the 30-day projection drops below it (e.g. `500.00` to be warned before checking goes under $500; a credit card, negative when owed, takes a negative floor such as `-4500.00`). Checking, savings, cash and credit-card accounts only (422 otherwise); at most 4 decimal places. An explicit null clears the floor, and the account leaves the shortfall scan; absent leaves it unchanged. Write scope.
+             */
+            min_balance?: number | string | null;
             /** Name */
             name?: string | null;
             /**

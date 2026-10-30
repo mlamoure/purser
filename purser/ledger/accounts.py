@@ -22,6 +22,39 @@ from purser.models import Account, LtreeType, Posting, Schedule, Suggestion
 
 REAL_TYPES = {"checking", "savings", "cash", "credit_card", "brokerage", "property", "loan"}
 CATEGORY_TYPES = {"category_expense", "category_income"}
+# The account types a floor (`min_balance`, the forecast.shortfall threshold)
+# applies to: cash-flow accounts whose forecast is their postings projected
+# forward (§6). Brokerage, property and loan forecasts open from a market
+# value or a stated valuation that moves on its own, and categories have no
+# forecast, so a floor there is refused rather than stored and never useful
+# (#466).
+FLOOR_TYPES = frozenset({"checking", "savings", "cash", "credit_card"})
+_MONEY_DIGITS = 20  # NUMERIC(20,4)
+_MONEY_PLACES = 4
+
+
+def check_min_balance(account_type: str, value: Decimal | None) -> None:
+    """Validate a floor for an account of ``account_type`` (create and update
+    share it, #466). None (no floor, or clearing one) is always valid. A
+    value must be a finite decimal that fits NUMERIC(20,4); any sign is
+    allowed — 0 warns before overdraft, a negative floor suits a credit card
+    (ledger sign: negative when owed) or an overdraft line."""
+    if value is None:
+        return
+    if not value.is_finite():
+        raise LedgerError("min_balance must be a finite decimal amount")
+    exponent = value.as_tuple().exponent
+    places = -exponent if isinstance(exponent, int) and exponent < 0 else 0
+    if places > _MONEY_PLACES:
+        raise LedgerError(f"min_balance allows at most {_MONEY_PLACES} decimal places")
+    integer_digits = len(value.as_tuple().digits) - places
+    if integer_digits > _MONEY_DIGITS - _MONEY_PLACES:
+        raise LedgerError("min_balance is too large")
+    if account_type not in FLOOR_TYPES:
+        raise LedgerError(
+            f"min_balance applies only to {', '.join(sorted(FLOOR_TYPES))} accounts, "
+            f"not {account_type}"
+        )
 
 
 def get_account(session: Session, account_id: uuid.UUID) -> Account:
@@ -73,6 +106,7 @@ def create_account(
     virtual = type_ in CATEGORY_TYPES if is_virtual is None else is_virtual
     if virtual != (type_ in CATEGORY_TYPES):
         raise LedgerError("is_virtual must match the account type (categories are virtual)")
+    check_min_balance(type_, min_balance)
 
     if path is None:
         try:
@@ -110,9 +144,20 @@ def create_account(
         action="account.create",
         entity_type="account",
         entity_id=account.id,
-        after={"name": name, "type": type_, "path": path},
+        after={
+            "name": name,
+            "type": type_,
+            "path": path,
+            "min_balance": _money(min_balance),
+        },
     )
     return account
+
+
+def _money(value: Decimal | None) -> str | None:
+    """An audited amount as a NUMERIC(20,4) decimal string (guardrail 1), so
+    before and after read alike; null when unset."""
+    return str(value.quantize(Decimal("0.0001"))) if value is not None else None
 
 
 def update_category(
@@ -159,6 +204,8 @@ def update_account(
     drift_basis_override: str | None = None,
     drift_basis_override_set: bool = False,
     holdings_source: str | None = None,
+    min_balance: Decimal | None = None,
+    min_balance_set: bool = False,
     path: str | None = None,
     actor_token_id: uuid.UUID | None,
 ) -> Account:
@@ -176,10 +223,15 @@ def update_account(
     brokerage account between feed and manual holdings, through
     ``holdings.service.switch_source``; what the switch did joins the audit
     row. ``path`` moves the account and its subtree (``move_account``,
-    decision 72); None = unchanged."""
+    decision 72); None = unchanged. ``min_balance`` (§3.4, #466), the floor
+    the nightly forecast.shortfall scan checks, applies only when
+    ``min_balance_set`` (None clears it, like ``feed_start``) and passes
+    ``check_min_balance``."""
     account = get_account(session, account_id)
     if account.is_virtual:
         raise LedgerError(f"{account.path} is a category; use PATCH /categories")
+    if min_balance_set:
+        check_min_balance(account.type, min_balance)
     if holdings_source is not None:
         # Function-local: purser.holdings imports the ledger package.
         from purser.holdings import projection as holdings_projection
@@ -212,6 +264,7 @@ def update_account(
         "feed_invert": account.feed_invert,
         "drift_basis_override": account.drift_basis_override,
         "holdings_source": account.holdings_source,
+        "min_balance": _money(account.min_balance),
     }
     if name is not None:
         account.name = name
@@ -229,6 +282,8 @@ def update_account(
         account.feed_invert = feed_invert
     if drift_basis_override_set:
         account.drift_basis_override = drift_basis_override
+    if min_balance_set:
+        account.min_balance = min_balance
     session.flush()
     switched: dict[str, Any] = {}
     if holdings_source is not None:
@@ -250,6 +305,7 @@ def update_account(
             "feed_invert": account.feed_invert,
             "drift_basis_override": account.drift_basis_override,
             "holdings_source": account.holdings_source,
+            "min_balance": _money(account.min_balance),
             **switched,
         },
     )

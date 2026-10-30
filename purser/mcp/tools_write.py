@@ -507,27 +507,44 @@ async def update_account(
     name: str | None = None,
     description: str | None = None,
     hidden: bool | None = None,
+    min_balance: str | None = None,
 ) -> dict[str, Any]:
-    """Rename, re-describe or hide a real account (write scope); only the
-    fields sent change. name is the display name only: the account's path,
-    which tools, rules and outside integrations use to find it, never changes,
-    so a rename breaks nothing that refers to the account. The name is also
+    """Rename, re-describe or hide a real account, or set its floor (write
+    scope); only the fields sent change. name is the display name only: the
+    account's path, which tools, rules and outside integrations use to find
+    it, never changes, so a rename breaks nothing that refers to the account. The name is also
     what transfer auto-link looks for in bank text (a row that mentions the
     counterparty account's name is a transfer signal), so a rename changes
     which bank descriptions link to the account. description="" clears it.
     hidden=true hides the account in the app's account list only: it still
     syncs, counts in net worth, and is listed by list_accounts with
-    hidden=true. Categories are renamed in the app, not here, and moving an
-    account to another path is done in the app too."""
+    hidden=true. min_balance is the account's floor, a decimal string in
+    ledger sign: use it when the user says "warn me if checking goes under
+    $500" (min_balance="500.00"). Each night Purser projects the next 30 days
+    and emits a forecast.shortfall event when the projection drops below the
+    floor; forecast_balance shows it as min_balance. A credit card is
+    negative when owed, so "warn me past $4,500 owed" is "-4500.00".
+    min_balance="" clears the floor and stops the warnings. Checking,
+    savings, cash and credit-card accounts only. Categories are renamed in
+    the app, not here, and moving an account to another path is done in the
+    app too."""
 
     def op(session: Session) -> dict[str, Any]:
         from purser import ledger as ledger_service
 
         principal = _principal()
-        if name is None and description is None and hidden is None:
-            raise ValueError("nothing to change: pass name, description or hidden")
+        if name is None and description is None and hidden is None and min_balance is None:
+            raise ValueError("nothing to change: pass name, description, hidden or min_balance")
         if name is not None and not name.strip():
             raise ValueError("name must not be empty")
+        floor: Decimal | None = None
+        if min_balance is not None and min_balance.strip():
+            try:
+                floor = Decimal(min_balance.strip())
+            except InvalidOperation as exc:
+                raise ValueError(
+                    'min_balance must be a decimal string such as "500.00", or "" to clear it'
+                ) from exc
         target = ledger_service.resolve_account(session, account)
         if target.is_virtual:
             raise ledger_service.LedgerError(
@@ -539,6 +556,8 @@ async def update_account(
             name=name.strip() if name is not None else None,
             description=description,
             hidden=hidden,
+            min_balance=floor,
+            min_balance_set=min_balance is not None,
             actor_token_id=principal.token_id,
         )
         return {
@@ -546,6 +565,7 @@ async def update_account(
             "path": updated.path,
             "name": updated.name,
             "hidden": updated.hidden_at is not None,
+            "min_balance": _amount(updated.min_balance),
         }
 
     return await _run(op)

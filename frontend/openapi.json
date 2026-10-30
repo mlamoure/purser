@@ -44,6 +44,7 @@
                 "type": "null"
               }
             ],
+            "description": "The account's floor, in ledger sign: the nightly forecast scan emits `forecast.shortfall` when the 30-day projection drops below it (e.g. `500.00` to be warned before checking goes under $500; a credit card, negative when owed, takes a negative floor such as `-4500.00`). Checking, savings, cash and credit-card accounts only (422 otherwise); at most 4 decimal places.",
             "title": "Min Balance"
           },
           "name": {
@@ -351,7 +352,7 @@
         "type": "object"
       },
       "AccountUpdate": {
-        "description": "Rename / re-describe / hide / move a real account (DESIGN \u00a73.4).\n``hidden`` toggles the display-only ``hidden_at`` timestamp; ``path``\nmoves the account and everything beneath it (decision 72).\n\n``feed_start`` (\u00a77.1, decision 40) is admin-only: explicit null clears,\nabsent leaves unchanged (model_fields_set distinguishes the two).\n``feed_invert`` (\u00a77.1, decision 43) is admin-only feed configuration\ntoo; a plain bool, so absent/None simply leaves it unchanged.\n``drift_basis_override`` (\u00a77.3, decision 83) is admin-only as well, with\n``feed_start``'s explicit-null-clears rule. ``holdings_source`` (\u00a78,\ndecision 88) is admin-only too; absent/None leaves it unchanged.",
+        "description": "Rename / re-describe / hide / move a real account (DESIGN \u00a73.4).\n``hidden`` toggles the display-only ``hidden_at`` timestamp; ``path``\nmoves the account and everything beneath it (decision 72).\n\n``feed_start`` (\u00a77.1, decision 40) is admin-only: explicit null clears,\nabsent leaves unchanged (model_fields_set distinguishes the two).\n``feed_invert`` (\u00a77.1, decision 43) is admin-only feed configuration\ntoo; a plain bool, so absent/None simply leaves it unchanged.\n``drift_basis_override`` (\u00a77.3, decision 83) is admin-only as well, with\n``feed_start``'s explicit-null-clears rule. ``holdings_source`` (\u00a78,\ndecision 88) is admin-only too; absent/None leaves it unchanged.\n``min_balance`` (\u00a73.4, #466) is write scope, with the explicit-null-clears\nrule.",
         "properties": {
           "description": {
             "anyOf": [
@@ -429,6 +430,21 @@
             ],
             "description": "Where this brokerage account's holdings come from: `feed` (the SimpleFIN snapshots) or `manual` (positions recorded by hand, priced daily, and projected into the same snapshots). Switching to `manual` keeps every feed snapshot as history; the first manual snapshot is dated the day after the last feed one. Switching back to `feed` needs a feed mapping (422 without one) and changes no snapshot: the hand-tracked holdings stay in effect until the first sync after the switch, which ends them from its own date (a position the feed does not report ends there); positions stay, read-only. Admin scope; brokerage accounts only (422 otherwise).",
             "title": "Holdings Source"
+          },
+          "min_balance": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The account's floor, in ledger sign: the nightly forecast scan emits `forecast.shortfall` when the 30-day projection drops below it (e.g. `500.00` to be warned before checking goes under $500; a credit card, negative when owed, takes a negative floor such as `-4500.00`). Checking, savings, cash and credit-card accounts only (422 otherwise); at most 4 decimal places. An explicit null clears the floor, and the account leaves the shortfall scan; absent leaves it unchanged. Write scope.",
+            "title": "Min Balance"
           },
           "name": {
             "anyOf": [
@@ -8256,7 +8272,7 @@
     },
     "summary": "The finance backend for the personal agent stack.",
     "title": "Purser",
-    "version": "2026.10.3"
+    "version": "2026.10.4"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -8419,7 +8435,7 @@
         ]
       },
       "patch": {
-        "description": "Rename / re-describe / hide / move a real account.\n\nA new ``path`` moves the account and every account beneath it, keeping\ntheir relative paths; the move is audited (`account.move`) and emits\n`account.moved`. Balances and history are unaffected: transactions point\nat accounts by id.",
+        "description": "Rename / re-describe / hide / move a real account, or set its floor.\n\n``min_balance`` sets (or, with null, clears) the floor the nightly\nforecast scan checks; the next scan uses it. A new ``path`` moves the\naccount and every account beneath it, keeping their relative paths; the\nmove is audited (`account.move`) and emits `account.moved`. Balances and\nhistory are unaffected: transactions point at accounts by id.",
         "operationId": "update_account_accounts__account_id__patch",
         "parameters": [
           {

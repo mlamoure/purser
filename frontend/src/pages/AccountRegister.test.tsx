@@ -2,7 +2,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import { Route, Routes } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import type { components } from "../api/schema";
-import { apiMock, mockApi, ok } from "../test/api";
+import { apiMock, fail, mockApi, ok } from "../test/api";
 import { meQuery } from "../lib/me";
 import { accountOut } from "../test/fixtures";
 import { renderWithProviders } from "../test/render";
@@ -211,5 +211,85 @@ describe("AccountRegister manual holdings (#390)", () => {
     render(false);
     expect(await screen.findByPlaceholderText("Search description…")).toBeInTheDocument();
     expect(screen.queryByLabelText("Holdings source")).not.toBeInTheDocument();
+  });
+});
+
+describe("AccountRegister minimum balance (#466)", () => {
+  const registerRoutes = (account: ReturnType<typeof accountOut>, patch = ok(account)) =>
+    mockApi({
+      "GET /accounts/{account_id}": ok(account),
+      "GET /transactions": ok({ items: [], total: 0, limit: 50, offset: 0 }),
+      "GET /matching/transfer-candidates": ok([]),
+      "GET /matching/proposed": ok([]),
+      "PATCH /accounts/{account_id}": patch,
+    });
+
+  const render = () =>
+    renderWithProviders(
+      <Routes>
+        <Route path="/accounts/:accountId" element={<AccountRegister />} />
+      </Routes>,
+      { route: "/accounts/a-1" },
+    );
+
+  it("sets a floor on an account without one, as a decimal string", async () => {
+    registerRoutes(accountOut());
+    const { user } = render();
+    expect(await screen.findByText("No floor")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Set floor…" }));
+    await user.type(screen.getByLabelText("Minimum balance"), "500.00");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(apiMock.PATCH).toHaveBeenCalledWith("/accounts/{account_id}", {
+        params: { path: { account_id: "a-1" } },
+        body: { min_balance: "500.00" },
+      }),
+    );
+  });
+
+  it("prefills the stored floor and clears it with an explicit null", async () => {
+    registerRoutes(accountOut({ min_balance: "500.0000" }));
+    const { user } = render();
+    await user.click(await screen.findByRole("button", { name: "Edit floor" }));
+    expect(screen.getByLabelText("Minimum balance")).toHaveValue("500.00");
+    await user.click(screen.getByRole("button", { name: "Clear" }));
+    await waitFor(() =>
+      expect(apiMock.PATCH).toHaveBeenCalledWith("/accounts/{account_id}", {
+        params: { path: { account_id: "a-1" } },
+        body: { min_balance: null },
+      }),
+    );
+  });
+
+  it("keeps Save disabled for a value that is not an amount", async () => {
+    registerRoutes(accountOut({ type: "credit_card", path: "liabilities.card" }));
+    const { user } = render();
+    await user.click(await screen.findByRole("button", { name: "Set floor…" }));
+    const input = screen.getByLabelText("Minimum balance");
+    await user.type(input, "five hundred");
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(screen.getByText(/Enter an amount such as 500.00/)).toBeInTheDocument();
+    expect(screen.getByText(/A card is negative when owed/)).toBeInTheDocument();
+    await user.clear(input);
+    await user.type(input, "-4500.12345");
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(apiMock.PATCH).not.toHaveBeenCalled();
+  });
+
+  it("offers no floor on an account type it does not apply to", async () => {
+    registerRoutes(accountOut({ type: "loan", path: "liabilities.mortgage" }));
+    render();
+    expect(await screen.findByPlaceholderText("Search description…")).toBeInTheDocument();
+    expect(screen.queryByText("No floor")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /floor/ })).not.toBeInTheDocument();
+  });
+
+  it("shows the server's refusal", async () => {
+    registerRoutes(accountOut(), fail(422, "min_balance is too large"));
+    const { user } = render();
+    await user.click(await screen.findByRole("button", { name: "Set floor…" }));
+    await user.type(screen.getByLabelText("Minimum balance"), "500");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText("min_balance is too large")).toBeInTheDocument();
   });
 });

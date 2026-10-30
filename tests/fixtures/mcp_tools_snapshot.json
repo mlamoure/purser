@@ -1942,7 +1942,7 @@
   },
   {
     "name": "update_account",
-    "description": "Rename, re-describe or hide a real account (write scope); only the\nfields sent change. name is the display name only: the account's path,\nwhich tools, rules and outside integrations use to find it, never changes,\nso a rename breaks nothing that refers to the account. The name is also\nwhat transfer auto-link looks for in bank text (a row that mentions the\ncounterparty account's name is a transfer signal), so a rename changes\nwhich bank descriptions link to the account. description=\"\" clears it.\nhidden=true hides the account in the app's account list only: it still\nsyncs, counts in net worth, and is listed by list_accounts with\nhidden=true. Categories are renamed in the app, not here, and moving an\naccount to another path is done in the app too.",
+    "description": "Rename, re-describe or hide a real account, or set its floor (write\nscope); only the fields sent change. name is the display name only: the\naccount's path, which tools, rules and outside integrations use to find\nit, never changes, so a rename breaks nothing that refers to the account. The name is also\nwhat transfer auto-link looks for in bank text (a row that mentions the\ncounterparty account's name is a transfer signal), so a rename changes\nwhich bank descriptions link to the account. description=\"\" clears it.\nhidden=true hides the account in the app's account list only: it still\nsyncs, counts in net worth, and is listed by list_accounts with\nhidden=true. min_balance is the account's floor, a decimal string in\nledger sign: use it when the user says \"warn me if checking goes under\n$500\" (min_balance=\"500.00\"). Each night Purser projects the next 30 days\nand emits a forecast.shortfall event when the projection drops below the\nfloor; forecast_balance shows it as min_balance. A credit card is\nnegative when owed, so \"warn me past $4,500 owed\" is \"-4500.00\".\nmin_balance=\"\" clears the floor and stops the warnings. Checking,\nsavings, cash and credit-card accounts only. Categories are renamed in\nthe app, not here, and moving an account to another path is done in the\napp too.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1975,6 +1975,17 @@
           "anyOf": [
             {
               "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "min_balance": {
+          "anyOf": [
+            {
+              "type": "string"
             },
             {
               "type": "null"

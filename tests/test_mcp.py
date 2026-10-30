@@ -631,6 +631,7 @@ class TestMcpServer:
             "path": "assets.checking",
             "name": "Everyday Checking",
             "hidden": True,
+            "min_balance": None,
         }
         (listed,) = [a for a in listing["result"] if a["id"] == account["id"]]
         assert (listed["path"], listed["name"], listed["hidden"]) == (
@@ -679,14 +680,72 @@ class TestMcpServer:
         assert client.get("/audit", params={"action": "account.update"}).json()["items"] == []
 
     def test_update_account_requires_write_scope(
-        self, seeded_tokens: dict[str, str], live_server: LiveServer
+        self, seeded_tokens: dict[str, str], live_server: LiveServer, client: TestClient
     ) -> None:
-        args = {"account": "assets.checking", "name": "Renamed"}
-        for profile in ("reader",):
-            (denied,) = _mcp_call(
-                live_server.url, seeded_tokens[profile], [("update_account", args)]
-            )
-            assert "error" in denied and "requires scope: write" in denied["error"], denied
+        for args in (
+            {"account": "assets.checking", "name": "Renamed"},
+            {"account": "assets.checking", "min_balance": "500.00"},
+        ):
+            for profile in ("reader",):
+                (denied,) = _mcp_call(
+                    live_server.url, seeded_tokens[profile], [("update_account", args)]
+                )
+                assert "error" in denied and "requires scope: write" in denied["error"], denied
+        (checking,) = [a for a in client.get("/accounts").json() if a["path"] == "assets.checking"]
+        assert (checking["name"], checking["min_balance"]) == ("Checking", None)
+
+    def test_update_account_sets_and_clears_the_floor(
+        self, seeded_tokens: dict[str, str], live_server: LiveServer, client: TestClient
+    ) -> None:
+        """#466: "warn me if checking goes under $500" is min_balance="500.00"
+        with write scope; "" clears it. Both are audited account.update rows
+        with min_balance before and after; the floor shows in forecast_balance."""
+        set_floor, forecast, cleared = _mcp_call(
+            live_server.url,
+            seeded_tokens["operator"],
+            [
+                ("update_account", {"account": "assets.checking", "min_balance": "500.00"}),
+                ("forecast_balance", {"account": "assets.checking", "days": 30}),
+                ("update_account", {"account": "assets.checking", "min_balance": ""}),
+            ],
+        )
+        assert set_floor["min_balance"] == "500.00", set_floor
+        assert set_floor["name"] == "Checking"  # only the field sent changes
+        assert Decimal(forecast["min_balance"]) == Decimal("500.00"), forecast
+        assert cleared["min_balance"] is None, cleared
+        (checking,) = [a for a in client.get("/accounts").json() if a["path"] == "assets.checking"]
+        assert checking["min_balance"] is None
+        changes = client.get("/audit", params={"action": "account.update"}).json()["items"]
+        floors = {
+            (c["before_after"]["before"]["min_balance"], c["before_after"]["after"]["min_balance"])
+            for c in changes
+        }
+        assert floors == {(None, "500.0000"), ("500.0000", None)}
+
+    def test_update_account_floor_refusals(
+        self, seeded_tokens: dict[str, str], live_server: LiveServer, client: TestClient
+    ) -> None:
+        """A floor that is not a decimal, has too many places, or sits on an
+        account type it does not apply to is refused, and nothing is written."""
+        client.post(
+            "/accounts",
+            json={"name": "Mortgage", "type": "loan", "path": "liabilities.mortgage"},
+        )
+        refusals = _mcp_call(
+            live_server.url,
+            seeded_tokens["operator"],
+            [
+                ("update_account", {"account": "assets.checking", "min_balance": "lots"}),
+                ("update_account", {"account": "assets.checking", "min_balance": "1.23456"}),
+                ("update_account", {"account": "liabilities.mortgage", "min_balance": "0"}),
+            ],
+        )
+        word, places, loan = (r.get("error", "") for r in refusals)
+        assert "decimal string" in word, refusals[0]
+        assert "4 decimal places" in places, refusals[1]
+        assert "applies only to" in loan, refusals[2]
+        assert all(a["min_balance"] is None for a in client.get("/accounts").json())
+        assert client.get("/audit", params={"action": "account.update"}).json()["items"] == []
 
     def test_bracket_category_converts_to_transfer(
         self, seeded_tokens: dict[str, str], live_server: LiveServer, client: TestClient

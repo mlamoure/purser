@@ -164,6 +164,15 @@ class AccountOut(BaseModel):
         )
 
 
+_MIN_BALANCE_HELP = (
+    "The account's floor, in ledger sign: the nightly forecast scan emits "
+    "`forecast.shortfall` when the 30-day projection drops below it (e.g. `500.00` "
+    "to be warned before checking goes under $500; a credit card, negative when "
+    "owed, takes a negative floor such as `-4500.00`). Checking, savings, cash and "
+    "credit-card accounts only (422 otherwise); at most 4 decimal places."
+)
+
+
 class AccountCreate(BaseModel):
     name: str
     type: str
@@ -171,7 +180,12 @@ class AccountCreate(BaseModel):
     path: str | None = None
     currency: str = Field(default="USD", min_length=3, max_length=3)
     external_id: str | None = None
-    min_balance: Decimal | None = Field(default=None, decimal_places=4, max_digits=20)
+    min_balance: Decimal | None = Field(
+        default=None,
+        decimal_places=4,
+        max_digits=20,
+        description=_MIN_BALANCE_HELP,
+    )
     description: str | None = None
 
 
@@ -194,7 +208,9 @@ class AccountUpdate(BaseModel):
     too; a plain bool, so absent/None simply leaves it unchanged.
     ``drift_basis_override`` (§7.3, decision 83) is admin-only as well, with
     ``feed_start``'s explicit-null-clears rule. ``holdings_source`` (§8,
-    decision 88) is admin-only too; absent/None leaves it unchanged."""
+    decision 88) is admin-only too; absent/None leaves it unchanged.
+    ``min_balance`` (§3.4, #466) is write scope, with the explicit-null-clears
+    rule."""
 
     name: str | None = Field(default=None, min_length=1)
     description: str | None = None
@@ -220,6 +236,13 @@ class AccountUpdate(BaseModel):
         "switch, which ends them from its own date (a position the feed does not report ends "
         "there); positions stay, read-only. Admin scope; brokerage accounts only (422 "
         "otherwise).",
+    )
+    min_balance: Decimal | None = Field(
+        default=None,
+        decimal_places=4,
+        max_digits=20,
+        description=_MIN_BALANCE_HELP + " An explicit null clears the floor, and the "
+        "account leaves the shortfall scan; absent leaves it unchanged. Write scope.",
     )
     path: str | None = Field(
         default=None,
@@ -514,12 +537,13 @@ def update_account(
     session: DbSession,
     background_tasks: BackgroundTasks,
 ) -> AccountOut:
-    """Rename / re-describe / hide / move a real account.
+    """Rename / re-describe / hide / move a real account, or set its floor.
 
-    A new ``path`` moves the account and every account beneath it, keeping
-    their relative paths; the move is audited (`account.move`) and emits
-    `account.moved`. Balances and history are unaffected: transactions point
-    at accounts by id."""
+    ``min_balance`` sets (or, with null, clears) the floor the nightly
+    forecast scan checks; the next scan uses it. A new ``path`` moves the
+    account and every account beneath it, keeping their relative paths; the
+    move is audited (`account.move`) and emits `account.moved`. Balances and
+    history are unaffected: transactions point at accounts by id."""
     # feed_start/feed_invert/drift_basis_override/holdings_source are feed
     # configuration — admin, like connect/discovered/map (§7.1); rename/
     # describe/hide stay write-scope. Field-conditional check because they
@@ -529,6 +553,7 @@ def update_account(
     feed_invert_set = "feed_invert" in body.model_fields_set
     drift_basis_set = "drift_basis_override" in body.model_fields_set
     holdings_source_set = "holdings_source" in body.model_fields_set
+    min_balance_set = "min_balance" in body.model_fields_set
     if (
         feed_start_set or feed_invert_set or drift_basis_set or holdings_source_set
     ) and not security.is_admin(token.scopes):
@@ -546,6 +571,8 @@ def update_account(
             drift_basis_override=body.drift_basis_override,
             drift_basis_override_set=drift_basis_set,
             holdings_source=body.holdings_source,
+            min_balance=body.min_balance,
+            min_balance_set=min_balance_set,
             path=body.path,
             actor_token_id=token.id,
         )

@@ -1028,11 +1028,12 @@ import now and #245's multi-posting templates later.
 
 Real accounts (never categories — the `accounts_virtual_lifecycle_null` CHECK
 enforces it) carry two nullable timestamps, `hidden_at` and `closed_at`, and
-five operations. Only **Move** changes a path, and never a category's (§3.2).
+five operations, plus one setting, the **floor**. Only **Move** changes a
+path, and never a category's (§3.2).
 
 - **Rename** — `PATCH /accounts/{id}` edits `name` / `description`; MCP
   `update_account` (write scope, issue #353) edits `name` / `description` /
-  `hidden` and nothing else. It takes **no `path`**: outside integrations
+  `hidden` and the floor (`min_balance`, below) and nothing else. It takes **no `path`**: outside integrations
   (the card tracker among them) map accounts by path, so a move stays a
   deliberate REST/UI act, never a side effect of an agent rename; categories
   are refused there (they rename in the app, §3.2). The name is display
@@ -1040,6 +1041,18 @@ five operations. Only **Move** changes a path, and never a category's (§3.2).
   the counterparty account's name in bank text (§5, decision 28), as does
   the new-liability scan (§6) — so a rename changes which bank descriptions
   signal a transfer to the account. Audited `account.update`.
+- **Floor** (issue #466, decision 96) — `accounts.min_balance`, the
+  threshold the nightly shortfall scan checks (§6), is set at creation or
+  later: `PATCH /accounts/{id}` `min_balance` (explicit null clears, absent
+  leaves it unchanged), MCP `update_account(min_balance=…)` (`""` clears), and
+  the register header. Write scope, like rename: it governs warnings only.
+  One validator (`ledger.check_min_balance`) serves create and update: a
+  finite decimal fitting NUMERIC(20,4), any sign (ledger sign — a card's floor
+  is negative), and only on `checking` / `savings` / `cash` / `credit_card`
+  (422 elsewhere; clearing is always allowed). Audited `account.update` with
+  `min_balance` in before/after; undone, like every account edit, by a PATCH
+  back to the audited `before`. The next scan reads the new value; a cleared
+  floor leaves the scan.
 - **Move** (issue #284, decision 72) — `PATCH /accounts/{id}` with `path`
   re-roots the account and its whole subtree: every descendant keeps its path
   relative to it, and the account's `parent_id` becomes the account at the
@@ -1937,7 +1950,8 @@ Expected transactions reconcile against imported posted/pending reality.
   `matches_pending_net` (present only when nonzero), and named in the
   headline; a rejected proposal brings the instance back on the next read.
   **Deterministic only** in v1. Crossing `accounts.min_balance` emits
-  `forecast.shortfall`.
+  `forecast.shortfall` (nightly, 30 days, accounts with a floor only; the
+  floor is editable, §3.4).
 
 ## 7. Feed layer
 
@@ -3213,7 +3227,8 @@ write scope, decision 73) · `record_position` ("I hold N shares as of D" on a
 manually tracked brokerage account; opens the position when needed; commit
 scope, decision 88) / `record_price` (a manual close of a symbol on a date;
 write scope, decision 89) · `update_account` (rename / re-describe / hide a
-real account; no `path`, categories refused, write scope, §3.4, issue #353)
+real account or set its floor, `min_balance`; no `path`, categories refused,
+write scope, §3.4, issues #353/#466)
 · `trigger_sync` ·
 `propose_rule` (lands a draft rule that never executes until activated, or
 an active one with `activate=true`, #436; 0.14.0; `window_days` on a
@@ -3541,6 +3556,7 @@ with no connected agent, or for nuances that surface between sessions.
 | 93 | **A correction recorded with `replaces` takes the reversed event's place in its day** (issue #401, migration 0040, §3.1/§8; amends 88's event order): `position_events.replaces_id` names a reversed event of the same position and date (the service refuses another position, another date, an event not yet reversed, a reversal, or one already replaced; a reversal row carries none, CHECK; one replacement per event, partial unique index); `core.holdings.effective_events` orders live events by `(occurred_on, slot, created_at, id)`, where `slot` is `created_at` or, for a replacement, the slot of the event it replaces (through a chain of replacements, so a corrected correction keeps the first slot). REST `POST /positions/{id}/events` takes `replaces`; `PositionEventOut.replaces_id`; the `position.record` audit row carries `replaces_id`. Without `replaces` a new event still goes after the day's live events. | The documented correction, reverse and record again, put the corrected event after every other event of that day, so fixing an opening count recorded before a same-day buy applied the count last and silently dropped the buy (110 shares became 100). Inheriting the slot fixes the correction without guessing intent: a plain re-record keeps its meaning (an event recorded later in the day), and a correction says what it corrects. Ordering by the replaced event's `created_at` rather than writing a new one keeps `created_at` true (insertion time) and the table append-only. Same date only: a correction that moves an event to another day has no slot there to inherit. |
 | 94 | **A feed-implied close ranks below a current manual or provider close, and an unchanged one keeps the day it first appeared** (issue #406, §8; amends 89; no schema change): `core.holdings.PriceBook` still resolves the newest date first with the source breaking a same-date tie, but a feed-implied winner yields to the newest manual or provider close at or before the day when that close is at most `FEED_DEFER_DAYS` (7) older; and a feed-implied close equal to the symbol's previous feed-implied close is dropped, so it stays dated the day it first appeared. Every surface that resolves a close (projection, `position_states`, the #392 overlay's readers) goes through the book. | A feed-implied close is dated by the UTC fetch day of the 06:30 sync, not the session it prices, so the newest-date rule let it outrank the provider's and the user's close for the latest session, and a bank whose value lagged or froze was never stale. Dating it to the previous trading session needs an exchange calendar and the bank's own timing, which Purser does not know; ranking it lower while a real close is current, and dating an unchanged value by its first day, uses only what Purser stores and invents no value: a worthless asset stays at the value the bank reports, and a frozen one ages into `stale`. The window is the staleness default rather than the runtime setting so the book stays pure; a feed-only symbol (no provider, no manual close) keeps its feed-implied close exactly as before. |
 | 95 | **SSO links are (issuer, subject); a verified email relinks only across providers; an admin can unlink; `__Host-` state cookie on https; emails case-insensitive** (issue #429 D1–D4, migration 0041, §3.1/§9): `users.oidc_issuer` joins `oidc_subject` and uniqueness moves to the pair (a NULL-issuer legacy link keeps subject-only uniqueness). The migration backfills every existing link with the configured issuer (the `app_settings` override, JSON null meaning none, else `PURSER_OIDC_ISSUER`), audited `user.oidc_issuer_backfill`; with none it leaves NULL, and the configured provider's next sign-in with that subject claims it. A new subject of the linked provider asserting the account's verified email is refused and audited; a different provider's is relinked (the migration path); `DELETE /users/{id}/oidc` is the admin's way out. On https the state cookie is `__Host-` + name at `Path=/`. Email comparison is `lower() = lower()` everywhere with a unique index on `lower(email)`; the migration stops, naming them, on case-only duplicates and never merges. | Owner decision 2026-10-27 on the #456 review. A subject is unique only at its issuer, so after a provider switch a colliding subject signed in as someone else (D1); relinking any new subject by email let a second identity at the same provider take a linked account over, while refusing every relink would have stranded OIDC-only users after a provider change (D2). `__Host-` needs `Path=/`, so the path scoping is kept only where the prefix cannot be used (D3). Case-sensitive matching left a provider's differently cased email unlinked and, with auto-provisioning, created a second account (D4). |
+| 96 | **An account's floor is an editable, write-scope setting, limited to cash accounts and cards** (issue #466, §3.4/§6/§10; no schema change): `min_balance` joins `PATCH /accounts/{id}` (explicit null clears) and MCP `update_account` (`""` clears) and the register header; create and update share one validator — finite, NUMERIC(20,4), any sign, and only `checking`/`savings`/`cash`/`credit_card` (clearing always allowed). Audited `account.update` before/after; reversed by restoring `before`, like every account edit. | Owner decision 2026-10-30. A floor was settable only at creation, so an account created without one could never join the shortfall scan. It only governs warnings, so the agent may set it ("warn me if checking goes under $500") with the user's authority (decision 90) rather than admin. Brokerage, property and loan forecasts open from a market value or stated valuation that moves on its own, so a floor there would warn on price, not cash; refusing it keeps the scan meaningful. |
 
 ## 13. Non-goals (v1)
 
