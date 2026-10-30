@@ -6,10 +6,10 @@ description: >-
   stack: one image, an api role (serve) and an optional worker, against an
   external Postgres (or a bundled one for evaluation).
 type: application
-version: 2026.10.2
+version: 2026.10.3
 # Kept equal to pyproject.toml's version (tests/test_helm_chart.py); the
 # default image tag is "v" + appVersion.
-appVersion: "2026.10.2"
+appVersion: "2026.10.3"
 kubeVersion: ">=1.25.0-0"
 annotations:
   purser/support: experimental

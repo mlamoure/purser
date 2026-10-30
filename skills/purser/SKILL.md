@@ -8,7 +8,7 @@ description: >-
   forecasts) or record bills/transactions. Bootstraps agent access with a
   read + write token — the agent acts with the user's authority, and can
   request its own access but can never mint or widen it.
-version: 1.7.1
+version: 1.7.2
 ---
 
 # Purser — agent operations skill
@@ -35,7 +35,7 @@ expected output of every check. In short:
 
    ```bash
    mkdir purser && cd purser
-   curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.10.2/docker-compose.yml
+   curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.10.3/docker-compose.yml
    PURSER_ENCRYPTION_KEY=keygen docker compose pull
    ```
 

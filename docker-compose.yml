@@ -2,7 +2,7 @@
 # Migrations run automatically on startup.
 #
 # This file is all an installation needs: download it from the release tag
-# (https://raw.githubusercontent.com/mlamoure/purser/v2026.10.2/docker-compose.yml)
+# (https://raw.githubusercontent.com/mlamoure/purser/v2026.10.3/docker-compose.yml)
 # into an empty directory. Compose pulls the published multi-arch image below
 # (linux/amd64 + linux/arm64) the first time it is missing locally; nothing is
 # built. In a clone of the repository, `docker compose build` builds the image
@@ -12,7 +12,7 @@
 services:
   purser:
     # Kept equal to "v" + pyproject.toml's version (tests/test_compose.py).
-    image: ghcr.io/mlamoure/purser:v2026.10.2
+    image: ghcr.io/mlamoure/purser:v2026.10.3
     build: .
     restart: unless-stopped
     depends_on:

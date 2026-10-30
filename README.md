@@ -55,7 +55,7 @@ it your AI ever sees.
 - **Investments:** holdings from your brokerage feed or tracked by hand, priced daily and included in net worth.
 
 ### Finances you can trust
-- **A true double-entry ledger** behind a simple API. Every transaction balances, and recorded entries are never quietly edited: corrections are linked reversals.
+- **Every dollar accounted for.** Each transaction records where money came from and where it went, so your balances and totals always add up. Past entries are never quietly changed: a correction is recorded as a new entry that undoes the old one.
 - **The original bank data is kept** exactly as it arrived, so everything can be traced back to its source.
 - **Reconciliation** against your statements.
 - **Transfers** between your own accounts are recognized and linked, so they never count as spending.
@@ -103,7 +103,7 @@ Agents that load skills can also use [`skills/purser/SKILL.md`](skills/purser/SK
 ## Learn more
 
 - [Privacy and agents](https://mlamoure.github.io/purser/explanation/privacy-and-agents/)
-- [How the ledger works](https://mlamoure.github.io/purser/explanation/ledger/)
+- [How Purser keeps your records accurate](https://mlamoure.github.io/purser/explanation/ledger/)
 - [Connect an agent](https://mlamoure.github.io/purser/how-to/connect-an-agent/) and the [MCP tool catalog](https://mlamoure.github.io/purser/reference/mcp-tools/)
 - [Security model](https://mlamoure.github.io/purser/explanation/security/)
 - [Backup and restore](https://mlamoure.github.io/purser/how-to/backup-restore/)

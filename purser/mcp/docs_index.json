@@ -1636,7 +1636,7 @@
     {
      "anchor": "2-download-the-compose-file",
      "heading": "2. Download the compose file",
-     "text": "Make a directory for this installation and download the release's compose file into it: mkdir purser && cd purser curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.10.2/docker-compose.yml grep -c 'image: ghcr.io/mlamoure/purser:v2026.10.2' docker-compose.yml If mkdir reports that purser already exists, stop and ask the human: it may hold an earlier installation and its key. The last command must print 1. Every later command runs in this purser directory. This page installs the latest release, 2026.10.2. Each release has its own compose file at the same address under its own tag (vYYYY.M.PATCH), and that file names the matching image, here ghcr.io/mlamoure/purser:v2026.10.2, published for linux/amd64 and linux/arm64."
+     "text": "Make a directory for this installation and download the release's compose file into it: mkdir purser && cd purser curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.10.3/docker-compose.yml grep -c 'image: ghcr.io/mlamoure/purser:v2026.10.3' docker-compose.yml If mkdir reports that purser already exists, stop and ask the human: it may hold an earlier installation and its key. The last command must print 1. Every later command runs in this purser directory. This page installs the latest release, 2026.10.3. Each release has its own compose file at the same address under its own tag (vYYYY.M.PATCH), and that file names the matching image, here ghcr.io/mlamoure/purser:v2026.10.3, published for linux/amd64 and linux/arm64."
     },
     {
      "anchor": "3-pull-the-images",
@@ -1708,7 +1708,7 @@
     {
      "anchor": "1-download-the-compose-file-and-generate-the-encryption-key",
      "heading": "1. Download the compose file and generate the encryption key",
-     "text": "mkdir purser && cd purser curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.10.2/docker-compose.yml PURSER ENCRYPTION KEY=keygen docker compose pull PURSER ENCRYPTION KEY=keygen docker compose run --rm --no-deps purser keygen The compose file belongs to the latest release, 2026.10.2, and names its image, ghcr.io/mlamoure/purser:v2026.10.2 (linux/amd64 and linux/arm64). Every release publishes its own at the same address under its tag (vYYYY.M.PATCH). The temporary keygen value satisfies Compose interpolation for these utility commands. The last one generates a key without starting the app or connecting to the database. Record the generated key in a password manager, separately from your backups. Encrypted data, including the archived bank history, is unrecoverable without it."
+     "text": "mkdir purser && cd purser curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.10.3/docker-compose.yml PURSER ENCRYPTION KEY=keygen docker compose pull PURSER ENCRYPTION KEY=keygen docker compose run --rm --no-deps purser keygen The compose file belongs to the latest release, 2026.10.3, and names its image, ghcr.io/mlamoure/purser:v2026.10.3 (linux/amd64 and linux/arm64). Every release publishes its own at the same address under its tag (vYYYY.M.PATCH). The temporary keygen value satisfies Compose interpolation for these utility commands. The last one generates a key without starting the app or connecting to the database. Record the generated key in a password manager, separately from your backups. Encrypted data, including the archived bank history, is unrecoverable without it."
     },
     {
      "anchor": "2-start-the-application",
