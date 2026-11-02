@@ -1707,7 +1707,7 @@ wheels = [
 
 [[package]]
 name = "purser"
-version = "2026.10.4"
+version = "2026.11.0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },

@@ -38,6 +38,47 @@ def _near_term_bymonthday() -> int:
     return min((today + timedelta(days=3)).day, 28)
 
 
+def _monthly_charge_dates(today: date, count: int = 3) -> list[date]:
+    """``count`` charges on the 15th of consecutive months, oldest first, the
+    last on the most recent 15th on or before ``today``.
+
+    The newest charge is therefore 0-30 days old on every calendar date, well
+    inside detection's lapsed cutoff (1.5 monthly periods = 45 days), and the
+    gaps (28-31 days) always fall in the monthly bucket. The previous
+    ``today.replace(day=15) - 30 days`` arithmetic dated the last charge in
+    the month before last near month end (e.g. 2026-08-15 on 2026-09-30, 46
+    days back), so detection called the pattern stopped (#472).
+    ``test_monthly_charge_dates_stay_current_on_every_date`` checks this for
+    every date of a leap and a common year.
+    """
+    year, month = today.year, today.month
+    if today.day < 15:
+        year, month = (year, month - 1) if month > 1 else (year - 1, 12)
+    dates = []
+    for _ in range(count):
+        dates.append(date(year, month, 15))
+        year, month = (year, month - 1) if month > 1 else (year - 1, 12)
+    return dates[::-1]
+
+
+@pytest.mark.parametrize("year", [2027, 2028])  # a common and a leap year
+def test_monthly_charge_dates_stay_current_on_every_date(year: int) -> None:
+    """#472: the detection fixture's charges read as a live monthly pattern
+    whatever day the suite runs — month ends (the 29th-31st, Feb 28/29) and
+    year boundaries included — without faking the clock."""
+    from purser.core import recurrence
+
+    day = date(year, 1, 1)
+    while day.year == year:
+        dates = _monthly_charge_dates(day)
+        assert 0 <= (day - dates[-1]).days <= 30, day
+        occurrences = [recurrence.Occurrence(date=d, amount=Decimal("-15.99")) for d in dates]
+        detected = recurrence.detect(occurrences, today=day)
+        assert detected is not None, day
+        assert detected.rrule == "FREQ=MONTHLY;BYMONTHDAY=15", day
+        day += timedelta(days=1)
+
+
 class TestCoreForecasting:
     def test_rrule_expansion_monthly(self) -> None:
         dates = core_forecasting.expand_rrule(
@@ -274,9 +315,8 @@ class TestSchedulesApi:
                 text("INSERT INTO payees (name_enc, name_bidx) VALUES (:ne, :nb) RETURNING id"),
                 {"ne": crypto.encrypt("Netflix"), "nb": crypto.blind_index("netflix")},
             ).scalar_one()
-            today = date.today()
-            for months_ago in (3, 2, 1):
-                d = (today.replace(day=15) - timedelta(days=30 * months_ago)).replace(day=15)
+            # Detection reads the process-local date (schedules.detect_schedules).
+            for d in _monthly_charge_dates(date.today()):
                 tx_id = conn.execute(
                     text(
                         "INSERT INTO transactions"

@@ -626,6 +626,80 @@ class TestSessionCleanup:
             ).scalar_one()
         assert kept == 1
 
+    def test_a_session_referenced_by_any_token_foreign_key_is_retained(
+        self, admin_client: TestClient, migrated_engine: Engine, db_session: Session
+    ) -> None:
+        """#473: app_settings.updated_by (and every other FK to api_tokens)
+        anchors a session. Before the fix only four referencing columns were
+        checked, so a dead session that had saved a setting was picked for
+        deletion and the whole DELETE failed on app_settings_updated_by_fkey —
+        taking the unreferenced dead sessions' cleanup down with it."""
+        # Session A (the setup session) saves a setting and writes a memory.
+        assert admin_client.put("/config", json={"session_ttl_days": 3}).status_code == 200
+        assert admin_client.post("/memories", json={"text": "a nuance"}).status_code == 201
+        # Session B signs in and does nothing; session C is the current one.
+        for _ in range(2):
+            admin_client.cookies.clear()
+            assert admin_client.post("/auth/login", json=ADMIN_CREDENTIALS).status_code == 200
+        with migrated_engine.begin() as conn:
+            a, b, c = conn.execute(
+                text("SELECT id FROM api_tokens WHERE kind = 'session' ORDER BY created_at")
+            ).scalars()
+            assert conn.execute(
+                text("SELECT count(*) FROM app_settings WHERE updated_by = :a"), {"a": a}
+            ).scalar_one()
+            assert conn.execute(
+                text("SELECT count(*) FROM memories WHERE created_by = :a"), {"a": a}
+            ).scalar_one()
+            conn.execute(
+                text(
+                    "UPDATE api_tokens SET expires_at = now() - interval '1 day' "
+                    "WHERE id IN (:a, :b)"
+                ),
+                {"a": a, "b": b},
+            )
+            # Retention has pruned everything but A's own login bookkeeping,
+            # so only the foreign keys still tie it to what it did.
+            conn.execute(
+                text("DELETE FROM audit_log WHERE actor_token_id = :a AND action <> 'auth.login'"),
+                {"a": a},
+            )
+
+        deleted, stamped = service.cleanup_sessions(db_session)
+        db_session.commit()
+
+        assert (deleted, stamped) == (1, 0)
+        with migrated_engine.connect() as conn:
+            left = set(
+                conn.execute(text("SELECT id FROM api_tokens WHERE kind = 'session'")).scalars()
+            )
+        assert left == {a, c}  # B (unreferenced) went; A (anchored) and C stayed
+        assert admin_client.get("/auth/me").status_code == 200
+
+    def test_reference_columns_match_the_database_foreign_keys(
+        self, migrated_engine: Engine
+    ) -> None:
+        """The anchored set is derived from the ORM metadata; pin that metadata
+        to the migrated schema so an FK to api_tokens added only in a
+        migration fails here instead of in the hourly job (#473)."""
+        with migrated_engine.connect() as conn:
+            in_db = {
+                (table, column)
+                for table, column in conn.execute(
+                    text(
+                        "SELECT src.relname, a.attname "
+                        "FROM pg_constraint con "
+                        "JOIN pg_class src ON src.oid = con.conrelid "
+                        "JOIN pg_attribute a ON a.attrelid = con.conrelid "
+                        "  AND a.attnum = ANY (con.conkey) "
+                        "WHERE con.contype = 'f' AND con.confrelid = 'api_tokens'::regclass"
+                    )
+                )
+            }
+        in_orm = {(col.table.name, col.name) for col in service.token_reference_columns()}
+        assert in_orm == in_db
+        assert ("app_settings", "updated_by") in in_orm
+
 
 class TestAudit:
     def test_identity_mutations_are_audited(self, admin_client: TestClient) -> None:

@@ -3012,8 +3012,10 @@ operators must still complete setup before exposing a fresh instance (#429).
   (32 MiB, 413 before it is read), because FastAPI reads a body before it
   resolves authentication. The hourly `sessions.cleanup` job hard-deletes dead
   sessions nothing references (their own login/logout audit bookkeeping goes
-  with them) and stamps the rest expired: rows referenced by
-  `transactions.created_by`, `matches.decided_by`, or other audit entries are
+  with them) and stamps the rest expired: rows referenced by any foreign key
+  to `api_tokens` (`transactions.created_by`, `matches.decided_by`,
+  `app_settings.updated_by`, …; the set is read from the ORM metadata, which a
+  test pins to the migrated schema, #473) or by other audit entries are
   attribution anchors and are never deleted.
 - **Password sign-in is throttled** (issue #212, decision 59).
   `POST /auth/login` counts failures per email (casefolded) and per client

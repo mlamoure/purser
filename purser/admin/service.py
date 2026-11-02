@@ -3,13 +3,13 @@
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import ColumnElement, and_, delete, func, or_, select, update
+from sqlalchemy import Column, ColumnElement, and_, delete, func, literal, or_, select, update
 from sqlalchemy.orm import Session
 
 from purser import appsettings, audit
 from purser.admin import oidc, security
 from purser.logging import get_logger
-from purser.models import ApiToken, AuditLog, Match, PositionEvent, Transaction, User
+from purser.models import ApiToken, AuditLog, Base, User
 
 log = get_logger(__name__)
 
@@ -362,15 +362,33 @@ def unlink_oidc(session: Session, *, user: User, actor_token_id: uuid.UUID | Non
     )
 
 
+def token_reference_columns() -> list[Column[object]]:
+    """Every column holding a foreign key to ``api_tokens.id``, from the ORM metadata.
+
+    Derived rather than listed so a table that later gains a token FK is an
+    attribution anchor for ``cleanup_sessions`` without anyone remembering to
+    add it (#473). ``tests/test_identity.py`` pins this set to the migrated
+    database's own foreign keys, so a migration-only FK fails CI.
+    """
+    columns = [
+        fk.parent
+        for table in Base.metadata.sorted_tables
+        for fk in table.foreign_keys
+        if fk.column.table is ApiToken.__table__ and fk.column.name == "id"
+    ]
+    return sorted(columns, key=lambda c: (c.table.name, c.name))
+
+
 def cleanup_sessions(session: Session) -> tuple[int, int]:
     """Hygiene for kind='session' rows (DESIGN §9). Returns (deleted, stamped).
 
     Hard-deletes dead sessions (absolute-expired, revoked, or idle-timed-out)
     that nothing references — sessions whose only trace is their own
     login/logout bookkeeping, which is deleted with them. Dead sessions
-    referenced by the ledger (transactions.created_by, matches.decided_by,
-    position_events.actor_token_id) or by any other audit row are
-    attribution anchors: those are stamped expired and retained forever.
+    referenced by any foreign key to ``api_tokens`` (transactions.created_by,
+    matches.decided_by, app_settings.updated_by, … — see
+    ``token_reference_columns``) or by any other audit row are attribution
+    anchors: those are stamped expired and retained forever.
     """
     now = datetime.now(UTC)
     dead = and_(
@@ -387,12 +405,15 @@ def cleanup_sessions(session: Session) -> tuple[int, int]:
         AuditLog.action == "auth.login",
         and_(AuditLog.action == "token.revoke", AuditLog.entity_id == ApiToken.id),
     )
+    # Every other referencing row anchors the session outright; deleting it
+    # would violate that foreign key and roll back the whole pass (#473).
     anchored = or_(
-        select(Transaction.id).where(Transaction.created_by == ApiToken.id).exists(),
-        select(Match.id).where(Match.decided_by == ApiToken.id).exists(),
-        # A recorded position event names its author by foreign key (#390).
-        select(PositionEvent.id).where(PositionEvent.actor_token_id == ApiToken.id).exists(),
         select(AuditLog.id).where(AuditLog.actor_token_id == ApiToken.id, ~bookkeeping).exists(),
+        *(
+            select(literal(1)).select_from(col.table).where(col == ApiToken.id).exists()
+            for col in token_reference_columns()
+            if col is not AuditLog.__table__.c.actor_token_id
+        ),
     )
     doomed = session.execute(select(ApiToken.id).where(dead, ~anchored)).scalars().all()
     if doomed:
