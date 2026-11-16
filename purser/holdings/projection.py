@@ -12,7 +12,7 @@ Bounds:
 - ``lower``: the first effective event, or the day after the account's last
   FEED snapshot when that is later. Feed history is never rewritten and no
   date carries rows of both sources.
-- ``upper``: today (UTC), or the close date of a closed account (readers cut
+- ``upper``: today (the ledger day), or the close date of a closed account (readers cut
   off there anyway).
 
 Back to the feed: the switch touches no row, and the hand-tracked set stays
@@ -36,23 +36,28 @@ import uuid
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal, localcontext
 
 from sqlalchemy import delete, func, insert, select, text
 from sqlalchemy.orm import Session, load_only
 
-from purser import audit, balances, locks
+from purser import audit, balances, clock, locks
 from purser.core import holdings as core
+from purser.holdings import lotbook
 from purser.ledger import LedgerError, NotFoundError
 from purser.logging import get_logger
-from purser.models import Account, HoldingsSnapshot, Position, PositionEvent, SecurityPrice
+from purser.models import (
+    Account,
+    HoldingsSnapshot,
+    Position,
+    PositionEvent,
+    Posting,
+    SecurityPrice,
+    Transaction,
+)
 
 log = get_logger(__name__)
-
-
-def utc_today() -> date:
-    return datetime.now(UTC).date()
 
 
 @dataclass(frozen=True)
@@ -146,6 +151,7 @@ def position_events(
                 PositionEvent.fees,
                 PositionEvent.cost_basis,
                 PositionEvent.reverses_id,
+                PositionEvent.transaction_id,
             )
         )
         .where(PositionEvent.position_id.in_(position_ids))
@@ -154,14 +160,77 @@ def position_events(
     return out
 
 
+def in_transit(
+    session: Session, account_id: uuid.UUID, rows: Iterable[PositionEvent]
+) -> dict[uuid.UUID, list[core.InTransit]]:
+    """Per position, the cash of its trades that lands after the trade date
+    (decision 104): each trade event's cash row as it stands now — the row
+    Purser posted (dated ``settle_on``), the linked bank row, or the broker
+    row that took Purser's over at import (``superseded_by``, #408) — when
+    it is dated after the trade. ``core.projection_rows`` keeps only the
+    effective events' cash."""
+    trades = [r for r in rows if r.transaction_id is not None and r.reverses_id is None]
+    out: dict[uuid.UUID, list[core.InTransit]] = defaultdict(list)
+    if not trades:
+        return out
+    named_rows = {r.transaction_id for r in trades if r.transaction_id is not None}
+    live = {named: named for named in named_rows}  # named row -> the row holding it now
+    seen = set(named_rows)
+    pending = set(named_rows)
+    while pending:
+        moved: dict[uuid.UUID, uuid.UUID] = {
+            tx_id: target
+            for tx_id, target in session.execute(
+                select(Transaction.id, Transaction.superseded_by).where(
+                    Transaction.id.in_(pending),
+                    Transaction.status == "void",
+                    Transaction.superseded_by.is_not(None),
+                )
+            ).tuples()
+            if target is not None
+        }
+        for named, current in list(live.items()):
+            if current in moved:
+                live[named] = moved[current]
+        pending = set(moved.values()) - seen
+        seen |= pending
+    cash = {
+        tx_id: (on, Decimal(amount))
+        for tx_id, on, amount in session.execute(
+            select(Transaction.id, Transaction.date, Posting.amount)
+            .join(Posting, Posting.transaction_id == Transaction.id)
+            .where(Transaction.id.in_(set(live.values())), Posting.account_id == account_id)
+        ).tuples()
+    }
+    for row in trades:
+        assert row.transaction_id is not None
+        found = cash.get(live[row.transaction_id])
+        if found is None:
+            continue
+        on, amount = found
+        if on > row.occurred_on:
+            out[row.position_id].append(
+                core.InTransit(event_id=row.id, start=row.occurred_on, end=on, amount=amount)
+            )
+    return out
+
+
 def position_facts(session: Session, account_id: uuid.UUID) -> list[core.PositionFacts]:
     positions = list(
         session.execute(select(Position).where(Position.account_id == account_id)).scalars()
     )
     events = position_events(session, [p.id for p in positions])
+    transit = in_transit(session, account_id, [e for p in positions for e in events.get(p.id, [])])
+    facts = {p.id: [event_fact(e) for e in events.get(p.id, [])] for p in positions}
+    # A position that tracks lots takes its basis from them (decision 107).
+    books = lotbook.books(session, facts)
     return [
         core.PositionFacts(
-            id=p.id, symbol=p.symbol, events=[event_fact(e) for e in events.get(p.id, [])]
+            id=p.id,
+            symbol=p.symbol,
+            events=facts[p.id],
+            in_transit=transit.get(p.id, []),
+            lots=books[p.id] if p.id in books and books[p.id].lots else None,
         )
         for p in positions
     ]
@@ -234,7 +303,7 @@ def price_books(
 def upper_bound(account: Account, today: date) -> date:
     if account.closed_at is None:
         return today
-    return min(today, account.closed_at.date())
+    return min(today, clock.ledger_date(account.closed_at))
 
 
 @dataclass(frozen=True)
@@ -315,7 +384,13 @@ def computed_rows(
     rows: list[core.Row] = []
     try:
         for lo, hi in ranges:
-            rows.extend(core.projection_rows(positions, books, lower=lo, upper=hi))
+            # Only the open-ended current period may write a set after today:
+            # an earlier period ends where a feed run begins, and a closed
+            # account takes no cash after it closed.
+            current = hi == upper == today
+            rows.extend(
+                core.projection_rows(positions, books, lower=lo, upper=hi, settle_after=current)
+            )
     except core.NegativeQuantity as exc:
         raise LedgerError(str(exc)) from exc
     except core.OutOfRange as exc:  # a market value, share count or basis
@@ -331,6 +406,7 @@ def _values(row: core.Row) -> tuple[object, ...]:
         row.market_value,
         row.price,
         row.price_as_of,
+        row.in_transit,
     )
 
 
@@ -353,7 +429,7 @@ def project_account(
     ``net_worth_daily`` from there (decision 38)."""
     if account.holdings_source != "manual":
         return ProjectionResult(None, 0, 0)
-    today = today or utc_today()
+    today = today or clock.ledger_today()
     rows, spans = computed_rows(session, account, today=today)
 
     write_from = from_date
@@ -370,6 +446,7 @@ def project_account(
         HoldingsSnapshot.market_value,
         HoldingsSnapshot.price,
         HoldingsSnapshot.price_as_of,
+        HoldingsSnapshot.in_transit,
     ).where(HoldingsSnapshot.account_id == account.id, HoldingsSnapshot.source == "manual")
     if write_from is not None:
         old_stmt = old_stmt.where(HoldingsSnapshot.as_of >= write_from)
@@ -387,6 +464,7 @@ def project_account(
                 row.market_value,
                 row.price,
                 row.price_as_of,
+                row.in_transit,
             ),
         )
     new = {(r.as_of, r.position_id): r for r in rows}
@@ -416,6 +494,7 @@ def project_account(
                     "position_id": r.position_id,
                     "price": r.price,
                     "price_as_of": r.price_as_of,
+                    "in_transit": r.in_transit,
                 }
                 for r in sorted(fresh, key=lambda r: (r.as_of, r.position_id))
             ],

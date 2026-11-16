@@ -93,8 +93,8 @@ A position's history is a list of events:
 | Event | Means |
 | --- | --- |
 | `set_quantity` | The account holds exactly this many shares on that date. |
-| `buy` | It gained this many shares; with a `price`, the cost basis grows by quantity × price + fees. |
-| `sell` | It lost this many shares; the basis drops at average cost. |
+| `buy` | It gained this many shares; with a `price`, the cost basis grows by quantity × price + fees. With `funded_from: "cash"` its cost also leaves the account's cash (below). |
+| `sell` | It lost this many shares; the basis drops at average cost. Its proceeds land on the account's cash unless `proceeds_to` is `"none"` (below). |
 
 ```bash
 curl -X POST https://purser.example.com/positions/<position id>/events \
@@ -120,6 +120,167 @@ position is read-only history. A position that holds nothing is not fetched,
 flagged stale or listed in the price status even before you close it. A new position
 in the same symbol starts after the closed one's last date (an earlier date
 is refused, 409), so the same shares are never counted twice.
+
+### Correct a closed position
+
+A position's last sale usually leaves it at zero, and once it is closed its
+events can no longer be reversed. To correct it:
+
+1. Reopen it: `PATCH /positions/<id>` with `{"closed": false}`, or
+   `reopen_position(position_id)` from an agent (`record_sale` answers with the
+   `position_id`, and the "position is closed" refusal names it).
+2. Reverse the wrong event (`POST /position-events/<id>/reverse`, or
+   `reverse_position_event(event_id)` from an agent); a sale's cash is undone
+   with it.
+3. Record the right event.
+4. Close it again (`{"closed": true}`).
+
+The reopen is refused (409) while another position in the same symbol is open
+on the account, or when a later position in the symbol exists: its history
+follows this one's, so correct that one instead.
+
+## Sales and purchases move cash
+
+A sale puts its net proceeds (quantity x price - fees, rounded to the cent) on
+the account on the trade date, the day its shares leave the holdings, so net
+worth does not dip in between. To post the cash on a later settlement date
+instead, give `settle_on` (`settle_date` from an agent). From an agent,
+`record_sale` records it; check first with `dry_run=true`, which answers with
+the shares before and after, the cash and its date, and writes nothing:
+
+```text
+record_sale(account="assets.plan", symbol="ACME", quantity="20",
+            price="101.25", trade_date="2026-10-01", fees="4.95",
+            dry_run=true)
+```
+
+Then the same call without `dry_run`. Over REST, record a `sell` event on the
+position:
+
+```bash
+curl -X POST https://purser.example.com/positions/<position id>/events \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"kind": "sell", "occurred_on": "2026-10-01", "quantity": "20",
+       "price": "101.25", "fees": "4.95"}'
+```
+
+- The cash is one ordinary transaction, posted, booked against the system
+  account `equity.securities`. That account is not a category: the proceeds
+  never count as income or spending, and net worth does not move: by default
+  the cash posts on the trade date, the day the shares leave the holdings. (A
+  later `settle_on`, or a linked bank row dated after the trade, leaves net
+  worth short by the sale's value until that date; see below.) The row waits for review like any
+  other row Purser posts, and the register shows it as **Securities trade**.
+- `proceeds_to: "none"` records a sale without cash, such as shares withheld
+  for tax.
+- Trade cash is in US dollars only (`equity.securities` is a USD account, and
+  Purser keeps one currency per transaction). On an account in another
+  currency, a trade that would move cash is refused: record it with
+  `proceeds_to: "none"` or `funded_from: "none"`.
+- A buy takes its cost (quantity x price + fees, rounded to the cent) off the
+  account only with `funded_from: "cash"`. By default a buy moves no cash:
+  plan purchases are usually funded by payroll, from outside the account.
+
+### When the account already shows the cash
+
+Many brokers send the sale's cash through the feed ("SOLD ..."). Purser looks
+for a row of exactly that amount on the account, pending or posted, with one
+other leg, a category (so not a transfer or a split), dated from the trade to
+five days after settlement (`settle_on`, or the next business day when you give
+none). When it finds one, the sale is refused with
+`cash_already_recorded` (a 409 over REST, a tool error led by that code from
+`record_sale`), naming the row, so the cash is never counted twice; a
+`record_sale` dry run reports the row as `already_recorded`. If the row is still
+pending, record the sale after the bank posts it and link the posted row. If
+that row is the sale's cash, link it (`transaction_id="<the row>"` on `record_sale`, or over
+REST):
+
+```bash
+curl -X POST https://purser.example.com/positions/<position id>/events \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"kind": "sell", "occurred_on": "2026-10-01", "quantity": "20",
+       "price": "101.25", "transaction_id": "<the row the 409 named>"}'
+```
+
+which re-books that row to `equity.securities` as the sale's cash (the row is
+corrected through a reversal pair; its amount and date stay the bank's, and
+the sale settles on that date). The shares still leave on the trade date; until
+the bank's date the sale's cash counts as in transit (see below), so net worth
+does not dip. A link takes only the row that holds exactly
+this sale's cash: its net proceeds to the cent (so give the price, and the
+fees that produced the bank's figure), dated from the trade to five days after
+the next business day (`settle_on` does not widen a link's window), and matched
+to no bill. Any other row is refused (422). When the row's bank line settles a
+bill, the refusal names the match: reject it if it is a proposal, unmatch it if
+it is confirmed, then link.
+
+If the row is a different payment that merely has the same amount, record the
+sale again with `force_cash: true` (`force_cash=true` on `record_sale`):
+Purser posts the sale's cash as well, and the trade's audit record notes the
+override and the row it went past. `record_sale` names that row too, as
+`cash_probe_overridden`, in its answer and in a dry run with `force_cash`.
+
+A trade's cash moves only with its trade. Its row cannot be edited or
+recategorized, merged into a transfer or matched to a bill, and neither can
+the bank row a trade linked. Reversing the sale undoes the cash too, the way
+every posted row is corrected (a reversal and its replacement): Purser's own
+row is corrected to zero, so the register keeps it at 0.00 as the record of
+the undo, and a linked row gets its old category back.
+
+### When the broker's row arrives after the sale
+
+If you record the sale before the broker's "SOLD" row reaches Purser, Purser
+posts the cash itself. When the feed then delivers a row of exactly that
+amount on the account, dated from the trade to five days after settlement
+(the later of `settle_on` and the next business day), the import links it as
+the sale's cash in place of Purser's own row, the same way `transaction_id`
+links one: the cash is counted once, and the row keeps the bank's date and
+description. Purser's row stays in the history as void, pointing at the
+bank's row. The sync result counts these rows as `linked_trade_cash`. While
+the broker's row is still pending it is not imported at all
+(`skipped_trade_cash_pending`); the posted row takes over when the bank books
+it. This works on every import, including an outage repair and a manual
+refetch. Reversing the sale later gives the bank's row back the category it
+was imported with, so the bank's money stays on the account as an ordinary
+deposit.
+
+A row outside that window, or of another amount, imports as an ordinary row.
+If that leaves the cash counted twice, reverse the sale's event and record it
+again with `transaction_id` naming the feed's row. On an account that has
+"Feed balance is cash" on, the drift check shows such a gap.
+
+### Cash in transit
+
+The shares leave the holdings on the trade date, but the cash can land later:
+on `settle_on` when you give a later date, or on the bank's date when the
+cash is the broker's row. Until the cash lands, Purser counts it as in
+transit: the position's holdings row carries it in its `market_value`, and
+`list_holdings` and `GET /holdings` show it as `in_transit` (a sale's
+proceeds positive, a cash-funded buy's cost negative). Net worth therefore
+stays the same across a sale at the market price, on every day, including
+weekends between a Friday trade and a Monday bank row. After a sale of every
+share, the position still shows a zero-share line worth the cash until the
+cash date. `unrealized_gain` covers the shares only.
+
+## Check a cash sweep's balance
+
+Some plan accounts reach SimpleFIN as a cash sweep: the feed's balance is the
+sweep's cash, not the account's value. For such an account, an admin can turn
+on **Feed balance is cash** (admin only; `PATCH /accounts/<id>` with
+`{"feed_balance_is_cash": true}`). Each sync then compares the feed's balance
+with the account's transactions, exactly as it does for a checking account,
+and reports drift in **Config -> SimpleFIN**, as `balance.drift` events and in
+`whats_new`.
+
+That is how a missing sale shows up: while the proceeds that funded the
+disbursements are unrecorded, the account's transactions fall short of the
+sweep's balance by exactly that much. Recording the sales closes the gap.
+
+The setting needs manual holdings and turns off when the account goes back to
+the feed. It is off by default because many brokers report the account's total
+value as its balance.
 
 ## Prices
 
@@ -222,6 +383,15 @@ curl -X POST https://purser.example.com/prices \
 - No provider is asked for such a symbol: the price comes from the plan's
   site.
 
+## Tax lots and equity awards
+
+A hand-tracked position can also track its tax lots (acquisition date,
+remaining shares, basis), and the account its equity awards and vest
+schedule. A position's basis then comes from its lots, never an average, and
+a sale names the lots it draws on. Lot lists and award schedules load in bulk
+with a previewed, idempotent capture. See
+[Track tax lots and equity awards](../../how-to/lots-and-awards/).
+
 ## Where the value shows up
 
 Hand-tracked positions are written into the same `holdings_snapshots` table
@@ -243,4 +413,8 @@ the feed fills, so everything that reads holdings picks them up unchanged:
 See [Balances](../../explanation/balances/) for how the postings and holdings
 figures combine, and [Events and webhooks](../../reference/events-webhooks/) for
 `position.updated`, `price.stale`, `price.fetch_failed` and
-`holding.unpriced`.
+`holding.unpriced`. Agents record share counts with `record_position` and sales
+with `record_sale`, and undo a wrong one with `reverse_position_event`
+(reopening a closed position first with `reopen_position`); buys and closing a
+position are REST (or the admin UI's Positions tab, for share counts and
+closing).

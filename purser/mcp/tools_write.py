@@ -8,7 +8,7 @@ call. Registered on import.
 import uuid
 from datetime import date as date_type
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -103,6 +103,7 @@ async def create_schedule(
     rrule: str,
     amount: str | None = None,
     amount_type: str = "fixed",
+    date_mode: str = "fixed",
     payee: str | None = None,
     category: str | None = None,
     dtstart: str | None = None,
@@ -146,6 +147,7 @@ async def create_schedule(
             name=name,
             account_ref=account,
             rrule=rrule,
+            date_mode=date_mode,
             amount_type=amount_type,
             amount=Decimal(amount) if amount is not None else None,
             payee_name=payee,
@@ -184,6 +186,7 @@ async def update_schedule(
     dtstart: str | None = None,
     amount: str | None = None,
     amount_type: str | None = None,
+    date_mode: str | None = None,
     estimate_basis: str | None = None,
     payee: str | None = None,
     category: str | None = None,
@@ -211,6 +214,7 @@ async def update_schedule(
             name=name,
             rrule=rrule,
             dtstart=date_type.fromisoformat(dtstart) if dtstart else None,
+            date_mode=date_mode,
             amount_type=amount_type,
             amount=Decimal(amount) if amount is not None else None,
             estimate_basis=estimate_basis,
@@ -465,9 +469,14 @@ async def confirm_transfer(
     (a transfer keyword, the counterparty account's name, a transfer_link
     rule, or an instance of an active transfer schedule) auto-link at import
     and in the nightly sweep; pairs WITHOUT a signal stay candidates and need
-    this explicit confirm. A row already matched to an expected transfer
-    still pairs with that transfer's other side, and the match moves onto
-    the merged transfer.
+    this explicit confirm (a recent pair of POSTED rows also waits in
+    list_suggestions as a kind='transfer_pair' card, which decide_suggestion
+    accepts the same way or rejects as not a transfer; confirming the pair
+    here accepts its card — a pair with a pending row has no card). A row
+    already matched to an expected transfer still pairs with that transfer's
+    other side, and the match moves onto the merged transfer. An id of a row
+    corrected since you read it (the categorize pass corrects uncategorized
+    posted rows) is followed to its replacement, the same bank line.
 
     Split loan payment: when the cash leg pays more than the principal leg
     the loan account shows (the rest is interest or fees), pass
@@ -578,6 +587,7 @@ async def reconcile_account(
     statement_balance: str,
     basis: str = "posted",
     dry_run: bool = False,
+    component: Literal["balance", "cash"] = "balance",
 ) -> dict[str, Any]:
     """Reconcile a checking, savings, cash or credit-card account to a
     statement (write scope). statement_balance is the figure AS THE STATEMENT
@@ -591,8 +601,11 @@ async def reconcile_account(
     answers the same without writing. Retrying the same date and balance
     returns created=false while it still holds; once a backdated change has
     moved the balance on that date it fails with the difference.
-    list_accounts shows whether each account's latest reconciliation still
-    holds."""
+    For a manual brokerage account, component="cash" is REQUIRED and
+    statement_balance must be cash only, excluding securities and unvested
+    awards. Holdings and prices never change. Other accounts use the default
+    component="balance". Results and list_accounts identify which component
+    was reconciled; list_accounts checks whether it still holds."""
 
     def op(session: Session) -> dict[str, Any]:
         from purser import ledger as ledger_service
@@ -608,6 +621,7 @@ async def reconcile_account(
             account_id=ledger_service.resolve_account(session, account).id,
             as_of=date_type.fromisoformat(as_of),
             statement_balance=figure,
+            component=component,
             basis=basis,
             dry_run=dry_run,
             token=_token_row(session, principal),
@@ -619,6 +633,7 @@ async def reconcile_account(
             "account_id": str(outcome.account_id),
             "as_of": outcome.as_of.isoformat(),
             "basis": outcome.basis,
+            "component": outcome.component,
             "statement_balance": _amount(outcome.statement_balance),
             "target_balance": _amount(outcome.target_balance),
             "ledger_balance": _amount(outcome.ledger_balance),
@@ -712,11 +727,71 @@ async def trigger_sync(connection_id: str | None = None) -> dict[str, Any]:
                 stats = feed_service.sync_connection(
                     session, connection_id=cid, actor_token_id=principal.token_id
                 )
-                results.append(
-                    {"connection_id": str(cid), "imported": stats["imported"], "ok": True}
-                )
+                line: dict[str, Any] = {
+                    "connection_id": str(cid),
+                    "imported": stats["imported"],
+                    "ok": True,
+                }
+                repair = stats.get("gap_repair")
+                if repair:  # accounts back from an outage (#481)
+                    line["gap_repair"] = {
+                        k: repair.get(k)
+                        for k in ("accounts", "imported", "deferred", "unreachable_before")
+                    }
+                results.append(line)
             except feed_service.FeedError as exc:
                 results.append({"connection_id": str(cid), "ok": False, "error": str(exc)})
         return {"synced": results}
+
+    return await _run(op)
+
+
+@audited_tool(kind="write", entity="connection", scope="write", emits=NOTHING)
+async def refetch_feed(
+    start: str,
+    end: str | None = None,
+    accounts: list[str] | None = None,
+    connection_id: str | None = None,
+) -> dict[str, Any]:
+    """Re-fetch a date range from SimpleFIN and import what the ledger is
+    missing — for a gap a bank outage left (a bank that stopped updating,
+    then came back) that the automatic repair after a sync did not cover.
+    start/end are ISO dates (end inclusive, default today; at most 90 days
+    apart, and the bank serves about 90 days of history). accounts: ledger
+    account paths (default every mapped account). connection_id may be
+    omitted when there is one connection. Idempotent: rows already in the
+    ledger are skipped. Uses one of the day's 24 fetches."""
+
+    def op(session: Session) -> dict[str, Any]:
+        from purser.feed import service as feed_service
+        from purser.models import Connection
+
+        principal = _principal()
+        if connection_id is not None:
+            cid = uuid.UUID(connection_id)
+        else:
+            ids = list(
+                session.execute(
+                    select(Connection.id).where(Connection.status != "disabled")
+                ).scalars()
+            )
+            if len(ids) != 1:
+                raise ValueError("several connections: pass connection_id")
+            cid = ids[0]
+        result = feed_service.refetch_connection(
+            session,
+            connection_id=cid,
+            start=date_type.fromisoformat(start),
+            end=date_type.fromisoformat(end) if end else None,
+            accounts=accounts,
+            actor_token_id=principal.token_id,
+        )
+        return {
+            "start": result["start"].isoformat(),
+            "end": result["end"].isoformat(),
+            "accounts": result["accounts"],
+            "imported": result["imported"],
+            "skipped": result["skipped"],
+        }
 
     return await _run(op)

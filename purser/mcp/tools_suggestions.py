@@ -1,9 +1,10 @@
-"""Suggestions inbox tools (issue #233, DESIGN decisions 57, 67 and 86).
+"""Suggestions inbox tools (issue #233, DESIGN decisions 57, 67, 86 and 102).
 
 `list_suggestions` (read) and `decide_suggestion` (write) are the agent's
 rendering of the same rows the Dashboard cards show. Nothing here creates a
 suggestion: detection, the liability-added hook, `create_schedule` with
-`propose=true`, a manual `confirm_transfer` and the matcher do that.
+`propose=true`, a manual `confirm_transfer`, the matcher and the
+transfer-candidate pass after an import do that.
 """
 
 import uuid
@@ -16,10 +17,13 @@ from purser.mcp._registry import _amount, _principal, _run, _token_row, audited_
 from purser.mcp.privacy import Emits
 
 # What a serialized suggestion carries that minimal disclosure governs
-# (suggestions.serialize; a match draft quotes both rows and the variance).
+# (suggestions.serialize; a match draft quotes both rows and the variance,
+# a transfer_pair draft both bank texts and the amount moved).
 SUGGESTION_TEXT = (
     "items[].draft.name",
     "items[].draft.label",
+    "items[].draft.outgoing_description",
+    "items[].draft.incoming_description",
     "items[].evidence_summary.note",
 )
 SUGGESTION_AMOUNTS = (
@@ -28,6 +32,7 @@ SUGGESTION_AMOUNTS = (
     "items[].draft.posted_amount",
     "items[].draft.variance",
     "items[].evidence_summary.amount_range",
+    "items[].evidence_summary.latest_amount",
 )
 
 
@@ -48,6 +53,7 @@ async def list_suggestions(
     account: str | None = None,
     include_snoozed: bool = False,
     limit: int = 10,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """What Purser thinks you should decide. kind='schedule': detected
     recurring bills and transfers, agent-proposed schedules, payments for a
@@ -56,13 +62,20 @@ async def list_suggestions(
     its aliases (evidence = the confirmed pairs). kind='match': an open match
     proposal — an expected bill paired with a bank row (draft = both rows'
     dates and amounts on `account`, and the variance; confidence = the match
-    score). Omit kind for all. Each row carries a one-line headline, the
-    typed draft accept would apply unchanged, an evidence summary (count,
-    first/last, amount range, cadence, and the proposing agent's note if it
-    left one), and a confidence (null for transfer links and agent
-    proposals, which nothing scored). Snoozed rows are hidden until their
-    date. Decide with decide_suggestion; GET /suggestions/{id} has the full
-    evidence."""
+    score). kind='transfer_pair': two bank rows of exactly opposite amounts
+    on two accounts, close in date, that nothing links automatically — is it
+    one transfer? (draft = both rows, from_account/to_account, amount, the
+    dates and both bank texts). Omit kind for all. Each row carries a
+    one-line headline, the typed draft accept would apply unchanged, an
+    evidence summary (count, first/last, amount range, latest amount and
+    possible price change, cadence, and the
+    proposing agent's note if it left one), and a confidence (null for
+    transfer links, transfer pairs and agent proposals, which nothing
+    scored). Snoozed rows are hidden until their date. `open` counts every
+    open row and `open_by_kind` each kind's, so `limit` never hides how
+    many wait; `offset` skips the rows of earlier pages to reach the rest.
+    Decide with decide_suggestion; GET /suggestions/{id} has the
+    full evidence."""
 
     def op(session: Session) -> dict[str, Any]:
         from purser import suggestions as service
@@ -73,9 +86,11 @@ async def list_suggestions(
             account_ref=account,
             include_snoozed=include_snoozed,
             limit=limit,
+            offset=offset,
         )
         return {
             "open": service.open_count(session),
+            "open_by_kind": service.open_counts(session),
             "returned": len(rows),
             "items": [service.serialize(session, r) for r in rows],
         }
@@ -109,11 +124,17 @@ async def decide_suggestion(
     suggestion: accept confirms the proposal (match{id,state,variance} in
     the result) and reject rejects it for good — the matcher never proposes
     that pair again; it has nothing to edit, and a proposal already gone
-    withdraws the suggestion with an error. reject is durable —
-    reject_scope=counterparty means never suggest this payee/counterparty on
-    this account again (for a transfer_link: this account pair, any payee;
-    a match rejects exactly); snooze hides it until snooze_until
-    (YYYY-MM-DD, default 30 days). Nothing auto-accepts."""
+    withdraws the suggestion with an error. A transfer_pair suggestion:
+    accept merges the two rows into one transfer, as confirm_transfer does
+    (transfer{merged_transaction_id, suggestion_id} — the transfer_link rule
+    the confirm proposed, when it proposed one), and reject means "not a
+    transfer": nothing ever links that pair automatically; it has nothing to
+    edit, and a pair whose rows moved on withdraws it with an error. reject
+    is durable — reject_scope=counterparty means never suggest this
+    payee/counterparty on this account again (for a transfer_link: this
+    account pair, any payee; a match or transfer_pair rejects exactly);
+    snooze hides it until snooze_until (YYYY-MM-DD, default 30 days).
+    Nothing auto-accepts."""
 
     def op(session: Session) -> dict[str, Any]:
         from purser import rules as rules_service
@@ -165,6 +186,10 @@ async def decide_suggestion(
                 "state": created.state,
                 "variance": _amount(created.variance),
             }
+        elif isinstance(created, service.TransferPairConfirmed):
+            from purser import matching
+
+            out["transfer"] = matching.transfer_confirmation(created.merged, created.proposed)
         return out
 
     return await _run(op)

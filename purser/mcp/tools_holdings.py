@@ -2,26 +2,39 @@
 
 ``list_holdings`` answers in three tiers (guardrail 10): a headline text
 block that is ALWAYS present — an empty answer included — then a compact
-``structuredContent`` fitted to the response budget (guardrail 6). The two
+``structuredContent`` fitted to the response budget (guardrail 6). The
 write tools are write scope, like ``record_valuation`` (decision 73): a
 position has no pending state, so a token without ``write`` gets a tool
-error, never a draft. Registered on import.
+error, never a draft. ``record_sale`` (decision 103) goes through the same
+service path as REST ``POST /positions/{id}/events`` kind ``sell``, and
+``reverse_position_event`` through REST ``POST /position-events/{id}/reverse``
+(an agent that recorded a wrong sale undoes it). Registered on import.
 """
 
 import json
-from datetime import UTC, datetime
 from datetime import date as date_type
 from decimal import Decimal, InvalidOperation
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
 from mcp.types import CallToolResult
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from purser import clock
 from purser.mcp import presentation
 from purser.mcp._registry import _principal, _run, _token_row, audited_tool
-from purser.mcp.privacy import NOTHING
-from purser.mcp.toolschemas import HoldingsResult, RecordPositionResult
+from purser.mcp.privacy import NOTHING, Emits
+from purser.mcp.toolschemas import (
+    HoldingsResult,
+    LotAllocationInput,
+    RecordPositionResult,
+    RecordSaleResult,
+    ReopenPositionResult,
+    ReversePositionEventResult,
+)
+
+if TYPE_CHECKING:
+    from purser.holdings.service import Sale
 
 # The structuredContent character budget (guardrail 6): 1,900 characters of
 # JSON keeps the payload under the < 500-token target the contract tests
@@ -31,6 +44,8 @@ _HOLDINGS_BUDGET_CHARS = 1900
 # largest. One account named by the caller is paged instead (cursor /
 # next_cursor, in symbol order), each page fitted to the same budget.
 _TOP_ALL = 5
+# Unvested award symbols itemized per account (the rest: list_awards).
+_UNVESTED_TOP = 3
 
 
 def _cents(value: Decimal | None) -> str | None:
@@ -158,7 +173,11 @@ async def list_holdings(
     ticker: it shows price, price_as_of and price_source; with no recorded
     close it counts in no_price. One whose feed symbol is no ticker at all
     (a description) counts in unpriceable and is marked unpriceable: no
-    close can value it, so never record one for it.
+    close can value it, so never record one for it. in_transit on a manual
+    line is a trade's cash that has not landed on the account yet (a sale's
+    proceeds, or minus a cash-funded buy's cost), already inside its
+    market_value until the cash date; a line with quantity 0 is such cash
+    after a sale of every share.
 
     Pass account (UUID or path) for that account's positions, in symbol
     order, each with its cost_basis (null when unknown), one page at a time:
@@ -169,7 +188,11 @@ async def list_holdings(
     the cursor is not listed, and the daily price job can move later pages
     to a newer set. With account named, totals.market_value is that account's own
     value; a closed account shows its last set with closed: true and totals
-    0.00 (net worth no longer counts it)."""
+    0.00 (net worth no longer counts it). An account with equity awards
+    adds unvested: per symbol, the units not yet vested, their value at the
+    latest close and the next vest — informational, never inside
+    market_value, totals or net worth. Lot detail is list_lots; awards are
+    list_awards."""
 
     def op(session: Session) -> CallToolResult:
         from purser import appsettings
@@ -178,7 +201,7 @@ async def list_holdings(
         from purser.core import holdings as core
         from purser.models import Account
 
-        today = datetime.now(UTC).date()
+        today = clock.ledger_today()
         stale_days = appsettings.effective().price_stale_days
         if cursor is not None and account is None:
             raise ValueError("cursor pages one account's positions: pass account as well")
@@ -220,6 +243,10 @@ async def list_holdings(
                     "quantity": _plain(Decimal(h.quantity)) if h.quantity is not None else None,
                     "market_value": _cents(h.market_value),
                 }
+                if h.in_transit:
+                    # A trade's cash not on the account yet, inside
+                    # market_value until it lands (decision 104).
+                    line["in_transit"] = _cents(h.in_transit)
                 if h.market_value is None and h.price is not None and h.quantity:
                     # A close, but a value too large to store: the share
                     # count, not the close (core.Valued.out_of_range).
@@ -240,7 +267,14 @@ async def list_holdings(
                     if core.stale(h.price_as_of, today, stale_days):
                         line["stale"] = True
                         stale_count += 1
-                gain = core.unrealized_gain(h.market_value, h.cost_basis)
+                # The shares' gain: cash in transit is no gain (decision 104).
+                shares_value = (
+                    Decimal(h.market_value) - Decimal(h.in_transit or 0)
+                    if h.market_value is not None
+                    else None
+                )
+                carrier = h.source == "manual" and not h.quantity  # only cash in transit
+                gain = None if carrier else core.unrealized_gain(shares_value, h.cost_basis)
                 if gain is not None:
                     line["unrealized_gain"] = _cents(gain)
                 if single:
@@ -262,6 +296,32 @@ async def list_holdings(
             }
             if closed:
                 entry["closed"] = True
+            # Unvested award units (#393): informational, outside
+            # market_value, totals and net worth.
+            from purser.holdings import awards as award_service
+
+            unvested = award_service.unvested(session, acct, today=today)
+            if len(unvested) > _UNVESTED_TOP:
+                # Bounded: the largest few; list_awards pages the rest.
+                entry["unvested_more"] = len(unvested) - _UNVESTED_TOP
+                unvested = sorted(unvested, key=lambda u: (-u.units, u.symbol))[:_UNVESTED_TOP]
+            if unvested:
+                entry["unvested"] = [
+                    {
+                        "symbol": u.symbol,
+                        "units": _plain(u.units),
+                        "value": _cents(u.value),
+                        "next_vest_date": (
+                            u.next_vest_date.isoformat() if u.next_vest_date else None
+                        ),
+                        "next_vest_units": (
+                            _plain(u.next_vest_units) if u.next_vest_units is not None else None
+                        ),
+                        "unscheduled": _plain(u.unscheduled),
+                        "complete": u.complete,
+                    }
+                    for u in unvested
+                ]
             entries.append(entry)
             lines.append(account_lines)
 
@@ -367,6 +427,13 @@ def _headline(entries: list[dict[str, Any]], total: Decimal, single: bool) -> st
         )
     if stale:
         text += f" {stale} position(s) are valued on a stale close."
+    unvested = [u for e in entries for u in e.get("unvested", [])]
+    if unvested:
+        text += (
+            " Unvested award units (not owned, not in net worth): "
+            + ", ".join(f"{u['units']} {u['symbol']}" for u in unvested)
+            + "."
+        )
     return text
 
 
@@ -405,7 +472,6 @@ async def record_position(
 
     def op(session: Session) -> CallToolResult:
         from purser import appsettings
-        from purser.holdings import projection
         from purser.holdings import service as holdings_service
         from purser.models import Account
 
@@ -427,7 +493,7 @@ async def record_position(
         )
         target = session.get(Account, recorded.position.account_id)
         assert target is not None
-        today = projection.utc_today()
+        today = clock.ledger_today()
         state = next(
             s
             for s in holdings_service.position_states(
@@ -483,6 +549,375 @@ async def record_position(
             if state.stale_price:
                 headline += ", a stale close"
             headline += "."
+        return presentation.three_tier(headline, payload)
+
+    return await _run(op)
+
+
+@audited_tool(
+    kind="write",
+    entity="position",
+    scope="write",
+    emits=Emits(
+        amount=(
+            "cash.amount",
+            "already_recorded.amount",
+            "cash_probe_overridden.amount",
+            "lots.cost_basis",
+            "lots.proceeds",
+            "lots.realized_gain",
+        )
+    ),
+)
+async def record_sale(
+    account: str,
+    symbol: str,
+    quantity: str,
+    price: str,
+    trade_date: str,
+    settle_date: str | None = None,
+    fees: str | None = None,
+    proceeds_to: str = "cash",
+    transaction_id: str | None = None,
+    note: str | None = None,
+    dry_run: bool = False,
+    force_cash: bool = False,
+    lots: list[LotAllocationInput] | None = None,
+    lot_method: str | None = None,
+) -> Annotated[CallToolResult, RecordSaleResult]:
+    """Record a sale of quantity shares of symbol at price on trade_date
+    (YYYY-MM-DD, today or earlier) on a manually tracked brokerage account
+    (write scope). The net proceeds (quantity x price - fees, rounded to
+    the cent) land on the account's cash on trade_date, the day the shares
+    leave the holdings (settle_date posts them on a later settlement date
+    instead), booked against the system account equity.securities — never
+    income. proceeds_to='none' records the sale without cash (shares
+    withheld for tax). If the account already shows a posted row of exactly
+    that amount around the settlement date (the broker's own "SOLD" cash),
+    the call is refused with cash_already_recorded naming that row: when it
+    is the sale's cash, call again with transaction_id set to that row's id
+    to link it (a linked row must hold exactly the net proceeds, to the
+    cent); when it is a different payment of the same amount, call again
+    with force_cash=true to post the sale's cash as well (audited). When the
+    broker's own row of exactly that cash arrives AFTER the sale, the import
+    links it in place of Purser's row by itself: nothing to repair. A sale
+    that would leave the position below zero on
+    any date is refused, naming the date. dry_run=true answers with what the
+    call would do — shares before and after, the cash and its settlement
+    date, and already_recorded when the double-count check finds the cash —
+    and writes nothing. quantity, price and fees are decimal strings.
+
+    A position that tracks lots (list_lots) needs the lots the sale drew on:
+    lots [{lot, quantity}] where lot is a lot_id from list_lots or the
+    broker's lot reference, or 'unallocated' for shares outside every lot;
+    or lot_method fifo (oldest first), lifo or hifo (highest basis per share
+    first). Use the broker's own lot choice when it shows one. A method never
+    takes unallocated shares. The answer's lots summarizes the dispositions
+    (basis, proceeds and realized gain where known, terms)."""
+
+    def op(session: Session) -> CallToolResult:
+        import uuid
+
+        from purser.holdings import service as holdings_service
+        from purser.holdings.cash import CashAlreadyRecorded
+        from purser.ledger import LedgerError
+
+        principal = _principal()
+        figure = _decimal(quantity, "quantity")
+        per_share = _decimal(price, "price")
+        if figure is None or per_share is None:
+            raise ValueError("quantity and price are required")
+        try:
+            link = uuid.UUID(transaction_id) if transaction_id else None
+        except ValueError as exc:
+            raise ValueError(f"transaction_id must be a UUID, got {transaction_id!r}") from exc
+        allocation = None
+        if lots or lot_method:
+            from purser.holdings import service as svc
+
+            position = svc.open_position(
+                session,
+                ledger_service_resolve(session, account).id,
+                svc.symbol_of(symbol),
+            )
+            if position is None:
+                raise LedgerError(f"no open {symbol} position on {account}")
+            allocation = svc.resolve_allocation(
+                session,
+                position.id,
+                method=lot_method,
+                items=_allocation_items(lots),
+            )
+        try:
+            sale = holdings_service.record_sale(
+                session,
+                account_ref=account,
+                symbol=symbol,
+                quantity=figure,
+                price=per_share,
+                trade_date=date_type.fromisoformat(trade_date),
+                settle_on=date_type.fromisoformat(settle_date) if settle_date else None,
+                fees=_decimal(fees, "fees"),
+                proceeds_to=proceeds_to,
+                transaction_id=link,
+                note=note,
+                token=_token_row(session, principal),
+                dry_run=dry_run,
+                force_cash=force_cash,
+                allocation=allocation,
+            )
+        except CashAlreadyRecorded as exc:
+            # The REST 409's code first, so an agent can match on it.
+            raise LedgerError(f"cash_already_recorded: {exc}") from exc
+        return _sale_answer(sale, sold=figure, trade_date=trade_date)
+
+    return await _run(op)
+
+
+def ledger_service_resolve(session: Session, ref: str) -> Any:
+    from purser import ledger as ledger_service
+
+    return ledger_service.resolve_account(session, ref)
+
+
+def _allocation_items(
+    lots: list[LotAllocationInput] | None,
+) -> list[tuple[str | None, bool, Decimal]] | None:
+    """MCP allocations as the service takes them: 'unallocated' names the
+    shares outside every lot; anything else is a lot id or reference."""
+    if not lots:
+        return None
+    out: list[tuple[str | None, bool, Decimal]] = []
+    for item in lots:
+        quantity = _decimal(item.get("quantity"), "lots[].quantity")
+        if quantity is None:
+            raise ValueError("each lots[] entry needs a quantity")
+        ref = (item.get("lot") or "").strip()
+        if ref.lower() == "unallocated":
+            out.append((None, True, quantity))
+        else:
+            out.append((ref or None, False, quantity))
+    return out
+
+
+def _lots_summary(dispositions: Any) -> dict[str, Any]:
+    """A sale's dispositions in one line: totals where every part is known,
+    null otherwise (never a partial sum presented as the whole)."""
+    allocated = [d for d in dispositions if d.lot_id is not None]
+
+    def total(attr: str) -> str | None:
+        values = [getattr(d, attr) for d in allocated]
+        if not values or any(v is None for v in values):
+            return None
+        return str(sum((Decimal(v) for v in values), Decimal(0)))
+
+    return {
+        "dispositions": len(allocated),
+        "unallocated": _plain(
+            sum((Decimal(d.quantity) for d in dispositions if d.lot_id is None), Decimal(0))
+        ),
+        "terms": sorted({d.term for d in allocated if d.term}),
+        "cost_basis": total("cost_basis"),
+        "proceeds": total("proceeds"),
+        "realized_gain": total("realized_gain"),
+    }
+
+
+def _sale_answer(sale: "Sale", *, sold: Decimal, trade_date: str) -> CallToolResult:
+    """record_sale's three tiers: a headline and the compact payload."""
+    symbol = sale.position.symbol
+    shares = f"{_plain(sale.quantity_before)} -> {_plain(sale.quantity_after)} shares"
+    cash: dict[str, Any] | None = None
+    if sale.cash_amount is not None and sale.settle_on is not None:
+        cash = {
+            "amount": _cents(sale.cash_amount),
+            "settle_on": sale.settle_on.isoformat(),
+            "transaction_id": (
+                str(sale.cash_transaction_id) if sale.cash_transaction_id is not None else None
+            ),
+        }
+    payload: dict[str, Any] = {
+        "position": {
+            "position_id": str(sale.position.id),
+            "symbol": symbol,
+            "quantity_before": _plain(sale.quantity_before),
+            "quantity_after": _plain(sale.quantity_after),
+        },
+        "cash": cash,
+        "linked": sale.linked,
+        "dry_run": sale.dry_run,
+        "event_id": str(sale.event_id) if sale.event_id is not None else None,
+    }
+    if sale.dispositions:
+        payload["lots"] = _lots_summary(sale.dispositions)
+    overridden = sale.cash_probe_overridden
+    payload["cash_probe_overridden"] = (
+        {
+            "transaction_id": str(overridden.id),
+            "date": overridden.date.isoformat(),
+            "amount": _cents(
+                next(
+                    Decimal(p.amount)
+                    for p in overridden.postings
+                    if p.account_id == sale.account.id
+                )
+            ),
+        }
+        if overridden is not None
+        else None
+    )
+    forced = (
+        f" (force_cash: posted over transaction {overridden.id} of the same amount on "
+        f"{overridden.date.isoformat()})"
+        if overridden is not None
+        else ""
+    )
+    found = sale.already_recorded
+    if sale.dry_run:
+        payload["already_recorded"] = (
+            {
+                "transaction_id": str(found.transaction_id),
+                "date": found.date.isoformat(),
+                "amount": _cents(found.amount),
+            }
+            if found is not None
+            else None
+        )
+    what = f"{_plain(sold)} {symbol} on {sale.account.path} ({trade_date})"
+    if cash is None:
+        verb = "would move" if sale.dry_run else "moves"
+        money = f"no cash {verb} (proceeds_to none)"
+    elif sale.linked:
+        verb = "would be" if sale.dry_run else "is"
+        money = (
+            f"the account's row of {cash['amount']} on {cash['settle_on']} {verb} the sale's cash"
+        )
+    else:
+        verb = "would land" if sale.dry_run else "lands"
+        money = (
+            f"{cash['amount']} {verb} on the cash on {cash['settle_on']}, against equity.securities"
+        )
+    if not sale.dry_run:
+        return presentation.three_tier(f"Sold {what}: {shares}; {money}{forced}.", payload)
+    headline = f"Dry run, nothing written: selling {what} would take {shares}"
+    if found is not None:
+        headline += (
+            f", but the account already shows this cash (transaction {found.transaction_id} on "
+            f"{found.date.isoformat()} for {_cents(found.amount)}), so the call would be "
+            "refused: pass transaction_id to link that row if it is the sale's cash, or "
+            "force_cash=true if it is a different payment."
+        )
+    else:
+        headline += f"; {money}{forced.replace('posted over', 'would post over')}."
+    return presentation.three_tier(headline, payload)
+
+
+@audited_tool(kind="write", entity="position", scope="write", emits=NOTHING)
+async def reverse_position_event(
+    event_id: str, note: str | None = None
+) -> Annotated[CallToolResult, ReversePositionEventResult]:
+    """Reverse a position event (write scope): the way to undo a wrong
+    record_sale or record_position (event_id is in their answer). Events
+    are never edited; a reversal row makes the event count no more, and a
+    trade's cash goes with it (Purser's own cash row is corrected to zero, a
+    linked row gets its category back). Then record the right event. Refused
+    when the remaining history would leave the position below zero on some
+    date, when the event is already reversed or is itself a reversal, and
+    when the position is closed: a closed position is reopened first (REST
+    PATCH /positions/{id} with closed=false). A trade's cash row in
+    review_batch (flag securities_trade) is corrected this way, never with
+    update_transaction or confirm_transfer. note says why (optional)."""
+
+    def op(session: Session) -> CallToolResult:
+        import uuid
+
+        from purser.holdings import service as holdings_service
+        from purser.models import PositionEvent
+
+        principal = _principal()
+        try:
+            target = uuid.UUID(event_id)
+        except ValueError as exc:
+            raise ValueError(f"event_id must be a UUID, got {event_id!r}") from exc
+        reversal = holdings_service.reverse_event(
+            session, event_id=target, note=note, token=_token_row(session, principal)
+        )
+        original = session.get(PositionEvent, target)
+        assert original is not None
+        position = holdings_service.get_position(session, reversal.position_id)
+        held = holdings_service.quantity_on(session, position, clock.ledger_today())
+        cash: dict[str, Any] | None = None
+        if original.transaction_id is not None and reversal.transaction_id is not None:
+            cash = {
+                "transaction_id": str(original.transaction_id),
+                "undone_by": str(reversal.transaction_id),
+            }
+        payload: dict[str, Any] = {
+            "reverses_id": str(original.id),
+            "reversal_id": str(reversal.id),
+            "kind": original.kind,
+            "occurred_on": original.occurred_on.isoformat(),
+            "position": {
+                "position_id": str(position.id),
+                "symbol": position.symbol,
+                "quantity_after": _plain(held),
+            },
+            "cash": cash,
+        }
+        headline = (
+            f"Reversed the {original.kind} of {_plain(Decimal(original.quantity))} "
+            f"{position.symbol} on {original.occurred_on.isoformat()}: the position now holds "
+            f"{_plain(held)} shares"
+        )
+        if cash is not None:
+            headline += (
+                f"; its cash (transaction {cash['transaction_id']}) is undone by transaction "
+                f"{cash['undone_by']}"
+            )
+        return presentation.three_tier(headline + ".", payload)
+
+    return await _run(op)
+
+
+@audited_tool(kind="write", entity="position", scope="write", emits=NOTHING)
+async def reopen_position(position_id: str) -> Annotated[CallToolResult, ReopenPositionResult]:
+    """Reopen a closed position (write scope), so a wrong event on it — its
+    last sale, say — can be reversed with reverse_position_event and recorded
+    again; close it again afterwards (REST PATCH /positions/{id} with
+    closed=true). position_id is in record_sale's and record_position's
+    answers and in the "position is closed" refusal. Refused while another
+    position in the symbol is open on the account (one open per symbol),
+    and while a later position in it exists. Audited, like the REST
+    PATCH /positions/{id} with closed=false it shares a service path with."""
+
+    def op(session: Session) -> CallToolResult:
+        import uuid
+
+        from purser.holdings import service as holdings_service
+        from purser.models import Account
+
+        principal = _principal()
+        try:
+            target = uuid.UUID(position_id)
+        except ValueError as exc:
+            raise ValueError(f"position_id must be a UUID, got {position_id!r}") from exc
+        position = holdings_service.update_position(
+            session, position_id=target, reopen=True, token=_token_row(session, principal)
+        )
+        account = session.get(Account, position.account_id)
+        assert account is not None
+        held = holdings_service.quantity_on(session, position, clock.ledger_today())
+        payload = {
+            "position_id": str(position.id),
+            "symbol": position.symbol,
+            "account": account.path,
+            "quantity": _plain(held),
+        }
+        headline = (
+            f"Reopened {account.path} {position.symbol} (position {position.id}, holding "
+            f"{payload['quantity']}): reverse_position_event its wrong event, record the "
+            "right one, then close it again."
+        )
         return presentation.three_tier(headline, payload)
 
     return await _run(op)

@@ -2,6 +2,7 @@
 machine recategorization and the status funnel (DESIGN §4)."""
 
 import uuid
+from collections.abc import Iterable
 from datetime import date as date_type
 from decimal import Decimal
 from typing import Any
@@ -12,8 +13,14 @@ from sqlalchemy.orm import Session
 from purser import audit, balances, events
 from purser.admin import security
 from purser.core import ledger as core
-from purser.ledger.accounts import _assert_accounts_open, resolve_account
-from purser.ledger.errors import LedgerError
+from purser.ledger.accounts import (
+    _assert_accounts_open,
+    is_system_account,
+    lock_transaction,
+    refuse_system_account,
+    resolve_account,
+)
+from purser.ledger.errors import LedgerError, RowChanged
 from purser.ledger.payees import resolve_payee
 from purser.ledger.tx_create import (
     _actor_origin,
@@ -22,7 +29,7 @@ from purser.ledger.tx_create import (
     check_category_currency,
 )
 from purser.ledger.tx_read import get_transaction
-from purser.models import Account, ApiToken, Posting, Transaction
+from purser.models import Account, ApiToken, Posting, Schedule, Transaction
 
 # ---------------------------------------------------------------------------
 # Transactions — update / lifecycle
@@ -62,11 +69,23 @@ def update_transaction(
     from purser import transfers  # function-local: transfers imports purser.ledger
 
     tx = get_transaction(session, tx_id)
+    if tx.schedule_id is not None and tx.status == "expected":
+        tx = lock_transaction(session, tx_id)
+    # Locked before its checks: a concurrent merge or correction of this row
+    # waits for this edit, or this edit for it (#386 review).
+    lock_rows(session, [tx])
     if tx.status == core.Status.VOID:
         raise LedgerError("void transactions are immutable lineage")
     # A closed account's rows are read-only (in-place edits and reversal-based
     # corrections alike): reopen the account to correct history (DESIGN §3.4).
     _assert_accounts_open(session, {p.account_id for p in tx.postings})
+    if tx.status == core.Status.POSTED:
+        # A posted row is corrected at most once; the correction chain
+        # continues from the replacement. Checked before the transfer sugar
+        # too (#386 review): converting a corrected original would merge or
+        # absorb it while its replacement stays live. Backstopped by
+        # transactions_reverses_id_uniq.
+        refuse_corrected(session, tx)
 
     if category_ref is not None:
         other_edits = (date, amount, payee_name, description)
@@ -88,13 +107,6 @@ def update_transaction(
     if tx.status == core.Status.POSTED:
         if not security.can_write(token.scopes):
             raise LedgerError("editing a posted transaction requires write scope")
-        # A posted row is corrected at most once; the correction chain continues
-        # from the replacement. Backstopped by transactions_reverses_id_uniq.
-        correction = session.execute(
-            select(Transaction.id).where(Transaction.reverses_id == tx.id)
-        ).scalar_one_or_none()
-        if correction is not None:
-            raise LedgerError("transaction already corrected; edit the replacement instead")
         if transfers.is_transfer(tx):
             raise LedgerError(transfers.posted_edit_refusal(session, tx))
         return _reverse_and_replace(
@@ -108,6 +120,11 @@ def update_transaction(
             description=description,
         )
 
+    from purser import occurrences
+
+    certainty_row = None
+    if tx.schedule_id is not None and (amount is not None or date is not None):
+        certainty_row = occurrences.remember(session, tx, reason="edit", actor=token.id)
     before = _tx_audit_shape(tx, _specs_of(tx))
     old_date = tx.date
     # Postings first: they validate before anything on the row changes.
@@ -127,6 +144,7 @@ def update_transaction(
             if not new_category.is_virtual:
                 raise LedgerError(f"{new_category.path} is not a category")
             if category_ref:
+                refuse_system_account(new_category)
                 check_category_currency(real.currency, new_category)
             real.amount = new_amount
             category.amount = -new_amount
@@ -140,6 +158,23 @@ def update_transaction(
         tx.description = description
     if payee_name is not None:
         tx.payee = resolve_payee(session, payee_name)
+    if certainty_row is not None:
+        from purser import clock
+
+        evidence = occurrences.Evidence(
+            state="estimated",
+            source="user" if token.kind == "session" else "agent",
+            as_of=clock.ledger_today(),
+            note="Supplied override; confirmation evidence not supplied",
+        )
+        if amount is not None:
+            schedule = session.get(Schedule, tx.schedule_id)
+            assert schedule is not None
+            occurrences.set_evidence(
+                certainty_row, "amount", evidence, occurrences.amount_of(tx, schedule), token
+            )
+        if date is not None:
+            occurrences.set_evidence(certainty_row, "date", evidence, tx.date, token)
     session.flush()
     # In-place edits move date/amount on countable rows; expected rows are
     # outside the balance set. min() covers a date moved in either direction.
@@ -200,7 +235,46 @@ def _flat_legs(tx: Transaction) -> tuple[Posting, Posting]:
         raise LedgerError(
             "only a row with one real leg and one category leg can be edited this way"
         )
+    if is_system_account(virtual[0].account):
+        # The cash of a securities trade (decision 103) moves with its trade:
+        # an edit here would part the cash leg from the share leg.
+        raise LedgerError(
+            f"this row is the cash of a securities trade ({virtual[0].account.path}); it "
+            "moves with its trade, so reverse the trade's position event instead"
+        )
     return real[0], virtual[0]
+
+
+def refuse_corrected(session: Session, tx: Transaction) -> None:
+    """Refuse a row a correction already replaced: it stays posted while its
+    replacement carries it on, so the correction chain continues from the
+    replacement — and merging, absorbing or converting the original would
+    leave the replacement live beside the result, counting the money twice
+    (#386 review). THE corrected-row check of every write path."""
+    corrected = session.execute(
+        select(Transaction.id).where(Transaction.reverses_id == tx.id).limit(1)
+    ).first()
+    if corrected is not None:
+        raise RowChanged("transaction already corrected; edit the replacement instead")
+
+
+def lock_rows(session: Session, txs: Iterable[Transaction]) -> None:
+    """Lock the rows a merge, an absorb, a conversion or a correction is
+    about to change (``SELECT … FOR NO KEY UPDATE``, in id order) and reload
+    them, so the caller's checks — still live, never corrected — read what
+    is committed now: a merge and a concurrent correction of one bank row
+    serialize instead of both landing (#386 review). Taken before anything
+    the write marks dirty: rows first, the balance watermark after."""
+    ids = sorted({tx.id for tx in txs})
+    if not ids:
+        return
+    session.execute(
+        select(Transaction)
+        .where(Transaction.id.in_(ids))
+        .order_by(Transaction.id)
+        .with_for_update(key_share=True)  # FOR NO KEY UPDATE
+        .execution_options(populate_existing=True)
+    ).all()
 
 
 def _reverse_and_replace(
@@ -224,6 +298,7 @@ def _reverse_and_replace(
     if not new_category.is_virtual:
         raise LedgerError(f"{new_category.path} is not a category")
     if category_ref:
+        refuse_system_account(new_category)
         check_category_currency(real.currency, new_category)
 
     replacement_specs = core.expand_flat(
@@ -260,6 +335,13 @@ def reverse_and_replace_with_specs(
     supplied by the caller — shared by flat recategorization, transfer
     conversion, and machine categorization. ``token=None`` is a system
     actor (scope gates are the caller's responsibility)."""
+    # The row is locked and reloaded first, so a merge or another correction
+    # that committed meanwhile is seen: a correction of a row voided into a
+    # transfer, or corrected twice, would leave two live copies (#386 review).
+    lock_rows(session, [tx])
+    if tx.status != core.Status.POSTED:
+        raise RowChanged(f"transaction {tx.id} is {tx.status}, not posted")
+    refuse_corrected(session, tx)
     original_specs = _specs_of(tx)
     reversal = _persist_transaction(
         session,
@@ -324,11 +406,8 @@ def recategorize_posted(
     this), provenance recorded in the audit row. ``token=None`` is the
     scheduled system pass; the caller enforces scope for token-bearing runs.
     """
-    correction = session.execute(
-        select(Transaction.id).where(Transaction.reverses_id == tx.id)
-    ).scalar_one_or_none()
-    if correction is not None:
-        raise LedgerError("transaction already corrected; edit the replacement instead")
+    lock_rows(session, [tx])
+    refuse_corrected(session, tx)
     real, _category = _flat_legs(tx)
     category = session.get(Account, category_id)
     if category is None:
@@ -433,6 +512,10 @@ def transition_status(
             entity_type="transaction",
             entity_id=tx.id,
             payload={"date": tx.date.isoformat(), "description": tx.description},
+        )
+    if old == core.Status.EXPECTED and new_status == core.Status.VOID:
+        matching.rescind_expected_proposals(
+            session, tx.id, actor_token_id=token.id if token else None
         )
     matching.emit_estimate_changes(session, probes)
     return tx

@@ -161,6 +161,7 @@ class TestRecordAndValidate:
             db_session,
             position_id=recorded.position.id,
             kind="sell",
+            proceeds_to="none",  # share mechanics only (cash: decision 103)
             occurred_on=sell_day,
             quantity=Decimal("8"),
             token=None,
@@ -210,7 +211,10 @@ class TestRecordAndValidate:
             ({"kind": "set_quantity", "price": Decimal("1")}, "no price or fees"),
             ({"kind": "buy", "cost_basis": Decimal("1")}, "cost_basis applies"),
             ({"kind": "buy", "quantity": Decimal("0")}, "above zero"),
-            ({"kind": "sell", "quantity": Decimal("0.0000001")}, "6 decimal places"),
+            (
+                {"kind": "sell", "quantity": Decimal("0.0000001"), "proceeds_to": "none"},
+                "6 decimal places",
+            ),
             ({"kind": "split"}, "kind must be one of"),
         ]
         for overrides, message in cases:
@@ -417,6 +421,7 @@ class TestReverseAndClose:
             db_session,
             position_id=position.id,
             kind="sell",
+            proceeds_to="none",  # share mechanics only (cash: decision 103)
             occurred_on=TODAY - timedelta(days=2),
             quantity=Decimal("1"),
             token=None,
@@ -442,6 +447,7 @@ class TestReverseAndClose:
             db_session,
             position_id=recorded.position.id,
             kind="sell",
+            proceeds_to="none",  # share mechanics only (cash: decision 103)
             occurred_on=TODAY,
             quantity=Decimal("2"),
             token=None,
@@ -487,6 +493,7 @@ class TestProjection:
             db_session,
             position_id=recorded.position.id,
             kind="sell",
+            proceeds_to="none",  # share mechanics only (cash: decision 103)
             occurred_on=TODAY - timedelta(days=5),
             quantity=Decimal("3"),
             token=None,
@@ -811,6 +818,7 @@ class TestSwitchingSource:
             db_session,
             position_id=recorded.position.id,
             kind="sell",
+            proceeds_to="none",  # share mechanics only (cash: decision 103)
             occurred_on=TODAY,
             quantity=Decimal("10"),
             token=None,
@@ -917,6 +925,7 @@ def _build(session: Session, spec: dict) -> Account:
                     occurred_on=TODAY - timedelta(days=days_ago),
                     quantity=quantity,
                     token=None,
+                    proceeds_to="none" if kind == "sell" else None,
                 )
         except LedgerError:
             continue  # refused: the service keeps only valid histories
@@ -1060,6 +1069,7 @@ class TestConcurrentWrites:
                 session,
                 position_id=recorded.position.id,
                 kind="sell",
+                proceeds_to="none",  # share mechanics only (cash: decision 103)
                 occurred_on=TODAY - timedelta(days=2),
                 quantity=Decimal("10"),
                 token=None,
@@ -1202,6 +1212,7 @@ class TestNoOverlap:
             session,
             position_id=first.position.id,
             kind="sell",
+            proceeds_to="none",  # share mechanics only (cash: decision 103)
             occurred_on=TODAY - timedelta(days=10),
             quantity=Decimal("10"),
             token=None,
@@ -1228,6 +1239,7 @@ class TestNoOverlap:
             db_session,
             position_id=first.position.id,
             kind="sell",
+            proceeds_to="none",  # share mechanics only (cash: decision 103)
             occurred_on=TODAY,
             quantity=Decimal("10"),
             token=None,
@@ -1237,6 +1249,7 @@ class TestNoOverlap:
             db_session,
             position_id=first.position.id,
             kind="sell",
+            proceeds_to="none",  # share mechanics only (cash: decision 103)
             occurred_on=TODAY - timedelta(days=30),
             quantity=Decimal("10"),
             token=None,
@@ -1452,6 +1465,7 @@ class TestOverlapBothWays:
             db_session,
             position_id=later.position.id,
             kind="sell",
+            proceeds_to="none",  # share mechanics only (cash: decision 103)
             occurred_on=TODAY - timedelta(days=5),
             quantity=Decimal("2"),
             token=None,
@@ -1516,6 +1530,7 @@ class TestOverlapBothWays:
             db_session,
             position_id=held.position.id,
             kind="sell",
+            proceeds_to="none",  # share mechanics only (cash: decision 103)
             occurred_on=TODAY - timedelta(days=20),
             quantity=Decimal("5"),
             token=None,
@@ -1669,10 +1684,13 @@ class TestEarlierManualPeriods:
 
 
 class TestValueOutOfRangeLogging:
-    def test_logged_on_the_transition_not_on_every_new_set(self, db_session: Session) -> None:
+    def test_logged_on_the_transition_not_on_every_new_set(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """#422 item 4: decision 89 logs a value that does not fit an amount
         once. Each day's new set carried it again, so the daily projection
         logged it every day; now only the row where it starts is logged."""
+        import structlog
         from structlog.testing import capture_logs
 
         account = _brokerage(db_session)
@@ -1680,6 +1698,12 @@ class TestValueOutOfRangeLogging:
         start = TODAY - timedelta(days=3)
         _price(db_session, symbol, start, "10000")
         with capture_logs() as logs:
+            # The module logger caches its processors on first use
+            # (cache_logger_on_first_use), so a logger an earlier test bound
+            # under an earlier configuration (a live server's
+            # configure_logging) would bypass capture_logs. A fresh logger
+            # reads the patched configuration; production logging is unchanged.
+            monkeypatch.setattr(projection, "log", structlog.get_logger(projection.__name__))
             service.record_position(
                 db_session,
                 account_ref=str(account.id),
@@ -1694,3 +1718,22 @@ class TestValueOutOfRangeLogging:
         logged = [e for e in logs if e["event"] == "holdings.value_out_of_range"]
         assert len(logged) == 1
         assert logged[0]["first"] == start.isoformat()
+
+
+def test_log_capture_survives_a_logger_cached_under_an_earlier_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The setup the transition test relies on: a module logger cached by an
+    earlier configuration misses capture_logs, a fresh one does not."""
+    import structlog
+    from structlog.testing import capture_logs
+
+    from purser.logging import configure_logging
+
+    configure_logging()
+    projection.log.info("bind")  # caches the processors of this configuration
+    configure_logging()
+    with capture_logs() as logs:
+        monkeypatch.setattr(projection, "log", structlog.get_logger(projection.__name__))
+        projection.log.info("probe")
+    assert [e["event"] for e in logs] == ["probe"]

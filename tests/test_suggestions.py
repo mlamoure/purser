@@ -3,8 +3,11 @@ durable scoped rejection, snooze, deterministic accept, scope gates, the
 propose-scope create_schedule path, digest section, and the legacy-row
 migration helper."""
 
+import threading
 from datetime import date, timedelta
 from decimal import Decimal
+from time import monotonic, sleep
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,6 +16,7 @@ from hypothesis import strategies as st
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
+import purser.db
 from purser import crypto, digest
 from purser import suggestions as service
 from purser.models import ApiToken, Suggestion
@@ -402,6 +406,61 @@ class TestInbox:
         assert all("headline" in t for t in block["top"])
 
 
+class TestTheLostRace:
+    def test_an_agent_proposal_racing_the_detector_keeps_its_draft_and_note(
+        self, seeded: None, client: TestClient, migrated_engine: Engine
+    ) -> None:
+        """#386 review round 2, item 7: the nightly detector and an agent's
+        proposal for the same account and payee race to one fingerprint. The
+        agent's insert waits for the detector's and then finds that row; like
+        a proposal arriving after the detector committed, it refreshes the
+        row with the agent's draft and note — never a 201 for a row that
+        silently dropped them."""
+        from purser import schedules
+        from tests.test_transfer_pair_suggestions import _waiting_on_a_lock
+
+        _seed_recurring(migrated_engine, "Netflix")
+        agent = client.post("/tokens", json={"name": "agent", "scopes": ["read", "write"]})
+        headers = {"Authorization": f"Bearer {agent.json()['token']}"}
+        note = "Statement 2026-10: Netflix Premium, 22.99 from next month"
+        body = {
+            "name": "Streaming plan",
+            "account": "assets.checking",
+            "rrule": "FREQ=MONTHLY;BYMONTHDAY=15",
+            "amount": "-22.99",
+            "payee": "Netflix",
+            "note": note,
+            "propose": True,  # a per-call choice since #436, not a token scope
+        }
+        responses: list[Any] = []
+        with purser.db.get_sessionmaker()() as detector:
+            (row,) = schedules.detect_schedules(detector, actor_token_id=None)
+            detected_id = str(row.id)  # inserted, not committed yet
+            thread = threading.Thread(
+                target=lambda: responses.append(
+                    client.post("/schedules", json=body, headers=headers)
+                ),
+                daemon=True,
+            )
+            thread.start()
+            deadline = monotonic() + 30
+            while not _waiting_on_a_lock(migrated_engine):
+                assert thread.is_alive() and monotonic() < deadline, "the agent never waited"
+                sleep(0.05)
+            detector.commit()
+        thread.join(timeout=30)
+
+        (proposed,) = responses
+        assert proposed.status_code == 201, proposed.text
+        assert proposed.json()["suggestion_id"] == detected_id
+        stored = client.get(f"/suggestions/{detected_id}").json()
+        assert (stored["draft"]["name"], stored["draft"]["amount"]) == ("Streaming plan", "-22.99")
+        assert stored["evidence"] == {"note": note}
+        assert stored["seen_count"] == 2
+        created = client.get("/events", params={"type": "suggestion.created"}).json()
+        assert [e["entity_id"] for e in created] == [detected_id]
+
+
 class TestFingerprint:
     @settings(
         max_examples=25, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
@@ -627,3 +686,98 @@ class TestDetectionV2:
         scheduler_module._register_builtin_jobs()
         times = {job_id: cron for job_id, cron, _ in scheduler_module._JOBS}
         assert times["schedules.detect_daily"] == {"hour": 7, "minute": 5}
+
+
+class TestAttentionLifecycle:
+    def test_lapsed_detector_card_is_hidden_then_withdrawn_and_can_reopen(
+        self,
+        seeded: None,
+        client: TestClient,
+        migrated_engine: Engine,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from purser import clock
+
+        _seed_recurring(migrated_engine, "Example Subscription")
+        sid = _detect(client)["suggestions"][0]["suggestion_id"]
+        today = clock.ledger_today()
+        monkeypatch.setattr(clock, "ledger_today", lambda: today + timedelta(days=100))
+        assert client.get("/suggestions").json() == []
+        assert client.get("/suggestions/counts").json()["total"] == 0
+        assert client.get(f"/suggestions/{sid}").json()["status"] == "open"
+        refused = client.post(f"/suggestions/{sid}/decide", json={"decision": "accept"})
+        assert refused.status_code == 422 and "stale" in refused.text
+        _detect(client)
+        assert client.get(f"/suggestions/{sid}").json()["status"] == "withdrawn"
+        actions = client.get("/audit", params={"action": "suggestion.withdraw"}).json()["items"]
+        assert any(str(row["entity_id"]) == sid for row in actions)
+        monkeypatch.setattr(clock, "ledger_today", lambda: today)
+        _detect(client)
+        assert client.get(f"/suggestions/{sid}").json()["status"] == "open"
+        assert client.get("/suggestions/counts").json()["total"] == 1
+
+    def test_scoped_scan_preserves_other_account_proposals(
+        self,
+        seeded: None,
+        client: TestClient,
+        migrated_engine: Engine,
+        db_session: Session,
+    ) -> None:
+        from purser import schedules
+
+        _seed_recurring(migrated_engine, "Example Membership")
+        sid = _detect(client)["suggestions"][0]["suggestion_id"]
+        schedules.detect_schedules(
+            db_session, account_ref="liabilities.citicard", actor_token_id=None
+        )
+        db_session.commit()
+        assert client.get(f"/suggestions/{sid}").json()["status"] == "open"
+
+    def test_changed_latest_price_is_proposed_with_warning(
+        self,
+        seeded: None,
+        db_session: Session,
+    ) -> None:
+        from sqlalchemy import select
+
+        from purser import schedules
+        from purser.core import recurrence
+        from purser.models import Account, Payee
+
+        account = db_session.scalar(select(Account).where(Account.path == "assets.checking"))
+        assert account is not None
+        payee = Payee(name="Example Membership", name_bidx=crypto.blind_index("example membership"))
+        db_session.add(payee)
+        db_session.flush()
+        occurrences = [
+            recurrence.Occurrence(date=_month_day(n, 15), amount=Decimal("-8" if n else "-25"))
+            for n in reversed(range(5))
+        ]
+        group = schedules._Group(
+            account=account, counterparty=None, payee=payee, occurrences=occurrences
+        )
+        detected = recurrence.detect(occurrences, today=date.today())
+        assert detected is not None
+        draft, evidence = schedules._draft_and_evidence(group, detected)
+        assert draft.amount == Decimal("-25") and draft.amount_type == "fixed"
+        assert evidence["amount"]["price_changed"] is True
+
+
+def test_attention_exposes_schedule_certainty_and_account(
+    seeded: None,
+    client: TestClient,
+    migrated_engine: Engine,
+) -> None:
+    _seed_recurring(migrated_engine, "Example Utility")
+    sid = _detect(client)["suggestions"][0]["suggestion_id"]
+    accepted = client.post(f"/suggestions/{sid}/decide", json={"decision": "accept"})
+    assert accepted.status_code == 200, accepted.text
+    schedule_id = accepted.json()["schedule"]["id"]
+    rows = client.get("/matching/unmatched", params={"direction": "expected"}).json()
+    instances = [r for r in rows if r["schedule_id"] == schedule_id]
+    assert instances
+    for row in instances:
+        assert row["account_path"] == "assets.checking"
+        assert row["account_name"] == "Checking"
+        assert row["schedule_status"] == "active"
+        assert row["amount_estimated"] is True and row["date_estimated"] is True

@@ -35,7 +35,10 @@ async def review_batch(
     available. If one you needed was absent, escalate rather than clear.
     Rows the backend reviewer handed back appear under `escalated` first.
     Fix what is wrong with update_transaction/confirm_transfer, then
-    mark_reviewed. Set include_guidance=false on later pages."""
+    mark_reviewed — except a row flagged securities_trade: its `locked`
+    names the trade (event_id, position_id) whose cash it is, and the
+    guidance says how such a row is corrected. Set include_guidance=false on
+    later pages."""
 
     def op(session: Session) -> dict[str, Any]:
         from purser import review as review_service

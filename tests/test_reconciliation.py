@@ -489,6 +489,7 @@ def test_audit_rows_and_event_payload(
             "reconciliation_id": result["reconciliation_id"],
             "as_of": STATEMENT.isoformat(),
             "basis": "posted",
+            "component": "balance",
             "statement_balance": "425.0000",
             "target_balance": "-425.0000",
             "ledger_balance": "-400.0000",
@@ -595,7 +596,7 @@ class TestReconcileProperties:
         suppress_health_check=[HealthCheck.function_scoped_fixture],
     )
     @given(
-        type_=st.sampled_from(["checking", "savings", "credit_card"]),
+        type_=st.sampled_from(["checking", "savings", "credit_card", "brokerage"]),
         rows=st.lists(
             st.tuples(
                 st.integers(min_value=0, max_value=30),
@@ -624,6 +625,9 @@ class TestReconcileProperties:
         basis: str,
     ) -> None:
         token, account, category = _setup(db_session, type_=type_)
+        if type_ == "brokerage":
+            account.holdings_source = "manual"
+            db_session.flush()
         for back, amount, status in rows:
             _row(db_session, token, account, category, amount, TODAY - timedelta(days=back), status)
         as_of = TODAY - timedelta(days=days_back)
@@ -631,6 +635,7 @@ class TestReconcileProperties:
             "account_id": account.id,
             "as_of": as_of,
             "statement_balance": statement,
+            "component": "cash" if type_ == "brokerage" else "balance",
             "basis": basis,
             "token": token,
             "today": TODAY,
@@ -767,21 +772,26 @@ def test_delete_account_removes_its_reconciliations(clean_db: None, db_session: 
     assert remaining == 0
 
 
+@pytest.mark.parametrize("type_", ["checking", "brokerage"])
 def test_concurrent_reconciles_serialize_on_the_account(
-    clean_db: None, migrated_engine: Engine
+    clean_db: None, migrated_engine: Engine, type_: str
 ) -> None:
     """Two callers racing the same reconcile: the second waits on the
     account row lock, then sees the first's committed claim and answers
     created=false — one row, one adjustment."""
     sessionmaker = purser.db.get_sessionmaker()
     with sessionmaker() as setup:
-        token, account, category = _setup(setup)
+        token, account, category = _setup(setup, type_=type_)
+        if type_ == "brokerage":
+            account.holdings_source = "manual"
+            setup.flush()
         _row(setup, token, account, category, Decimal("100.00"), OPENED)
         setup.commit()
         token_id, account_id = token.id, account.id
 
     request: dict[str, Any] = {
         "account_id": account_id,
+        "component": "cash" if type_ == "brokerage" else "balance",
         "as_of": STATEMENT,
         "statement_balance": Decimal("125.00"),
         "today": TODAY,
@@ -919,3 +929,106 @@ def test_migration_0028_round_trips(scratch_db: tuple[Config, sa.Engine]) -> Non
     command.upgrade(cfg, "0028")
     tables, columns = _schema(engine)
     assert "account_reconciliations" in tables and "reconciled_through" in columns
+
+
+def test_manual_brokerage_reconciles_cash_without_touching_investments(
+    seeded: dict[str, str], admin_client: TestClient, migrated_engine: Engine
+) -> None:
+    client = admin_client
+    created = client.post(
+        "/accounts",
+        json={
+            "name": "Plan",
+            "type": "brokerage",
+            "path": "assets.plan",
+        },
+    )
+    assert created.status_code == 201, created.text
+    aid = created.json()["id"]
+    cash = {"statement_balance": "25", "component": "cash"}
+    # Both implicit total and explicit cash on feed-sourced accounts refuse.
+    assert _reconcile(client, aid, statement_balance="25").status_code == 422
+    assert _reconcile(client, aid, **cash).status_code == 422
+    assert client.patch(f"/accounts/{aid}", json={"holdings_source": "manual"}).status_code == 200
+    assert _reconcile(client, aid, statement_balance="25").status_code == 422
+    assert _reconcile(client, seeded["checking"], **cash).status_code == 422
+    assert _reconcile(client, aid, statement_balance="25", component="total").status_code == 422
+    _post(client, "assets.plan", "-100", OPENED)
+    pos = client.post(
+        f"/accounts/{aid}/positions",
+        json={
+            "symbol": "SYN",
+            "quantity": "10",
+            "as_of": OPENED.isoformat(),
+        },
+    )
+    assert pos.status_code == 201, pos.text
+    price = client.post(
+        "/prices", json={"symbol": "SYN", "date": STATEMENT.isoformat(), "close": "100"}
+    )
+    assert price.status_code in (200, 201), price.text
+    award_body = {
+        "as_of": STATEMENT.isoformat(),
+        "captured_at": datetime.now(UTC).isoformat(),
+        "completeness": "complete",
+        "awards": [
+            {
+                "symbol": "SYN",
+                "grant_ref": "SYN-G1",
+                "granted_on": OPENED.isoformat(),
+                "granted_quantity": "50",
+                "vested_quantity": "0",
+                "schedule": [
+                    {"vest_date": (TODAY + timedelta(days=30)).isoformat(), "quantity": "50"}
+                ],
+            }
+        ],
+    }
+    preview = client.post(f"/accounts/{aid}/award-captures", json=award_body)
+    assert preview.status_code == 200, preview.text
+    done_award = client.post(
+        f"/accounts/{aid}/award-captures",
+        json={
+            **award_body,
+            "dry_run": False,
+            "expect_hash": preview.json()["plan_hash"],
+        },
+    )
+    assert done_award.status_code == 200, done_award.text
+    positions_before = client.get(f"/accounts/{aid}/positions").json()
+    awards_before = client.get(f"/accounts/{aid}/awards?include_vests=true").json()
+    tx_before = _count(migrated_engine, "SELECT COUNT(*) FROM transactions")
+    dry = _reconcile(client, aid, dry_run=True, **cash)
+    assert dry.status_code == 200, dry.text
+    assert dry.json()["component"] == "cash"
+    assert Decimal(dry.json()["adjustment"]) == Decimal("125")
+    assert _count(migrated_engine, "SELECT COUNT(*) FROM transactions") == tx_before
+    done = _reconcile(client, aid, **cash)
+    assert done.status_code == 200, done.text
+    assert done.json()["created"]
+    assert _reconcile(client, aid, **cash).json() == {**done.json(), "created": False}
+    assert _count(migrated_engine, "SELECT COUNT(*) FROM transactions") == tx_before + 1
+    account = client.get(f"/accounts/{aid}").json()
+    assert Decimal(account["balance"]) == Decimal("1025")
+    assert account["reconciliation"]["component"] == "cash"
+    assert Decimal(account["reconciliation"]["ledger_balance"]) == Decimal("25")
+    assert account["reconciliation"]["in_balance"]
+    assert not account["feed_balance_is_cash"]
+    assert client.get(f"/accounts/{aid}/positions").json() == positions_before
+    assert client.get(f"/accounts/{aid}/awards?include_vests=true").json() == awards_before
+    worth = client.get("/networth").json()
+    row = next(r for r in worth["breakdown"] if r["path"] == "assets.plan")
+    assert Decimal(row["value"]) == Decimal("1025")
+    tx = client.get(f"/transactions/{done.json()['adjustment_tx_id']}").json()
+    assert tx["origin"] == "system" and tx["needs_review"]
+    assert sum(Decimal(p["amount"]) for p in tx["postings"]) == 0
+    assert client.post(
+        "/prices", json={"symbol": "SYN", "date": STATEMENT.isoformat(), "close": "110"}
+    ).status_code in (200, 201)
+    assert client.get(f"/accounts/{aid}").json()["reconciliation"]["in_balance"]
+    assert not _reconcile(client, aid, **cash).json()["created"]
+    _post(client, "assets.plan", "3", STATEMENT)
+    moved = _reconcile(client, aid, **cash)
+    assert moved.status_code == 409 and moved.json()["detail"]["code"] == "reconciliation_moved"
+    history = client.get(f"/accounts/{aid}/reconciliations").json()
+    assert history[0]["component"] == "cash" and not history[0]["in_balance"]

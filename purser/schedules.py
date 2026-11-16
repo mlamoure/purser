@@ -32,10 +32,10 @@ from datetime import date as date_type
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import exists, or_, select
 from sqlalchemy.orm import Session, selectinload
 
-from purser import audit, crypto, events
+from purser import audit, clock, crypto, events, occurrences
 from purser import ledger as ledger_service
 from purser import networth as networth_service
 from purser.admin import security
@@ -79,7 +79,7 @@ def get_schedule(session: Session, schedule_id: uuid.UUID) -> Schedule:
 def _validate_rule(rrule: str, dtstart: date_type) -> list[date_type]:
     """FREQ allowlist + a real expansion (dateutil is the parser); returns the
     upcoming occurrences from today so callers can seed ``next_due``."""
-    today = date_type.today()
+    today = clock.ledger_today()
     try:
         core_forecasting.validate_rrule(rrule)
         return core_forecasting.expand_rrule(
@@ -152,6 +152,7 @@ def create_schedule(
     counterparty_account_ref: str | None = None,
     note: str | None = None,
     propose: bool = False,
+    date_mode: str = "fixed",
 ) -> Schedule | Suggestion:
     """Create an ACTIVE schedule and materialize it. With ``propose`` the
     caller asks instead (#436): a **suggestion** carrying the validated draft
@@ -166,6 +167,8 @@ def create_schedule(
     create has no suggestion, so it keeps no note."""
     from purser import suggestions as suggestions_service
 
+    if date_mode not in ("fixed", "estimated"):
+        raise LedgerError("date_type must be fixed | estimated")
     note = suggestions_service.agent_note(note)
     account = ledger_service.resolve_account(session, account_ref)
     if account.is_virtual:
@@ -187,8 +190,9 @@ def create_schedule(
         category = ledger_service.resolve_account(session, category_path)
         if not category.is_virtual:
             raise LedgerError(f"{category.path} is not a category (virtual account)")
+        ledger_service.refuse_system_account(category)
         category_path = category.path
-    anchor = dtstart or date_type.today()
+    anchor = dtstart or clock.ledger_today()
     upcoming = _validate_rule(rrule, anchor)
 
     if propose:
@@ -214,6 +218,7 @@ def create_schedule(
             account_ref=account_ref,
             rrule=rrule,
             dtstart=anchor,
+            date_mode=date_mode,
             amount_type=amount_type,
             amount=amount,
             estimate_basis=estimate_basis,
@@ -254,6 +259,7 @@ def create_schedule(
         counterparty_account_id=counterparty.id if counterparty is not None else None,
         rrule=rrule,
         dtstart=anchor,
+        date_type=date_mode,
         amount_type=amount_type,
         amount=amount,
         estimate_basis=estimate_basis,
@@ -295,6 +301,7 @@ def _schedule_audit_shape(schedule: Schedule) -> dict[str, Any]:
         "name": schedule.name,
         "rrule": schedule.rrule,
         "dtstart": schedule.dtstart.isoformat(),
+        "date_type": schedule.date_type,
         "amount_type": schedule.amount_type,
         "amount": str(schedule.amount) if schedule.amount is not None else None,
         "estimate_basis": schedule.estimate_basis,
@@ -398,6 +405,7 @@ def update_schedule(
     payee_name: str | None = None,
     autopost_policy: str | None = None,
     counterparty_account_ref: str | None = None,
+    date_mode: str | None = None,
 ) -> UpdatedSchedule:
     """Edit the rule (write scope). Live, un-pinned instances are resynced:
     slots the new rule no longer produces are voided-and-released, amounts
@@ -429,11 +437,16 @@ def update_schedule(
         category = ledger_service.resolve_account(session, category_path)
         if not category.is_virtual:
             raise LedgerError(f"{category.path} is not a category (virtual account)")
+        ledger_service.refuse_system_account(category)
         shape_changed = shape_changed or schedule.counterparty_account_id is not None
         shape_changed = shape_changed or str(schedule.category_path) != category.path
         schedule.category_path = category.path
         schedule.counterparty_account_id = None
 
+    if date_mode is not None:
+        if date_mode not in ("fixed", "estimated"):
+            raise LedgerError("date_type must be fixed | estimated")
+        schedule.date_type = date_mode
     new_type = amount_type or schedule.amount_type
     new_amount = amount if amount is not None else schedule.amount
     new_basis = estimate_basis or (
@@ -563,7 +576,7 @@ def list_recurring(session: Session) -> dict[str, Any]:
     (guardrail 6); items are the largest monthly costs first, capped with a
     truncated flag. Detected-but-unconfirmed patterns live in the
     suggestions inbox (#233); ``suggestions_open`` says how many wait."""
-    today = date_type.today()
+    today = clock.ledger_today()
     year_ago = today - timedelta(days=365)
     schedules = list(
         session.execute(
@@ -821,6 +834,7 @@ def _void_and_release(
         "status": tx.status,
         "occurrence_date": (tx.occurrence_date.isoformat() if tx.occurrence_date else None),
     }
+    occurrences.release(session, tx, reason=reason, actor=actor_token_id)
     tx.status = core.Status.VOID.value
     tx.occurrence_date = None
     session.flush()
@@ -840,7 +854,7 @@ def _release_live_instances(
 ) -> int:
     released = 0
     for tx in _live_instances(session, schedule):
-        if tx.schedule_pinned_at is not None:
+        if tx.schedule_pinned_at is not None or occurrences.protected(session, tx):
             continue  # the user's row, not the rule's
         _void_and_release(session, tx, actor_token_id=actor_token_id, reason=reason)
         released += 1
@@ -858,7 +872,7 @@ def _set_instance_amount(tx: Transaction, amount: Decimal, account_id: uuid.UUID
 def _rule_slots(schedule: Schedule) -> set[date_type]:
     """Every slot the rule produces around today — far enough back for an
     overdue instance, far enough ahead for the horizon."""
-    today = date_type.today()
+    today = clock.ledger_today()
     return set(
         core_forecasting.expand_rrule(
             schedule.rrule,
@@ -880,10 +894,14 @@ def _resync_instances(
         if tx.schedule_pinned_at is not None:
             continue
         if tx.occurrence_date not in slots:
+            if occurrences.protected(session, tx):
+                continue
             _void_and_release(session, tx, actor_token_id=actor_token_id, reason="rule_edit")
             continue
-        if amount != 0:
+        row = occurrences.ensure(session, tx)
+        if amount != 0 and not occurrences.held(row, "amount", occurrences.amount_of(tx, schedule)):
             _set_instance_amount(tx, amount, schedule.account_id)
+            row.amount_overridden = False
     session.flush()
 
 
@@ -902,8 +920,12 @@ def _refresh_estimates(
         leg = next((p for p in tx.postings if p.account_id == schedule.account_id), None)
         if leg is None or Decimal(leg.amount) == amount:
             continue
+        row = occurrences.ensure(session, tx)
+        if occurrences.held(row, "amount", Decimal(leg.amount)):
+            continue
         moved.append({"transaction_id": str(tx.id), "from": str(leg.amount), "to": str(amount)})
         _set_instance_amount(tx, amount, schedule.account_id)
+        row.amount_overridden = False
     if moved:
         session.flush()
         audit.record(
@@ -928,7 +950,7 @@ def refresh_next_due(session: Session, schedule: Schedule) -> date_type | None:
     if live:
         schedule.next_due = live[0].date
     else:
-        today = date_type.today()
+        today = clock.ledger_today()
         upcoming = core_forecasting.expand_rrule(
             schedule.rrule,
             dtstart=schedule.dtstart,
@@ -992,7 +1014,7 @@ def reset_instance(session: Session, *, tx_id: uuid.UUID, token: ApiToken) -> Tr
     resync would; an instance whose legs no longer have the rule's shape is
     released and the slot materialized afresh. Audited ``schedule.instance_reset``."""
     _require_write(token, "resetting a schedule instance")
-    tx = ledger_service.get_transaction(session, tx_id)
+    tx = ledger_service.lock_transaction(session, tx_id)
     if (
         tx.schedule_id is None
         or tx.status != core.Status.EXPECTED.value
@@ -1007,6 +1029,10 @@ def reset_instance(session: Session, *, tx_id: uuid.UUID, token: ApiToken) -> Tr
     closed = sorted(str(p.account.path) for p in tx.postings if p.account.closed_at is not None)
     if closed:
         raise LedgerError(f"{closed[0]} is closed; reopen it before resetting its instances")
+    row = occurrences.remember(session, tx, reason="reset", actor=token.id)
+    occurrences.clear(row, "amount")
+    occurrences.clear(row, "date")
+    row.amount_overridden = False
     before = _instance_audit_shape(tx)
     amount = _instance_amount(session, schedule)
     in_rule = tx.occurrence_date is not None and tx.occurrence_date in _rule_slots(schedule)
@@ -1048,24 +1074,40 @@ def reset_instance(session: Session, *, tx_id: uuid.UUID, token: ApiToken) -> Tr
     return tx
 
 
-def list_instances(session: Session, schedule: Schedule) -> list[dict[str, Any]]:
+def list_instances(
+    session: Session, schedule: Schedule, *, matched: bool = False
+) -> list[dict[str, Any]]:
     """Live instances for the detail surfaces, oldest first, each with the
     basis of its amount and any recorded card statement (decision 80)."""
-    live = _live_instances(session, schedule)
+    live = (
+        list(
+            session.scalars(
+                select(Transaction)
+                .join(Match, Match.expected_id == Transaction.id)
+                .where(Transaction.schedule_id == schedule.id, Match.state == "confirmed")
+                .order_by(Transaction.date.desc())
+                .limit(50)
+            )
+        )
+        if matched
+        else _live_instances(session, schedule)
+    )
     statements = statements_for(session, [tx.id for tx in live])
     out: list[dict[str, Any]] = []
     for tx in live:
         leg = next((p for p in tx.postings if p.account_id == schedule.account_id), None)
         statement = statements.get(tx.id)
+        detail = occurrences.describe(session, tx)
         out.append(
             {
                 "transaction_id": tx.id,
                 "date": tx.date,
                 "occurrence_date": tx.occurrence_date,
                 "amount": Decimal(leg.amount) if leg is not None else None,
+                "certainty": detail,
                 "pinned": tx.schedule_pinned_at is not None,
-                "overdue": tx.date < date_type.today(),
-                "basis": instance_basis(schedule, tx, statement),
+                "overdue": tx.date < clock.ledger_today(),
+                "basis": instance_basis(schedule, tx, statement, detail=detail),
                 "statement_balance": (
                     Decimal(statement.statement_balance) if statement is not None else None
                 ),
@@ -1097,6 +1139,8 @@ def instance_basis(
     schedule: Schedule | None,
     tx: Transaction | None,
     statement: InstanceStatement | None,
+    *,
+    detail: dict[str, Any] | None = None,
 ) -> str:
     """Where an expected amount comes from, in the forecast's ``basis``
     vocabulary (``core_forecasting.AMOUNT_BASES``, decision 80):
@@ -1110,6 +1154,17 @@ def instance_basis(
     ``tx=None`` is a projected occurrence (no row yet); ``schedule=None`` an
     expected row no schedule owns, whose typed amount is ``fixed``."""
     if tx is not None:
+        if detail is not None and (
+            detail["amount"].get("value_overridden") is True
+            or (detail["amount"].get("value_overridden") is None and detail["amount"].get("set_at"))
+        ):
+            # NULL preserves the pre-518 classification; new evidence explicitly
+            # distinguishes a supplied value from metadata on the rule's value.
+            return (
+                core_forecasting.BASIS_STATEMENT
+                if detail["amount"]["source"] == "statement"
+                else core_forecasting.BASIS_OVERRIDE
+            )
         if statement is not None and any(
             Decimal(p.amount) == Decimal(statement.statement_balance) for p in tx.postings
         ):
@@ -1246,7 +1301,7 @@ def record_statement_balance(
             "due_date addresses a payment by account; leave it out with transaction_id"
         )
     figure = _statement_figure(statement_balance)
-    if statement_date is not None and statement_date > date_type.today():
+    if statement_date is not None and statement_date > clock.ledger_today():
         raise LedgerError(f"statement_date {statement_date.isoformat()} is in the future")
 
     if account_ref is not None:
@@ -1283,6 +1338,7 @@ def record_statement_balance(
     def schedule_leg() -> Decimal:
         return next(Decimal(p.amount) for p in tx.postings if p.account_id == schedule.account_id)
 
+    certainty_row = occurrences.remember(session, tx, reason="statement", actor=token.id)
     previous_amount = schedule_leg()
     prior = session.get(InstanceStatement, tx.id)
     before = _statement_audit_shape(prior) if prior is not None else None
@@ -1298,6 +1354,18 @@ def record_statement_balance(
     session.add(row)
     session.flush()
     amount = schedule_leg()
+    occurrences.set_evidence(
+        certainty_row,
+        "amount",
+        occurrences.Evidence(
+            state="confirmed",
+            source="statement",
+            as_of=statement_date or clock.ledger_today(),
+            note="Recorded card statement balance",
+        ),
+        amount,
+        token,
+    )
     audit.record(
         session,
         actor_token_id=token.id,
@@ -1346,11 +1414,12 @@ def materialize_schedule(
     or skipped slot is never re-created; only a released slot (NULL) is."""
     if schedule.status != "active":
         return 0
+    occurrences.lock_slots(session, schedule.id)
     account = session.get(Account, schedule.account_id)
     assert account is not None
     if account.closed_at is not None:
         return 0  # a closed account accepts no new expected instances (DESIGN §3.4)
-    today = date_type.today()
+    today = clock.ledger_today()
     due_dates = core_forecasting.expand_rrule(
         schedule.rrule,
         dtstart=schedule.dtstart,
@@ -1383,7 +1452,7 @@ def materialize_schedule(
                 if amount < 0
                 else (schedule.counterparty_account_id, account.id)
             )
-            ledger_service.create_transfer(
+            created_tx = ledger_service.create_transfer(
                 session,
                 from_account_ref=str(outgoing),
                 to_account_ref=str(incoming),
@@ -1396,10 +1465,11 @@ def materialize_schedule(
                 schedule_id=schedule.id,
                 occurrence_date=due,
             )
+            occurrences.ensure(session, created_tx)
             created += 1
             continue
         category = _rule_category(session, schedule, amount)
-        ledger_service.create_flat_transaction(
+        created_tx = ledger_service.create_flat_transaction(
             session,
             account_ref=str(account.id),
             category_ref=str(category.id),
@@ -1413,6 +1483,7 @@ def materialize_schedule(
             schedule_id=schedule.id,
             occurrence_date=due,
         )
+        occurrences.ensure(session, created_tx)
         created += 1
     refresh_next_due(session, schedule)
     return created
@@ -1439,7 +1510,7 @@ def materialize_all_job() -> None:
 
 LIABILITY_TYPES = ("credit_card", "loan")
 DETECTOR = "recurrence_v2"
-DETECTOR_VERSION = 2
+DETECTOR_VERSION = 3
 
 
 @dataclass
@@ -1471,8 +1542,13 @@ class _Group:
 def _history_rows(session: Session, since: date_type) -> list[Transaction]:
     """Live bank-shaped history: pending/posted rows that are not schedule
     instances. Merged transfers (two real legs, any origin) ride along —
-    the perspective-leg view is what makes them detectable (#232/#234)."""
+    the perspective-leg view is what makes them detectable (#232/#234).
+
+    A securities trade's cash is not a bill (decision 103): neither the
+    trade's own row nor any row of the chain a trade linked as its cash may
+    make a recurrence. Corrected originals are left out for every row (#420)."""
     reversed_ids = select(Transaction.reverses_id).where(Transaction.reverses_id.is_not(None))
+    trade_cash = ledger_service.trade_cash_lineage_ids().subquery("trade_cash")
     return list(
         session.execute(
             select(Transaction)
@@ -1486,6 +1562,7 @@ def _history_rows(session: Session, since: date_type) -> list[Transaction]:
                 Transaction.schedule_id.is_(None),
                 Transaction.id.not_in(reversed_ids),
                 Transaction.date >= since,
+                ~exists().where(trade_cash.c.id == Transaction.id),
             )
         ).scalars()
     )
@@ -1515,6 +1592,8 @@ def _group_history(
         return payee_cache[target]
 
     for tx in rows:
+        if ledger_service.has_system_leg(tx.postings):
+            continue  # a securities trade's cash is not a bill (decision 103)
         real = [p for p in tx.postings if not p.account.is_virtual]
         virtual = [p for p in tx.postings if p.account.is_virtual]
         if len(real) == 2:
@@ -1572,7 +1651,7 @@ def _draft_and_evidence(
 ) -> tuple[Any, dict[str, Any]]:
     from purser import suggestions as suggestions_service
 
-    if detected.amount_type == "estimated":
+    if detected.amount_type == "estimated" and not detected.price_changed:
         basis: str | None = (
             core_forecasting.EstimateBasis.COUNTERPARTY_BALANCE.value
             if group.counterparty is not None and group.counterparty.type == "credit_card"
@@ -1587,8 +1666,8 @@ def _draft_and_evidence(
         counterparty_account=group.counterparty.path if group.counterparty else None,
         rrule=detected.rrule,
         dtstart=detected.dtstart,
-        amount_type=detected.amount_type,
-        amount=detected.typical_amount,
+        amount_type="fixed" if detected.price_changed else detected.amount_type,
+        amount=detected.latest_amount if detected.price_changed else detected.typical_amount,
         estimate_basis=basis,
         payee=group.payee.name if group.payee else None,
         category=category if group.counterparty is None else None,
@@ -1613,11 +1692,18 @@ def _draft_and_evidence(
         },
         "amount": {
             "typical": str(detected.typical_amount),
+            "latest": str(detected.latest_amount),
+            "price_changed": detected.price_changed,
             "low": str(detected.amount_low),
             "high": str(detected.amount_high),
             "cv": str(detected.amount_cv),
         },
     }
+    if group.counterparty is None and group.account.type in ("loan", "brokerage"):
+        evidence["warning"] = (
+            "This pattern is on a loan or investment account. Verify it is a cash movement, "
+            "not an internal allocation, and check the other account before creating a schedule."
+        )
     return draft, evidence
 
 
@@ -1638,7 +1724,7 @@ def detect_schedules(
     liability-added hook), ``account_ref`` to one account."""
     from purser import suggestions as suggestions_service
 
-    today = date_type.today()
+    today = clock.ledger_today()
     only_account = (
         ledger_service.resolve_account(session, account_ref) if account_ref is not None else None
     )
@@ -1679,6 +1765,13 @@ def detect_schedules(
             actor_token_id=actor_token_id,
         )
         touched.append(row)
+    suggestions_service.withdraw_missing_schedules(
+        session,
+        fingerprints={row.fingerprint for row in touched},
+        account_id=only_account.id if only_account is not None else None,
+        counterparty_id=counterparty.id if counterparty is not None else None,
+        actor_token_id=actor_token_id,
+    )
     return touched
 
 
@@ -1788,17 +1881,24 @@ def _projected_items(
             if basis in _ESTIMATED_BASES
             else None
         )
+        # Slot evidence (#518) annotates certainty only; amount and basis stay the rule's.
+        evidence = occurrences.live_slots(session, schedule.id)
         for slot in core_forecasting.expand_rrule(
             schedule.rrule, dtstart=schedule.dtstart, start=start, end=end
         ):
             if slot in taken:
                 continue
+            detail = occurrences.projected(schedule, slot, estimate.amount, evidence.get(slot))
             items.append(
                 core_forecasting.ExpectedItem(
                     date=slot,
                     amount=amount,
                     label=schedule.name,
                     projected=True,
+                    certainty={
+                        **occurrences.perspective(detail, reverse=counterparty_side),
+                        "slot": occurrences.slot_ref(schedule, slot, None),
+                    },
                     basis=basis,
                     range=band,
                 )
@@ -1826,7 +1926,7 @@ def forecast_account(
 ) -> dict[str, Any]:
     validate_horizon(horizon_days)
     account = ledger_service.resolve_account(session, account_ref)
-    today = date_type.today()
+    today = clock.ledger_today()
     # Start where the register headline says the account is (decision 50):
     # the LIVE postings basis plus the valuation/holdings overlay. The basis
     # stays live rather than balance_asof(today) on purpose — a future-dated
@@ -1885,9 +1985,15 @@ def forecast_account(
             matches_pending_net += Decimal(leg.amount)
             continue
         owner = owners.get(tx.schedule_id) if tx.schedule_id else None
-        basis = instance_basis(owner, tx, statements.get(tx.id))
+        detail = occurrences.describe(session, tx) if owner is not None else None
+        basis = instance_basis(owner, tx, statements.get(tx.id), detail=detail)
         band = None
-        if owner is not None and basis in _ESTIMATED_BASES:
+        if (
+            owner is not None
+            and basis in _ESTIMATED_BASES
+            and detail is not None
+            and detail["amount_estimated"]
+        ):
             own_leg = next((p for p in tx.postings if p.account_id == owner.account_id), None)
             if own_leg is not None:
                 band = _estimate_band(
@@ -1901,6 +2007,11 @@ def forecast_account(
                 amount=Decimal(leg.amount),
                 label=tx.description or (tx.payee.name if tx.payee else "expected"),
                 transaction_id=tx.id,
+                certainty=(
+                    occurrences.perspective(detail, reverse=owner.account_id != account.id)
+                    if owner is not None and detail is not None
+                    else None
+                ),
                 basis=basis,
                 range=band,
             )

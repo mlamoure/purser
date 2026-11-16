@@ -10,8 +10,16 @@ from typing import Any
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
+from purser import clock
+from purser.ledger.accounts import CATEGORY_TYPES
 from purser.ledger.errors import LedgerError, check_path
 from purser.models import Payee, Posting, Transaction
+
+# Path-based reports read CATEGORIES only: a system virtual account
+# (equity.securities, the other side of a securities trade's cash, decision
+# 90) shares the tree but is never spending or income, whatever subtree a
+# caller names.
+_CATEGORY_ONLY = "a.type IN ({})".format(", ".join(f"'{t}'" for t in sorted(CATEGORY_TYPES)))
 
 
 def account_balances(
@@ -37,7 +45,11 @@ def category_rollup(
     end: date_type | None = None,
 ) -> dict[str, Any]:
     """Spending rollup for a category subtree — ONE indexed ltree query."""
-    conditions = ["a.path <@ CAST(:subtree AS ltree)", "t.status IN ('pending', 'posted')"]
+    conditions = [
+        "a.path <@ CAST(:subtree AS ltree)",
+        _CATEGORY_ONLY,
+        "t.status IN ('pending', 'posted')",
+    ]
     params: dict[str, Any] = {"subtree": check_path(subtree)}
     if start is not None:
         conditions.append("t.date >= :start")
@@ -111,6 +123,7 @@ def spending_summary(
     params: dict[str, Any] = {}
     if category_subtree is not None:
         conditions.append("a.path <@ CAST(:subtree AS ltree)")
+        conditions.append(_CATEGORY_ONLY)
         params["subtree"] = category_subtree
     else:
         conditions.append("a.type = 'category_expense'")
@@ -212,7 +225,7 @@ def spending_baseline(
     if category_subtree is not None:
         check_path(category_subtree)  # before the nlevel() cast below
 
-    today = today or date_type.today()
+    today = today or clock.ledger_today()
     like_days = today.day if (period_start <= today <= period_end) else None
 
     if baseline == "same_month_last_year":
@@ -240,6 +253,7 @@ def spending_baseline(
     params: dict[str, Any] = {}
     if category_subtree is not None:
         conditions.append("a.path <@ CAST(:subtree AS ltree)")
+        conditions.append(_CATEGORY_ONLY)
         params["subtree"] = category_subtree
     else:
         conditions.append("a.type = 'category_expense'")

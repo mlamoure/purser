@@ -4,11 +4,62 @@ The old guard checked only for a literal ``assets.checking`` account, so a
 live install whose accounts used any other paths could be seeded over.
 """
 
-from sqlalchemy import text
+import os
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+import sqlalchemy as sa
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+import purser.config
 from purser import ledger as ledger_service
+from purser import seed
+from purser.models import Account
 from purser.seed import seed_demo
+from tests.conftest import TEST_ENCRYPTION_KEY
+
+
+@pytest.fixture
+def fresh_db(database_url: str, migrated_engine: sa.Engine) -> Iterator[sa.Engine]:
+    """A database migrated from nothing, in the session's Postgres container:
+    exactly what the migrations seed (the category tree, equity.securities)
+    and nothing else. clean_db's TRUNCATE takes those seeds away too, so it
+    cannot show what a fresh install holds. (The suite's database stays the
+    global engine's: seeding reads runtime settings through it.)"""
+    os.environ["PURSER_ENCRYPTION_KEY"] = TEST_ENCRYPTION_KEY
+    purser.config.get_settings.cache_clear()
+    admin = sa.create_engine(database_url, isolation_level="AUTOCOMMIT")
+    with admin.connect() as conn:
+        conn.execute(sa.text("DROP DATABASE IF EXISTS purser_seed_fresh WITH (FORCE)"))
+        conn.execute(sa.text("CREATE DATABASE purser_seed_fresh"))
+    admin.dispose()
+    url = database_url.rsplit("/", 1)[0] + "/purser_seed_fresh"
+    root = Path(__file__).resolve().parent.parent
+    cfg = Config(str(root / "alembic.ini"))
+    cfg.set_main_option("script_location", str(root / "migrations"))
+    cfg.set_main_option("sqlalchemy.url", url)
+    command.upgrade(cfg, "head")
+    engine = sa.create_engine(url)
+    yield engine
+    engine.dispose()
+
+
+def test_a_freshly_migrated_database_seeds(fresh_db: sa.Engine) -> None:
+    """The migration-seeded system account (equity.securities, 0043) is not
+    user data: `purser seed-demo` runs on a fresh install."""
+    with Session(fresh_db) as session:
+        securities = session.execute(
+            select(Account).where(Account.path == ledger_service.SECURITIES_PATH)
+        ).scalar_one()
+        assert ledger_service.is_system_account(securities)
+        assert seed._has_user_data(session) is False
+        stats = seed_demo(session)
+        assert "skipped" not in stats and stats["accounts"] >= 3
+        session.rollback()
 
 
 class TestSeedGuard:

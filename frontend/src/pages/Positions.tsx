@@ -7,8 +7,28 @@ import type { components } from "../api/schema";
 
 type PositionOut = components["schemas"]["PositionOut"];
 
-/** Today in UTC: the server refuses an event dated after it (issue #390). */
-export const utcToday = () => new Date().toISOString().slice(0, 10);
+/** Today in the browser's zone: only a stand-in until GET /clock answers. */
+export function localToday(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+/** The server's "today" (issue #471, decision 105): the household time zone
+ * decides it, not UTC or the browser, and the server refuses an event or an
+ * opening count dated after it. */
+export function useLedgerToday(): string {
+  const clock = useQuery({
+    queryKey: ["clock"],
+    queryFn: async () => {
+      const { data, error } = await api.GET("/clock");
+      if (error) throw new Error(errorDetail(error));
+      return data;
+    },
+    staleTime: 60_000,
+  });
+  return clock.data?.ledger_today ?? localToday();
+}
 
 /** A quantity or price without trailing zeros, as a string (no float). */
 export function fmtQuantity(value: string | null | undefined): string {
@@ -94,7 +114,9 @@ export default function PositionsPanel({ accountId }: { accountId: string }) {
 function PositionRow({ p, onChange }: { p: PositionOut; onChange: () => void }) {
   const [editing, setEditing] = useState(false);
   const [quantity, setQuantity] = useState(fmtQuantity(p.quantity));
-  const [asOf, setAsOf] = useState(utcToday());
+  const today = useLedgerToday();
+  // Empty means "today": the ledger day may arrive after the form opens.
+  const [asOf, setAsOf] = useState("");
   // The basis is sent only when typed: without one, the server keeps the
   // basis for a re-count of the same count, makes it unknown for a changed
   // count, and zero for 0 shares. The current basis is a hint, not a value
@@ -108,7 +130,7 @@ function PositionRow({ p, onChange }: { p: PositionOut; onChange: () => void }) 
         params: { path: { position_id: p.id } },
         body: {
           kind: "set_quantity",
-          occurred_on: asOf,
+          occurred_on: asOf || today,
           quantity: quantity.trim(),
           ...(costBasis.trim() ? { cost_basis: costBasis.trim() } : {}),
         },
@@ -161,8 +183,8 @@ function PositionRow({ p, onChange }: { p: PositionOut; onChange: () => void }) 
                 aria-label={`As of for ${p.symbol}`}
                 type="date"
                 className="w-36"
-                max={utcToday()}
-                value={asOf}
+                max={today}
+                value={asOf || today}
                 onChange={(e) => setAsOf(e.target.value)}
               />
               <Input
@@ -228,7 +250,7 @@ function PositionRow({ p, onChange }: { p: PositionOut; onChange: () => void }) 
                 title="Record the share count on a date (a set_quantity event)"
                 onClick={() => {
                   setQuantity(fmtQuantity(p.quantity));
-                  setAsOf(utcToday());
+                  setAsOf("");
                   setCostBasis("");
                   setEditing(true);
                 }}
@@ -273,7 +295,8 @@ function AddPosition({
 }) {
   const [symbol, setSymbol] = useState("");
   const [quantity, setQuantity] = useState("");
-  const [asOf, setAsOf] = useState(utcToday());
+  const today = useLedgerToday();
+  const [asOf, setAsOf] = useState(""); // empty means "today"
   const [costBasis, setCostBasis] = useState("");
   const [error, setError] = useState<string | null>(null);
   const create = useMutation({
@@ -283,7 +306,7 @@ function AddPosition({
         body: {
           symbol: symbol.trim(),
           quantity: quantity.trim(),
-          as_of: asOf,
+          as_of: asOf || today,
           ...(costBasis.trim() ? { cost_basis: costBasis.trim() } : {}),
         },
       });
@@ -314,8 +337,8 @@ function AddPosition({
           aria-label="As of"
           type="date"
           className="w-40"
-          max={utcToday()}
-          value={asOf}
+          max={today}
+          value={asOf || today}
           onChange={(e) => setAsOf(e.target.value)}
         />
         <Input

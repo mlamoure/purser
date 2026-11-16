@@ -35,6 +35,7 @@ EXPECTED_TOOLS = {
     # tools_read
     "describe",
     "list_accounts",
+    "feed_status",
     "account_balance",
     "search_transactions",
     "get_transaction",
@@ -54,6 +55,20 @@ EXPECTED_TOOLS = {
     "list_holdings",
     "record_position",
     "record_price",
+    "record_sale",
+    "reverse_position_event",
+    "reopen_position",
+    # tools_lots (#393)
+    "list_lots",
+    "list_awards",
+    "realized_gains",
+    "upsert_lots",
+    "upsert_awards",
+    "record_vest",
+    "record_transfer_out",
+    "void_lot",
+    "correct_lot_basis",
+    "update_award_vest",
     # tools_memories
     "list_memories",
     "propose_memory",
@@ -79,12 +94,15 @@ EXPECTED_TOOLS = {
     "override_instance",
     "reset_instance",
     "record_statement_balance",
+    "get_schedule_occurrence",
+    "update_occurrence_certainty",
     "match",
     "confirm_transfer",
     "reconcile_account",
     "record_valuation",
     "update_account",
     "trigger_sync",
+    "refetch_feed",
 }
 
 
@@ -436,6 +454,7 @@ class TestMcpServer:
         assert wallet["reconciliation"] == {
             "as_of": statement.isoformat(),
             "basis": "posted",
+            "component": "balance",
             "in_balance": True,
             "difference": "0.0000",
         }
@@ -2093,3 +2112,464 @@ class TestHoldingsTools:
         assert entry["closed"] is True and entry["market_value"] == "1234.56"
         assert payload["totals"] == {"market_value": "0.00"}
         assert "closed" in result.content[0].text
+
+    def test_categories_never_list_the_securities_account(
+        self,
+        broker: str,
+        seeded_tokens: dict[str, str],
+        live_server: LiveServer,
+        client: TestClient,
+    ) -> None:
+        """equity.securities is virtual but not a category (decision 103):
+        list_categories and describe leave it out once a trade booked to it."""
+        resp = client.post(
+            f"/accounts/{broker}/positions",
+            json={
+                "symbol": "ACME",
+                "quantity": "5",
+                "as_of": (TODAY - timedelta(days=30)).isoformat(),
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        sale_day = TODAY - timedelta(days=10)
+        while sale_day.weekday() >= 4:
+            sale_day -= timedelta(days=1)
+        resp = client.post(
+            f"/positions/{resp.json()['id']}/events",
+            json={
+                "kind": "sell",
+                "occurred_on": sale_day.isoformat(),
+                "quantity": "1",
+                "price": "9",
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        categories, described = _mcp_call(
+            live_server.url,
+            seeded_tokens["reader"],
+            [("list_categories", {}), ("describe", {})],
+        )
+        listed = json.dumps(categories)
+        assert "expenses.dining" in listed and "equity.securities" not in listed
+        assert "equity.securities" not in described["categories"]
+
+
+class TestRecordSale:
+    """record_sale (#390 phase 1b, decision 103): the MCP twin of REST
+    POST /positions/{id}/events kind sell — the same service path, so the
+    same validation, double-count refusal, link and audit row. Synthetic
+    data only."""
+
+    SYMBOL = "ACMEX"
+
+    @staticmethod
+    def _trade_day(days: int) -> date:
+        """A Monday-to-Thursday date about ``days`` ago, so T+1 is the next day."""
+        day = TODAY - timedelta(days=days)
+        while day.weekday() >= 4:
+            day -= timedelta(days=1)
+        return day
+
+    @pytest.fixture
+    def plan(self, seeded_tokens: dict[str, str], admin_client: TestClient) -> str:
+        """A hand-tracked brokerage account holding 40 shares."""
+        resp = admin_client.post(
+            "/accounts", json={"name": "Plan", "type": "brokerage", "path": "assets.saleplan"}
+        )
+        account_id = resp.json()["id"]
+        resp = admin_client.patch(f"/accounts/{account_id}", json={"holdings_source": "manual"})
+        assert resp.status_code == 200, resp.text
+        resp = admin_client.post(
+            f"/accounts/{account_id}/positions",
+            json={
+                "symbol": self.SYMBOL,
+                "quantity": "40",
+                "as_of": (TODAY - timedelta(days=60)).isoformat(),
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        return account_id
+
+    def _args(self, **over: Any) -> dict[str, Any]:
+        return {
+            "account": "assets.saleplan",
+            "symbol": self.SYMBOL.lower(),
+            "quantity": "10",
+            "price": "100",
+            "trade_date": self._trade_day(10).isoformat(),
+            **over,
+        }
+
+    @staticmethod
+    def _footprint() -> dict[str, int]:
+        """Rows a sale writes: everything but MCP's own per-call audit row."""
+        from sqlalchemy import func, select
+
+        from purser import db
+        from purser.models import (
+            AuditLog,
+            Event,
+            HoldingsSnapshot,
+            PositionEvent,
+            Posting,
+            Transaction,
+        )
+
+        with db.get_sessionmaker()() as session:
+
+            def count(model: Any, *where: Any) -> int:
+                return int(
+                    session.execute(
+                        select(func.count()).select_from(model).where(*where)
+                    ).scalar_one()
+                )
+
+            return {
+                "position_events": count(PositionEvent),
+                "transactions": count(Transaction),
+                "postings": count(Posting),
+                "events": count(Event),
+                "snapshots": count(HoldingsSnapshot),
+                "audit_changes": count(AuditLog, AuditLog.action.not_like("mcp.%")),
+            }
+
+    @staticmethod
+    def _feed_row(amount: str, on: date) -> str:
+        """The broker's own copy of the sale's cash, imported from the feed."""
+        from purser import db, ledger
+        from purser.core import ledger as core
+
+        with db.get_sessionmaker()() as session:
+            groceries = ledger.account_by_path(session, "expenses.groceries")
+            row = ledger.create_flat_transaction(
+                session,
+                account_ref="assets.saleplan",
+                category_ref=str(groceries.id),
+                amount=Decimal(amount),
+                date=on,
+                description="SOLD SHARES",
+                requested_status=core.Status.POSTED,
+                origin=core.Origin.IMPORT,
+                token=None,
+                content_hash=f"test-{uuid.uuid4().hex}",
+            )
+            session.commit()
+            return str(row.id)
+
+    def test_a_sale_posts_its_proceeds_and_answers_in_three_tiers(
+        self, plan: str, seeded_tokens: dict[str, str], live_server: LiveServer
+    ) -> None:
+        trade = self._trade_day(10)
+        result = _mcp_raw(
+            live_server.url,
+            seeded_tokens["operator"],
+            "record_sale",
+            self._args(fees="4.95", note="sold to fund a transfer"),
+        )
+        assert not result.is_error, result.content
+        payload = result.structured_content
+        settle = trade  # the cash posts on the trade date
+        assert payload["position"] == {
+            "position_id": payload["position"]["position_id"],
+            "symbol": self.SYMBOL,
+            "quantity_before": "40",
+            "quantity_after": "30",
+        }
+        assert uuid.UUID(payload["position"]["position_id"])
+        assert payload["cash"]["amount"] == "995.05"
+        assert payload["cash"]["settle_on"] == settle.isoformat()
+        assert payload["cash"]["transaction_id"] is not None
+        assert payload["linked"] is False and payload["dry_run"] is False
+        assert payload["event_id"] is not None and "already_recorded" not in payload
+        assert result.content[0].text.startswith(f"Sold 10 {self.SYMBOL} on assets.saleplan")
+        assert len(json.dumps(payload)) / 4 < 500  # guardrail 6
+
+        from purser import db, ledger
+        from purser.models import AuditLog
+
+        with db.get_sessionmaker()() as session:
+            cash = ledger.get_transaction(session, uuid.UUID(payload["cash"]["transaction_id"]))
+            legs = {p.account.path: Decimal(p.amount) for p in cash.postings}
+            assert legs == {
+                "assets.saleplan": Decimal("995.0500"),
+                "equity.securities": Decimal("-995.0500"),
+            }
+            assert cash.origin == "system" and cash.date == settle
+            # The service's own audit row, as over REST (before_after is
+            # encrypted at rest, so it is read back, not queried).
+            from sqlalchemy import select
+
+            rows = session.execute(
+                select(AuditLog).where(AuditLog.action == "position.record")
+            ).scalars()
+            (sold,) = [r for r in rows if (r.before_after or {})["after"].get("kind") == "sell"]
+            assert sold.before_after["after"]["cash_transaction_id"] == str(cash.id)
+
+    def test_a_dry_run_answers_and_writes_nothing(
+        self, plan: str, seeded_tokens: dict[str, str], live_server: LiveServer
+    ) -> None:
+        trade = self._trade_day(10)
+        before = self._footprint()
+        result = _mcp_raw(
+            live_server.url, seeded_tokens["operator"], "record_sale", self._args(dry_run=True)
+        )
+        assert not result.is_error, result.content
+        payload = result.structured_content
+        assert payload == {
+            "position": {
+                "position_id": payload["position"]["position_id"],
+                "symbol": self.SYMBOL,
+                "quantity_before": "40",
+                "quantity_after": "30",
+            },
+            "cash": {
+                "amount": "1000.00",
+                "settle_on": trade.isoformat(),
+                "transaction_id": None,
+            },
+            "linked": False,
+            "dry_run": True,
+            "event_id": None,
+            "already_recorded": None,
+            "cash_probe_overridden": None,
+        }
+        assert result.content[0].text.startswith("Dry run, nothing written")
+        assert self._footprint() == before
+
+    def test_the_cash_already_recorded_refusal_names_the_row_and_a_dry_run_reports_it(
+        self, plan: str, seeded_tokens: dict[str, str], live_server: LiveServer
+    ) -> None:
+        trade = self._trade_day(10)
+        row = self._feed_row("1000.00", trade + timedelta(days=1))
+        before = self._footprint()
+        (refused,) = _mcp_call(
+            live_server.url, seeded_tokens["operator"], [("record_sale", self._args())]
+        )
+        assert "cash_already_recorded" in refused["error"] and row in refused["error"]
+        assert self._footprint() == before
+
+        result = _mcp_raw(
+            live_server.url, seeded_tokens["operator"], "record_sale", self._args(dry_run=True)
+        )
+        assert not result.is_error, result.content
+        payload = result.structured_content
+        assert payload["already_recorded"] == {
+            "transaction_id": row,
+            "date": (trade + timedelta(days=1)).isoformat(),
+            "amount": "1000.00",
+        }
+        # The shares-only effect, and the cash the sale itself would move.
+        assert payload["position"]["quantity_after"] == "30"
+        assert payload["cash"]["amount"] == "1000.00" and payload["cash"]["transaction_id"] is None
+        assert row in result.content[0].text and "would be refused" in result.content[0].text
+        assert self._footprint() == before
+
+    def test_transaction_id_links_the_row_the_account_already_shows(
+        self, plan: str, seeded_tokens: dict[str, str], live_server: LiveServer
+    ) -> None:
+        trade = self._trade_day(10)
+        row = self._feed_row("998.00", trade + timedelta(days=2))
+        result = _mcp_raw(
+            live_server.url,
+            seeded_tokens["operator"],
+            "record_sale",
+            self._args(transaction_id=row, fees="2"),  # 10 x 100 - 2: the row exactly
+        )
+        assert not result.is_error, result.content
+        payload = result.structured_content
+        assert payload["linked"] is True
+        # The bank's amount and date: the linked row is the sale's cash.
+        assert payload["cash"]["amount"] == "998.00"
+        assert payload["cash"]["settle_on"] == (trade + timedelta(days=2)).isoformat()
+        replacement = payload["cash"]["transaction_id"]
+        assert replacement is not None and replacement != row
+
+        from purser import db, ledger
+
+        with db.get_sessionmaker()() as session:
+            linked = ledger.get_transaction(session, uuid.UUID(replacement))
+            assert {p.account.path for p in linked.postings} == {
+                "assets.saleplan",
+                "equity.securities",
+            }
+
+    def test_force_cash_posts_over_a_different_payment_of_that_amount(
+        self, plan: str, seeded_tokens: dict[str, str], live_server: LiveServer
+    ) -> None:
+        trade = self._trade_day(10)
+        row = self._feed_row("1000.00", trade + timedelta(days=1))
+        (refused,) = _mcp_call(
+            live_server.url, seeded_tokens["operator"], [("record_sale", self._args())]
+        )
+        assert "cash_already_recorded" in refused["error"]
+        assert "force_cash=true" in refused["error"] and f"transaction_id={row}" in refused["error"]
+        overridden = {
+            "transaction_id": row,
+            "date": (trade + timedelta(days=1)).isoformat(),
+            "amount": "1000.00",
+        }
+        # The dry run shows the row it would post over, as the call does.
+        dry = _mcp_raw(
+            live_server.url,
+            seeded_tokens["operator"],
+            "record_sale",
+            self._args(force_cash=True, dry_run=True),
+        )
+        assert not dry.is_error, dry.content
+        assert dry.structured_content["cash_probe_overridden"] == overridden
+        assert dry.structured_content["already_recorded"] is None
+        assert row in dry.content[0].text and "force_cash" in dry.content[0].text
+        result = _mcp_raw(
+            live_server.url,
+            seeded_tokens["operator"],
+            "record_sale",
+            self._args(force_cash=True),
+        )
+        assert not result.is_error, result.content
+        cash = result.structured_content["cash"]
+        assert cash["amount"] == "1000.00" and cash["transaction_id"] not in (None, row)
+        assert result.structured_content["cash_probe_overridden"] == overridden
+        assert row in result.content[0].text
+
+    def test_a_read_token_is_refused(
+        self, plan: str, seeded_tokens: dict[str, str], live_server: LiveServer
+    ) -> None:
+        before = self._footprint()
+        (denied,) = _mcp_call(
+            live_server.url, seeded_tokens["reader"], [("record_sale", self._args())]
+        )
+        assert "requires scope: write" in denied["error"]  # a tool error, never a draft
+        assert self._footprint() == before
+
+    def test_reverse_position_event_undoes_a_wrong_sale(
+        self, plan: str, seeded_tokens: dict[str, str], live_server: LiveServer
+    ) -> None:
+        """An agent that recorded a wrong sale undoes it over MCP: the shares
+        come back and the sale's cash is corrected to zero."""
+        sold = _mcp_raw(live_server.url, seeded_tokens["operator"], "record_sale", self._args())
+        assert not sold.is_error, sold.content
+        event_id = sold.structured_content["event_id"]
+        cash_id = sold.structured_content["cash"]["transaction_id"]
+        (denied,) = _mcp_call(
+            live_server.url,
+            seeded_tokens["reader"],
+            [("reverse_position_event", {"event_id": event_id})],
+        )
+        assert "requires scope: write" in denied["error"]
+        result = _mcp_raw(
+            live_server.url,
+            seeded_tokens["operator"],
+            "reverse_position_event",
+            {"event_id": event_id, "note": "recorded on the wrong date"},
+        )
+        assert not result.is_error, result.content
+        payload = result.structured_content
+        assert payload["reverses_id"] == event_id and payload["reversal_id"]
+        assert payload["position"] == {
+            "position_id": sold.structured_content["position"]["position_id"],
+            "symbol": self.SYMBOL,
+            "quantity_after": "40",
+        }
+        assert payload["cash"]["transaction_id"] == cash_id
+        assert payload["cash"]["undone_by"] not in (None, cash_id)
+        assert result.content[0].text.startswith(f"Reversed the sell of 10 {self.SYMBOL}")
+        assert len(json.dumps(payload)) / 4 < 500  # guardrail 6
+
+        from purser import db, ledger
+
+        with db.get_sessionmaker()() as session:
+            account = ledger.account_by_path(session, "assets.saleplan")
+            assert ledger.account_balances(session, [account.id]).get(account.id) == 0
+        (again,) = _mcp_call(
+            live_server.url,
+            seeded_tokens["operator"],
+            [("reverse_position_event", {"event_id": event_id})],
+        )
+        assert "already reversed" in again["error"]
+
+    def test_an_agent_reopens_a_closed_position_to_correct_its_last_sale(
+        self,
+        plan: str,
+        seeded_tokens: dict[str, str],
+        live_server: LiveServer,
+        admin_client: TestClient,
+    ) -> None:
+        """A sale of every share, then the position closed: the reverse names
+        the position and reopen_position, which reopens it over MCP."""
+        sold = _mcp_raw(
+            live_server.url,
+            seeded_tokens["operator"],
+            "record_sale",
+            self._args(quantity="40"),
+        )
+        assert not sold.is_error, sold.content
+        position_id = sold.structured_content["position"]["position_id"]
+        assert (
+            admin_client.patch(f"/positions/{position_id}", json={"closed": True}).status_code
+            == 200
+        )
+        event_id = sold.structured_content["event_id"]
+        (refused,) = _mcp_call(
+            live_server.url,
+            seeded_tokens["operator"],
+            [("reverse_position_event", {"event_id": event_id})],
+        )
+        assert position_id in refused["error"] and "reopen_position" in refused["error"]
+        (denied,) = _mcp_call(
+            live_server.url,
+            seeded_tokens["reader"],
+            [("reopen_position", {"position_id": position_id})],
+        )
+        assert "requires scope: write" in denied["error"]
+        reopened = _mcp_raw(
+            live_server.url,
+            seeded_tokens["operator"],
+            "reopen_position",
+            {"position_id": position_id},
+        )
+        assert not reopened.is_error, reopened.content
+        assert reopened.structured_content == {
+            "position_id": position_id,
+            "symbol": self.SYMBOL,
+            "account": "assets.saleplan",
+            "quantity": "0",
+        }
+        reversed_ = _mcp_raw(
+            live_server.url,
+            seeded_tokens["operator"],
+            "reverse_position_event",
+            {"event_id": event_id},
+        )
+        assert not reversed_.is_error, reversed_.content
+        assert reversed_.structured_content["position"]["position_id"] == position_id
+
+    def test_the_call_and_its_dry_run_refuse_an_oversell_alike(
+        self, plan: str, seeded_tokens: dict[str, str], live_server: LiveServer
+    ) -> None:
+        """The share history is checked before the cash: with the feed's
+        copy of the proceeds already on the account, the call used to answer
+        cash_already_recorded and the dry run the oversell."""
+        trade = self._trade_day(10)
+        self._feed_row("5000.00", trade + timedelta(days=1))  # 50 x 100
+        errors = []
+        for dry_run in (False, True):
+            (refused,) = _mcp_call(
+                live_server.url,
+                seeded_tokens["operator"],
+                [("record_sale", self._args(quantity="50", dry_run=dry_run))],
+            )
+            errors.append(refused["error"])
+        assert errors[0] == errors[1]
+        assert trade.isoformat() in errors[0] and "cash_already_recorded" not in errors[0]
+
+    def test_over_selling_is_refused_naming_the_date(
+        self, plan: str, seeded_tokens: dict[str, str], live_server: LiveServer
+    ) -> None:
+        trade = self._trade_day(10)
+        for dry_run in (False, True):
+            (refused,) = _mcp_call(
+                live_server.url,
+                seeded_tokens["operator"],
+                [("record_sale", self._args(quantity="50", dry_run=dry_run))],
+            )
+            assert trade.isoformat() in refused["error"] and "-10" in refused["error"]

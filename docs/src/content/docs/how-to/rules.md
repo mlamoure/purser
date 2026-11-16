@@ -138,8 +138,9 @@ opaque descriptors on both sides.
 A `transfer_link` rule declares the account pair, and for that pair the
 name-signal requirement no longer applies. **Everything else still does**:
 the amounts must be exactly opposite, the two dates must fall inside the
-pair's window, both rows must be posted, and a pair you explicitly unlinked
-stays unlinked.
+pair's window, both rows must be posted, and a pair you explicitly unlinked,
+or rejected as [not a transfer](../../how-to/transfers/#not-a-transfer), stays
+unlinked.
 
 ### The pair's date window
 
@@ -282,7 +283,13 @@ out of `matched` and reported as `skipped_transfers`. Rows in a different
 currency from the rule's category are left out the same way and reported as
 `skipped_currency`: a transaction keeps one currency. Split transactions (one
 bank amount across several categories, from a QIF import) are read-only and
-left out the same way, reported as `skipped_splits`.
+left out the same way, reported as `skipped_splits`. A rule whose category
+is an `[account]` leaves out a row whose only counterpart in that account is
+the other side of a pair you said is not a transfer, reported as
+`skipped_not_a_transfer`. That is the one count where the real run can
+differ from its dry run: when an earlier row of the same run takes the
+counterpart a later row would have paired with, the later row is skipped as
+it is applied and counted there instead.
 
 `transfer_link` rules have no apply-history: the nightly sweep is their
 retroactive application.

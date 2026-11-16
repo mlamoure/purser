@@ -1,13 +1,12 @@
 ---
 title: Security model
-description: Trust as a feature list — scoped tokens, attributable and reversible agent writes, full read and write auditing, sign-in throttling, and encryption at rest.
+description: Access scopes, audit logs, correction history, sign-in throttling and encryption at rest.
 ---
 
-Purser's pitch is that you can hand your agent your finances and know
-**precisely** what it did and what it saw. The agent is your own: it acts with
-your authority, and Purser makes every write attributable and reversible. That
-is not a promise, it is a list of mechanisms. This page is the map; the authoritative spec is design
-section 9.
+Purser controls access through token scopes and records reads and writes in
+an audit log. Posted transactions retain correction history. This page covers
+those controls, sign-in protection and encryption; the authoritative spec is
+design section 9.
 
 ## Scopes
 
@@ -15,11 +14,22 @@ Every token carries one or more scopes:
 
 | Scope | Grants |
 | --- | --- |
-| `read` | Every read tool and resource. |
+| `read` | Financial reads: transactions, ledger and bank balances, reports, tools and resources. |
 | `write` | Every write: transactions, matches, transfers, rules, schedules, suggestions, valuations, holdings. |
 | `admin` | Token and configuration management. |
 
 The recommended default for an agent is **`read + write`**.
+
+Account read access includes the bank-reported balance, available balance,
+freshness and comparison basis, as well as transactions and the ledger balance.
+Use `GET /accounts/{id}`, `GET /accounts/{id}/balance` or MCP `account_balance`;
+each includes `bank_snapshot`. Permissions currently apply across the instance;
+there are no per-account or per-tenant access lists.
+
+Connection discovery is a configuration surface and remains admin-only, as do
+credentials, setup and mapping. Reading an account's bank balances does not
+require that access. The bank snapshot never includes credentials, bank account
+numbers or provider identifiers, even for an administrator.
 
 ## Undo, not pre-approval
 
@@ -31,11 +41,11 @@ marks agent-made rows as agent-made.
 
 Proposing is the agent's choice per call. When it carries out your request, it
 writes directly. When it acts on its own initiative — a pattern it noticed, a
-rule it thinks would help — it proposes instead: a rule or a memory stays a
+rule it thinks would help — it proposes instead: a rule or a financial note stays a
 draft that never runs or is served until you activate it, and a schedule lands
-as a [suggestion](../../how-to/suggestions/) for you to decide. A memory stays a
+as a [suggestion](../../how-to/suggestions/) for you to decide. A note stays a
 draft unless you asked the agent to remember something, because an active
-memory is context for every future session.
+note can be served as context in future sessions.
 
 Every endpoint and tool declares the scope it requires; no route is open by
 default. The few that answer without a token are deliberate: first-run setup
@@ -43,12 +53,14 @@ default. The few that answer without a token are deliberate: first-run setup
 
 ## What an agent sees
 
-Everything an agent reads lands in its model provider's context, so Purser
-lets you keep details out unless a task needs them. Two settings (Config,
-Settings, off by default) withhold payees and single amounts from agents; an
-agent asks for a field on a call when your question needs it, and the audit
-log lists every call that did. External account identifiers are left out for
-agents unless a call asks for them. See [Privacy and agents](../../explanation/privacy-and-agents/).
+You choose the agent, its access scopes and your disclosure defaults. Data
+returned to an agent may enter its model's context. Two MCP settings (Config,
+Settings, off by default) omit purchase details and individual amounts. An
+agent can request those fields per call; the audit log records those requests.
+These defaults do not restrict which fields a readable tool can disclose.
+External account identifiers are omitted by default from MCP responses.
+See [Privacy and agents](../../explanation/privacy-and-agents/) for the
+settings and the differences between MCP, REST and browser access.
 
 ## No self-escalation for non-admin tokens
 
@@ -70,16 +82,45 @@ other agents, nor confirm that another token exists.
 
 ## Reads are audited too
 
-Every mutation writes an `audit_log` entry with the actor token, action, entity,
-and before/after — and so does every **read**. Each authenticated request writes
-one call row (REST via middleware, MCP via a tool wrapper that never logs
-credential material), and a shared `request_id` groups a call with the changes it
-produced. The admin UI folds these into **virtual sessions** — per actor, split
-after 30 minutes of silence — so a long-lived agent token reads as
-conversation-shaped bursts. Audit retention is finite and uniform
-(`audit_retention_days`, default 90, floor 7), pruned nightly; the durable
-[event stream](../../reference/events-webhooks/) is separate and is the permanent
-record for transfer automation.
+Audit Log opens on **Data shared**: what Purser returned to an authorized
+integration, the accounts and dates identified in the response, fields withheld,
+and the outcome. **Changes made**, **Access & permissions**, and **Technical
+activity** keep mutations, grants and browser/system activity available separately.
+Expand an entry for its authorization, evidence ID and linked activity.
+Response summaries show recorded categories and counts; empty category, account
+and withheld-field summaries are omitted. Recorded field paths remain available
+under **Technical details**, even when no category was assigned.
+
+Filters run on the server across the retained history, not just loaded entries.
+Use **Load older entries** to continue, or **Export CSV/JSON** for every matching
+entry. Filter URLs can be bookmarked. Dates show the browser's local timezone;
+export timestamps include their UTC offset. Account, data-type and extra-field
+filters require recorded evidence, so they cannot match older entries that lack it.
+
+New records contain a field inventory and counts, not a copy of financial values.
+An inventory can be partial when a response includes free text or exceeds inventory
+limits. Requested coverage is separate from dates actually found in the response.
+Historical entries explicitly state that detailed sharing information was not
+recorded. They do not acquire guessed authorization or response data on upgrade.
+
+An integration's response is recorded before Purser releases it. If capture fails,
+Purser withholds the response: REST returns 503 and MCP returns an error. **A write
+may already have completed; check its state before retrying.** REST integration
+responses above 16 MiB are withheld with 413; narrow the request. Browser activity
+remains best-effort so an administrator can investigate an audit outage.
+
+A separate completion record identifies an HTTP send or an MCP result returned to
+the transport. Missing completion evidence appears as **Delivery uncertain**.
+Purser cannot prove that a client received the data or where it forwarded it.
+Capture-failure notices describe the current server process since its start, not
+all servers or historical uptime.
+
+Each mutation retains its before/after entry, linked to the call by request ID.
+Audit access and exports require admin scope. Sensitive audit details and grant
+snapshots are encrypted. Retention is finite and uniform (`audit_retention_days`,
+default 90, floor 7), pruned nightly, including completion records. The page shows
+the configured duration and earliest retained entry. The durable
+[event stream](../../reference/events-webhooks/) is separate.
 
 ## Sign-in throttling
 

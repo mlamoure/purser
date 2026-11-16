@@ -18,9 +18,10 @@ from purser.logging import configure_logging
 DbSession = Annotated[Session, Depends(get_session)]
 
 API_DESCRIPTION = """\
-Purser is an AI-native personal finance backend: a double-entry ledger behind a
-flat API. Agents are first-class clients — prefer the MCP endpoint at `/mcp`
-(same Bearer tokens), or use these REST endpoints directly.
+Purser is a privately hosted finance back-end for your personal AI agent.
+It is mostly headless: use the MCP endpoint at `/mcp` or these REST endpoints
+with a Bearer token. The web UI provides administrative controls.
+Purser stores records and performs calculations; your agent supplies the AI.
 
 Conventions: amounts are decimal strings (negative = money out); accounts and
 categories accept a UUID or an ltree path; posted transactions are immutable
@@ -68,7 +69,9 @@ def create_app() -> FastAPI:
 
     app = FastAPI(
         title="Purser",
-        summary="The finance backend for the personal agent stack.",
+        summary=(
+            "The privately hosted finance back-end, designed for use by your personal AI Agent."
+        ),
         description=API_DESCRIPTION,
         version=purser.__version__,
         license_info={"name": "AGPL-3.0-only", "identifier": "AGPL-3.0-only"},
@@ -88,9 +91,8 @@ def create_app() -> FastAPI:
 
     from purser.api.middleware import AuditMiddleware, BodyLimitMiddleware
 
-    # Outermost layer: sees the final status, flushes one call row after the
-    # response body (issue #122). /mcp short-circuits inside the middleware —
-    # tool calls audit themselves via audited_tool.
+    # Capture integration responses before release; browser activity remains
+    # best-effort. MCP tools and financial resources audit their own results.
     app.add_middleware(AuditMiddleware)
     # Outside even that: an oversized body is refused before any layer reads
     # it (#429). FastAPI reads a body before it resolves authentication.
@@ -101,9 +103,11 @@ def create_app() -> FastAPI:
     from purser.api.accounts import categories_router
     from purser.api.accounts import router as accounts_router
     from purser.api.categorize import router as categorize_router
+    from purser.api.config import clock_router
     from purser.api.config import router as config_router
     from purser.api.csv_import import router as csv_router
     from purser.api.feed import router as feed_router
+    from purser.api.lots import router as lots_router
     from purser.api.matching import router as matching_router
     from purser.api.memories import router as memories_router
     from purser.api.networth import holdings_router, valuations_router
@@ -123,6 +127,9 @@ def create_app() -> FastAPI:
     app.include_router(users_router)
     app.include_router(tokens_router)
     app.include_router(audit_router)
+    from purser.admin.audit_routes import router as sharing_audit_router
+
+    app.include_router(sharing_audit_router)
     app.include_router(accounts_router)
     app.include_router(categories_router)
     app.include_router(transactions_router)
@@ -135,6 +142,7 @@ def create_app() -> FastAPI:
     app.include_router(holdings_router)
     app.include_router(valuations_router)
     app.include_router(positions_router)
+    app.include_router(lots_router)
     app.include_router(prices_router)
     app.include_router(events_router)
     app.include_router(webhooks_router)
@@ -144,6 +152,7 @@ def create_app() -> FastAPI:
     app.include_router(rules_router)
     app.include_router(memories_router)
     app.include_router(config_router)
+    app.include_router(clock_router)
 
     @app.api_route("/mcp", methods=["GET", "POST", "DELETE"], include_in_schema=False)
     async def mcp_no_slash() -> RedirectResponse:

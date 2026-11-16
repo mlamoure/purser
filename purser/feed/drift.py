@@ -1,8 +1,9 @@
 """Post-sync balance-drift check (issue #149, DESIGN §7.3).
 
 After every successful sync, compare the feed-reported per-account ``balance``
-against the ledger for mapped, open, cash/card accounts and surface drift as a
-``balance.drift`` warning event — never a gate, never an auto-adjustment, no
+against the ledger for mapped, open, cash/card accounts (and a hand-tracked
+brokerage account whose feed balance is its cash, decision 103) and surface
+drift as a ``balance.drift`` warning event — never a gate, never an auto-adjustment, no
 ledger writes. The cross-sync memory (for the consecutive-sync emission gate,
 the once-per-episode dedup, and the per-account basis choice of issue #283) is
 the ``balance_drift`` observation block the caller stores on the
@@ -21,6 +22,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from purser import events
+from purser.feed import envelope
 from purser.logging import get_logger
 from purser.models import Account, AuditLog, Connection, Posting, RawFetch, Transaction
 
@@ -28,8 +30,17 @@ log = get_logger(__name__)
 
 # loan/property consume the reported balance as valuations (importer.
 # _record_balance_valuation, DESIGN §8); brokerage balances are market value
-# (holdings-driven, §8). Drift compares postings sums, so cash/card only.
+# (holdings-driven, §8). Drift compares postings sums, so cash/card only —
+# plus a brokerage account tracked by hand whose admin said its feed balance
+# is its cash (``accounts.feed_balance_is_cash``, decision 103): a cash sweep
+# whose positions live in Purser, not in the feed.
 ELIGIBLE_TYPES = frozenset({"checking", "savings", "cash", "credit_card"})
+
+
+def checked_type(account_type: str, *, feed_balance_is_cash: bool) -> bool:
+    """Whether an account of this type, with this opt-in, is drift-checked."""
+    return account_type in ELIGIBLE_TYPES or (account_type == "brokerage" and feed_balance_is_cash)
+
 
 _QUANT = Decimal("0.0001")  # canonical NUMERIC(20,4) string form
 
@@ -93,7 +104,10 @@ def _parse_reported(sf_account: dict[str, Any]) -> Decimal | None:
 
 
 def _eligible(account: Account) -> bool:
-    return account.type in ELIGIBLE_TYPES and account.closed_at is None
+    return (
+        checked_type(account.type, feed_balance_is_cash=account.feed_balance_is_cash)
+        and account.closed_at is None
+    )
 
 
 def _ledger_sums(
@@ -333,7 +347,10 @@ def _check(
     prev = blocks[0] if blocks else {}
 
     eligible: list[tuple[dict[str, Any], Account, Decimal]] = []
+    ambiguous = envelope.duplicate_account_ids(payload)
     for sf_account in payload.get("accounts", []):
+        if sf_account["id"] in ambiguous:
+            continue
         account = session.execute(
             select(Account).where(
                 Account.connection_id == connection.id,

@@ -82,6 +82,7 @@ def create_token(
     expires_at: datetime | None = None,
     kind: str = "api",
     actor_token_id: uuid.UUID | None,
+    replaces_token_id: uuid.UUID | None = None,
 ) -> tuple[ApiToken, str]:
     """Create an API token; returns (row, raw_token). Raw token is shown once.
 
@@ -98,6 +99,21 @@ def create_token(
     unknown = set(scopes) - set(security.ALL_SCOPES)
     if unknown:
         raise IdentityError(f"unknown scopes: {sorted(unknown)}")
+    previous = session.get(ApiToken, replaces_token_id) if replaces_token_id else None
+    if replaces_token_id and (
+        previous is None or previous.kind != "api" or previous.user_id != user.id or kind != "api"
+    ):
+        raise IdentityError("replacement must name an API token belonging to this user")
+    approver = session.get(ApiToken, actor_token_id) if actor_token_id else None
+    approved_by = session.get(User, approver.user_id) if approver else None
+    authorization = {
+        "granted_at": datetime.now(UTC).isoformat(),
+        "granted_by_id": str(approved_by.id) if approved_by else None,
+        "granted_by": (approved_by.display_name or approved_by.email) if approved_by else None,
+        "grant_token_id": str(actor_token_id) if actor_token_id else None,
+        "scopes": scopes,
+        "replaces_token_id": str(replaces_token_id) if replaces_token_id else None,
+    }
     raw, token_hash = security.generate_token()
     token = ApiToken(
         user_id=user.id,
@@ -106,6 +122,10 @@ def create_token(
         token_hash=token_hash,
         scopes=scopes,
         expires_at=expires_at,
+        integration_id=(previous.integration_id if previous else uuid.uuid4())
+        if kind == "api"
+        else None,
+        authorization=authorization if kind == "api" else None,
     )
     session.add(token)
     session.flush()
@@ -115,7 +135,14 @@ def create_token(
         action="token.create",
         entity_type="api_token",
         entity_id=token.id,
-        after={"name": name, "kind": kind, "scopes": scopes, "user_id": str(user.id)},
+        after={
+            "name": name,
+            "kind": kind,
+            "scopes": scopes,
+            "user_id": str(user.id),
+            "integration_id": str(token.integration_id) if token.integration_id else None,
+            "authorization": authorization,
+        },
     )
     return token, raw
 

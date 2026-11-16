@@ -7,7 +7,7 @@ resource for full-resolution series. Registered on import.
 """
 
 import json
-from datetime import UTC, date, datetime
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Annotated, Any
 
@@ -15,6 +15,7 @@ from mcp.types import CallToolResult
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from purser import clock
 from purser.core import forecasting as core_forecasting
 from purser.mcp import presentation
 from purser.mcp._registry import _amount, _run, audited_tool
@@ -168,7 +169,7 @@ async def net_worth(as_of: str | None = None, period: str | None = None) -> Call
     def op(session: Session) -> CallToolResult:
         from purser import networth as service
 
-        today = datetime.now(UTC).date()
+        today = clock.ledger_today()
 
         if period is None:
             result = service.net_worth_at(session, date.fromisoformat(as_of) if as_of else today)
@@ -367,7 +368,10 @@ async def forecast_balance(
     only when nonzero; list_unmatched names each one's proposed_posted_id
     and match on that pair confirms it). Events flagged projected are rule
     occurrences past the materialized horizon (no instance row yet);
-    overdue ones are still due and land today. An event with basis
+    overdue ones are still due and land today. Schedule events carry certainty
+    status and true-only amount_estimated/date_estimated flags (omitted flags
+    mean false); the daily resource carries full evidence and original values.
+    An event with basis
     'statement' carries a card statement balance someone recorded
     (record_statement_balance) and one with 'override' an amount the user
     set; without basis the amount is the schedule's own (fixed or an
@@ -412,6 +416,20 @@ async def forecast_balance(
                         ),
                         # Flags only when set — every key costs the fitted
                         # payload events (guardrail 6, #235).
+                        **(
+                            {
+                                "certainty": {
+                                    "status": event.certainty["status"],
+                                    **{
+                                        k: True
+                                        for k in ("amount_estimated", "date_estimated")
+                                        if event.certainty[k]
+                                    },
+                                }
+                            }
+                            if event.certainty
+                            else {}
+                        ),
                         **({"projected": True} if event.projected else {}),
                         **({"overdue": True} if event.overdue else {}),
                         # Only the amounts someone supplied (decision 80): the
@@ -618,7 +636,10 @@ async def whats_new(
     value it), brokerage accounts switched back to the feed whose
     hand-tracked set still counts because no fetch has arrived since
     (open_manual_periods: check the connection or the account mapping),
-    the week's expected bills, and sync failures.
+    the week's expected bills, sync failures, and bank feed problems open
+    now (feed: logins that need the user to log in again at the bank,
+    accounts the bank fails to deliver, accounts whose bank balance has
+    stopped updating; repeated on every call until fixed).
     Pass the returned cursor on your next call to get only new material; a
     first call without a cursor looks back 7 days. Every line carries its
     entity id so you can drill without a search. Narrate this in your own
@@ -678,6 +699,18 @@ async def whats_new(
             parts.append(f"{upcoming['count']} bill(s) ≈ ${upcoming['total']} due this week")
         if payload["sync"]["failures"]:
             parts.append(f"{payload['sync']['failures']} sync failure(s)")
+        feed = payload["feed"]
+        for login in feed["needs_login"]:
+            parts.append(f"{login['institution']} needs you to log in again (SimpleFIN Bridge)")
+        for failing in feed["failing"]:
+            parts.append(
+                f"{failing['account']} could not be fetched completely ({failing['code']})"
+            )
+        for stale in feed["stale"]:
+            parts.append(
+                f"{stale['account']} has not updated since {stale['balance_date']} "
+                f"({stale['days']} days)"
+            )
         review_block = payload.get("review") or {}
         if review_block.get("unreviewed"):
             aged = review_block.get("oldest_days")
@@ -737,7 +770,7 @@ async def balance_history(
             segment = balance_window_segment(window_start, window_end)
         else:
             window_start, window_end = named_balance_window(
-                session, period, today=datetime.now(UTC).date()
+                session, period, today=clock.ledger_today()
             )
             label = segment = period
 

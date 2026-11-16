@@ -8,22 +8,24 @@ provider API key are write-only: they never appear in a response — only their
 presence does.
 """
 
+from datetime import date as date_type
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from purser import appsettings, scheduler
-from purser.admin.auth import AdminToken
+from purser import appsettings, clock, scheduler
+from purser.admin.auth import AdminToken, ReadToken
 from purser.appsettings import SyncSchedule
 from purser.db import get_session
 
 DbSession = Annotated[Session, Depends(get_session)]
 
 router = APIRouter(prefix="/config", tags=["config"])
+clock_router = APIRouter(tags=["meta"])
 
 # Keys where an explicit null is a meaningful override ("no value"). For the
 # OIDC pair, a null override disables SSO even when env configures it.
@@ -51,6 +53,11 @@ class ConfigValues(BaseModel):
     # write-only (price_api_key_set below).
     price_provider: str
     price_stale_days: int
+    # Feed freshness (#480): days a bank balance may age before feed.stale.
+    feed_stale_days: int
+    # The household time zone (#471, decision 105): an IANA name whose
+    # calendar date is the ledger day. Job times stay UTC.
+    timezone: str
 
 
 class EncryptionStatus(BaseModel):
@@ -105,6 +112,17 @@ class ConfigUpdate(BaseModel):
     # Write-only: stored Fernet-encrypted, never returned (only its presence).
     price_api_key: str | None = None
     price_stale_days: int | None = Field(None, ge=1, le=365)
+    feed_stale_days: int | None = Field(None, ge=1, le=90)
+    timezone: str | None = Field(
+        None, description="IANA time zone name (e.g. America/New_York); the ledger day follows it"
+    )
+
+    @field_validator("timezone")
+    @classmethod
+    def _iana_timezone(cls, v: str | None) -> str | None:
+        if v is not None and not clock.is_valid_timezone(v):
+            raise ValueError("must be an IANA time zone name, e.g. America/New_York or UTC")
+        return v
 
     @field_validator("ai_base_url", "grafana_url", "oidc_issuer")
     @classmethod
@@ -182,6 +200,8 @@ def _config_out(session: Session) -> ConfigOut:
             oidc_auto_provision=eff.oidc_auto_provision,
             price_provider=eff.price_provider,
             price_stale_days=eff.price_stale_days,
+            feed_stale_days=eff.feed_stale_days,
+            timezone=eff.timezone,
         ),
         overridden=sorted(persisted),
         ai_api_key_set=bool(eff.ai_api_key),
@@ -210,10 +230,29 @@ def _check_price_api_key(key: str | None) -> None:
         )
 
 
+def _check_timezone_in_database(session: Session, name: str | None) -> None:
+    """The readmodel views compute the ledger day in SQL (decision 105), so
+    a zone Python knows but this Postgres does not would break them. The two
+    tz databases agree on every IANA name in practice; this is the guard for
+    when they do not."""
+    if name is None:
+        return
+    known = session.execute(
+        text("SELECT 1 FROM pg_timezone_names WHERE name = :name"), {"name": name}
+    ).first()
+    if known is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"timezone {name!r} is not known to the database's time zone data",
+        )
+
+
 @router.put("")
 def update_config(body: ConfigUpdate, admin: AdminToken, session: DbSession) -> ConfigOut:
     if "price_api_key" in body.model_fields_set:
         _check_price_api_key(body.price_api_key)
+    if "timezone" in body.model_fields_set:
+        _check_timezone_in_database(session, body.timezone)
     changes: dict[str, Any] = {}
     for key in body.model_fields_set:
         value = getattr(body, key)
@@ -242,3 +281,19 @@ def reset_config(key: str, admin: AdminToken, session: DbSession) -> ConfigOut:
     if key == appsettings.SYNC_SCHEDULE_KEY:
         scheduler.reschedule_sync()
     return _config_out(session)
+
+
+class ClockOut(BaseModel):
+    ledger_today: date_type = Field(
+        description="Today in the household time zone: the newest date a dated write accepts."
+    )
+    timezone: str = Field(description="The household time zone (IANA name) the ledger day uses.")
+
+
+@clock_router.get("/clock")
+def get_clock(token: ReadToken) -> ClockOut:
+    """The ledger day and the household time zone it follows (#471, decision
+    105). Read scope: a client that dates a write (a share count, a position)
+    needs the server's "today", which the time zone setting decides and which
+    is not the browser's or UTC's date."""
+    return ClockOut(ledger_today=clock.ledger_today(), timezone=clock.timezone_name())

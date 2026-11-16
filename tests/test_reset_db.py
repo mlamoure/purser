@@ -17,6 +17,7 @@ KEPT = {
     "connections": "feed tests create fresh rows; raw_fetches references them",
     "encryption_canary": "seeded by migration 0007 to verify the encryption key",
     "encryption_keys": "the narrative-encryption keys the whole suite shares",
+    "ledger_clock": "a singleton row: the env time zone every startup rewrites (#471)",
     "raw_fetches": "append-only: TRUNCATE is trigger-blocked",
 }
 

@@ -64,6 +64,9 @@ OVERLAY_KEYS = (
     "review_max_age_days",
     "price_provider",
     "price_stale_days",
+    "feed_stale_days",
+    # The household time zone (#471, decision 105): the ledger day follows it.
+    "timezone",
 )
 ALL_KEYS = (SYNC_SCHEDULE_KEY, REVIEW_GUIDANCE_KEY, PRICE_API_KEY, *OVERLAY_KEYS)
 SECRET_KEYS = frozenset({"ai_api_key", "oidc_client_secret", PRICE_API_KEY})

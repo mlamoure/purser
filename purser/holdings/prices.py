@@ -32,10 +32,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from purser import appsettings, audit, balances, events
+from purser import appsettings, audit, balances, clock, events
 from purser.core import holdings as core
 from purser.holdings import overlay, projection
-from purser.holdings.projection import utc_today
 from purser.holdings.providers import TIINGO, PriceFetchError, PriceProvider, TiingoProvider
 from purser.holdings.service import checked, symbol_of
 from purser.ledger import LedgerError
@@ -84,7 +83,7 @@ def record_price(
     ``price_date`` or later, is valued from the close on read (decision 92):
     nothing of it is written, and net worth is marked dirty from
     ``price_date`` so its stored days heal through the watermark."""
-    today = today or utc_today()
+    today = today or clock.ledger_today()
     normalized = symbol_of(symbol)
     close = checked(core.check_price, close, "close")
     if price_date > today:
@@ -173,7 +172,7 @@ def open_symbols(session: Session, *, today: date | None = None) -> dict[str, da
     positions. A position sold down to zero but not closed yet holds nothing:
     its symbol is not fetched daily, never turns stale, and is not listed in
     the status."""
-    today = today or utc_today()
+    today = today or clock.ledger_today()
     positions = list(
         session.execute(
             select(Position)
@@ -425,7 +424,7 @@ def emit_period_open(session: Session, periods: list[Any], *, stale_days: int) -
             entity_id=period.account_id,
             payload={
                 "account": period.account,
-                "since": period.switched_at.date().isoformat(),
+                "since": clock.ledger_date(period.switched_at).isoformat(),
                 "stale_days": stale_days,
             },
         ):
@@ -581,7 +580,7 @@ def run_fetch(
     """
     from purser.db import get_sessionmaker
 
-    today = today or utc_today()
+    today = today or clock.ledger_today()
     settings = appsettings.effective()
     result = FetchResult(provider=settings.price_provider)
     maker = get_sessionmaker()
@@ -730,7 +729,7 @@ class SymbolPrice:
 def status(session: Session, *, today: date | None = None) -> dict[str, Any]:
     """What Config, Prices shows: the provider, the newest provider fetch,
     each open symbol's close in effect today, and the last failure."""
-    today = today or utc_today()
+    today = today or clock.ledger_today()
     settings = appsettings.effective()
     books = watched_books(session, today=today)
     symbols = sorted(books)

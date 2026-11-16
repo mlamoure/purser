@@ -11,7 +11,7 @@ series live behind ``purser://`` resources, where the token budget does not
 apply.
 """
 
-from typing import NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 # --------------------------------------------------------------------------
 # forecast_balance (#73)
@@ -41,6 +41,7 @@ class ForecastRange(TypedDict):
 
 
 class ForecastEventOut(TypedDict):
+    certainty: NotRequired[dict[str, Any]]
     date: str
     name: NotRequired[str]
     amount: NotRequired[str]
@@ -312,6 +313,41 @@ class DigestOpenPeriod(TypedDict):
     since: str | None  # the day of the switch
 
 
+class DigestFeedLogin(TypedDict):
+    # A bank login reporting a con.* issue (con.auth: log in again at the
+    # bank through SimpleFIN Bridge) on the latest sync (#480).
+    institution: str | None
+    code: str | None
+    message: str | None
+
+
+class DigestFeedFailing(TypedDict):
+    # A mapped account reporting an act.* issue (act.failed, act.missingdata:
+    # usually clears on a later sync) on the latest sync.
+    account: str | None
+    institution: str | None
+    code: str | None
+    message: str | None
+
+
+class DigestFeedStale(TypedDict):
+    # A mapped account whose bank balance date is older than feed_stale_days:
+    # the bank has stopped updating (often a login that needs attention).
+    account: str | None
+    institution: str | None
+    balance_date: str | None
+    days: int | None
+
+
+class DigestFeed(TypedDict):
+    # Open now, from each connection's latest sync — repeated every call
+    # until fixed, unlike the event-driven sections.
+    needs_login: list[DigestFeedLogin]
+    failing: list[DigestFeedFailing]
+    stale: list[DigestFeedStale]
+    truncated: bool
+
+
 class WhatsNewResult(TypedDict):
     cursor: str | None
     transactions: DigestTransactions
@@ -331,6 +367,7 @@ class WhatsNewResult(TypedDict):
     open_manual_periods_truncated: bool
     upcoming: DigestUpcoming
     sync: DigestSync
+    feed: DigestFeed
     events_truncated: bool
 
     # --------------------------------------------------------------------------
@@ -422,6 +459,10 @@ class HoldingPosition(TypedDict):
     # Present only when true: a feed row with no value whose symbol is no
     # ticker (a description); never record a price for it.
     unpriceable: NotRequired[bool]
+    # Present only on a hand-tracked position whose trade's cash has not
+    # landed yet: that cash (a sale's proceeds +, a funded buy's cost -),
+    # included in market_value until the cash date (decision 104).
+    in_transit: NotRequired[str]
     # Present only when the cost basis is known.
     unrealized_gain: NotRequired[str]
     # One named account's pages only: the total basis, null = unknown.
@@ -448,6 +489,21 @@ class HoldingsAccount(TypedDict):
     # Present only when true: a named closed account, its last set shown but
     # left out of totals (net worth no longer counts it).
     closed: NotRequired[bool]
+    # Present only when the account has unvested award units (#393): per
+    # symbol, informational, never inside market_value, totals or net worth.
+    unvested: NotRequired[list["HoldingsUnvested"]]
+    # Symbols with unvested units beyond those itemized (see list_awards).
+    unvested_more: NotRequired[int]
+
+
+class HoldingsUnvested(TypedDict):
+    symbol: str
+    units: str
+    value: str | None
+    next_vest_date: str | None
+    next_vest_units: str | None
+    unscheduled: str
+    complete: bool
 
 
 class HoldingsTotals(TypedDict):
@@ -490,3 +546,315 @@ class RecordPositionResult(TypedDict):
     warning: NotRequired[str]
     # Present only when true: a close, but the value does not fit an amount.
     value_out_of_range: NotRequired[bool]
+
+
+# --------------------------------------------------------------------------
+# record_sale (#390 phase 1b, decision 103)
+# --------------------------------------------------------------------------
+
+
+class SalePosition(TypedDict):
+    position_id: str  # for reverse_position_event / reopen_position
+    symbol: str
+    quantity_before: str  # held today before the sale
+    quantity_after: str  # held today after it
+
+
+class SaleCash(TypedDict):
+    # What lands on the account, to the cent; omitted (and named in
+    # `withheld`) while single amounts are withheld (decision 91).
+    amount: NotRequired[str]
+    settle_on: str
+    transaction_id: str | None  # the cash row (Purser's, or the linked one); null on a dry run
+
+
+class SaleCashFound(TypedDict):
+    """The row the double-count check found: the account already shows this
+    cash. Without force_cash a real call is refused (cash_already_recorded);
+    with it, this is the row the cash posts over."""
+
+    transaction_id: str
+    date: str
+    amount: NotRequired[str]  # omitted while single amounts are withheld
+
+
+class SaleLots(TypedDict):
+    dispositions: int
+    unallocated: str
+    terms: list[str]
+    cost_basis: NotRequired[str | None]  # null when any lot's basis is unknown
+    proceeds: NotRequired[str | None]
+    realized_gain: NotRequired[str | None]
+
+
+class RecordSaleResult(TypedDict):
+    position: SalePosition
+    cash: SaleCash | None  # null when proceeds_to is none
+    linked: bool  # the cash is a row the account already showed (transaction_id)
+    dry_run: bool
+    event_id: str | None  # the sell event; null on a dry run
+    # Dry runs only: the row the double-count check found, or null.
+    already_recorded: NotRequired[SaleCashFound | None]
+    # With force_cash: the row of the same amount the cash was (or, on a dry
+    # run, would be) posted over, so the override is never silent; else null.
+    cash_probe_overridden: SaleCashFound | None
+    # Fields the user's privacy defaults withheld from this answer (#437).
+    withheld: NotRequired[list[str]]
+    # The lots it drew on (#393): count, terms and the summed basis /
+    # proceeds / gain where known.
+    lots: NotRequired[SaleLots | None]
+
+
+# --------------------------------------------------------------------------
+# reverse_position_event (#390 phase 1b, decision 103)
+# --------------------------------------------------------------------------
+
+
+class ReversedPosition(TypedDict):
+    position_id: str
+    symbol: str
+    quantity_after: str  # held today after the reversal
+
+
+class ReversedCash(TypedDict):
+    transaction_id: str  # the trade's cash row (Purser's, or the linked one)
+    undone_by: str  # the correction's replacement that undid it
+
+
+class ReversePositionEventResult(TypedDict):
+    reverses_id: str  # the event reversed
+    reversal_id: str  # the reversal row written
+    kind: str
+    occurred_on: str
+    position: ReversedPosition
+    cash: ReversedCash | None  # null when the event moved no cash
+
+
+class ReopenPositionResult(TypedDict):
+    position_id: str
+    symbol: str
+    account: str
+    quantity: str  # held today (a closed position holds nothing)
+
+
+# --------------------------------------------------------------------------
+# Lots, captures and awards (#393, decision 107)
+# --------------------------------------------------------------------------
+
+
+class LotAllocationInput(TypedDict):
+    """One lot a sale or transfer out draws on: ``lot`` is the lot id or the
+    broker's lot reference (matched by blind index), or the word
+    ``unallocated`` for shares outside every lot."""
+
+    lot: str
+    quantity: str
+
+
+class CaptureLotInput(TypedDict):
+    acquired_on: str  # YYYY-MM-DD
+    quantity: str  # remaining on as_of
+    external_ref: NotRequired[str]  # the broker's lot reference: the lot's identity
+    plan: NotRequired[str]
+    ordinal: NotRequired[int]  # tells lots of one date and plan apart without a reference
+    basis_per_share: NotRequired[str]
+    cost_basis: NotRequired[str]  # total basis of the remaining shares
+    acquisition: NotRequired[str]
+
+
+class CapturePositionInput(TypedDict):
+    symbol: str
+    lots: list[CaptureLotInput]
+    name: NotRequired[str]
+
+
+class CaptureVestInput(TypedDict):
+    vest_date: str
+    quantity: str
+    ordinal: NotRequired[int]
+
+
+class CaptureAwardInput(TypedDict):
+    grant_ref: str
+    symbol: str
+    granted_on: str
+    granted_quantity: str
+    cancelled_quantity: NotRequired[str]
+    vested_quantity: NotRequired[str]
+    plan: NotRequired[str]
+    schedule: NotRequired[list[CaptureVestInput]]
+
+
+class LotLine(TypedDict):
+    lot_id: str
+    acquired_on: str
+    acquisition: str
+    status: str  # open | closed | voided | reversed
+    remaining: str
+    term_if_sold_today: str  # short | long
+    basis_per_share: NotRequired[str | None]  # null: unknown; withheld with single amounts
+    plan: NotRequired[str | None]
+    external_ref: NotRequired[str | None]
+    remaining_basis: NotRequired[str | None]
+    vest_linked: NotRequired[bool]
+
+
+class LotFreshness(TypedDict):
+    as_of: str
+    captured_at: str
+    completeness: str
+
+
+class LotsSummary(TypedDict):
+    position_id: str | None
+    symbol: str
+    quantity: str
+    tracks_lots: bool
+    open_lots: int
+    lots_quantity: str
+    unallocated: str
+    basis_unknown_quantity: str
+    cost_basis: str | None  # null unless every share has a known basis
+    capture: LotFreshness | None  # capture freshness (not the quote's)
+    price_as_of: str | None  # quote freshness
+
+
+class ListLotsResult(TypedDict):
+    summary: LotsSummary
+    lots: list[LotLine]
+    total: int
+    next_cursor: str | None
+    withheld: NotRequired[list[str]]
+
+
+class PlanItem(TypedDict):
+    kind: str  # a change kind or a conflict code
+    symbol: NotRequired[str]
+    row: NotRequired[int | None]
+    lot_id: NotRequired[str | None]
+    quantity: NotRequired[str | None]
+    message: NotRequired[str]
+
+
+class CaptureResult(TypedDict):
+    dry_run: bool
+    applied: bool
+    retry: bool  # the exact request was applied before: nothing written
+    repeat_of: str | None  # the same holdings observed again: freshness only
+    plan_hash: str  # pass as expect_hash to commit this plan
+    capture_id: str | None
+    counts: dict[str, int]
+    conflicts: int
+    first_changes: list[PlanItem]
+    first_conflicts: list[PlanItem]
+    unchanged: int
+    stale_symbols: list[str]
+    skipped_symbols: list[str]
+    withheld: NotRequired[list[str]]
+
+
+class UnvestedLine(TypedDict):
+    symbol: str
+    units: str  # remaining unvested units (scheduled ones where remaining is unknown)
+    value: str | None  # informational; never in net worth
+    price_as_of: str | None
+    next_vest_date: str | None
+    next_vest_units: str | None
+    unscheduled: str  # of the units, those with no vest date yet
+    complete: bool  # false: some award's remaining units are unknown
+
+
+class AwardLine(TypedDict):
+    award_id: str
+    symbol: str
+    granted_on: str
+    granted: str
+    cancelled: str
+    vested: str
+    unvested: str
+    unvested_known: bool
+    unscheduled: str | None  # unvested units with no vest date; null: unknown
+    next_vest_date: str | None
+    next_vest_units: str | None
+    due_unrecorded: int
+    grant_ref: NotRequired[str | None]
+    plan: NotRequired[str | None]
+
+
+class AwardVestLine(TypedDict):
+    vest_id: str
+    vest_date: str
+    ordinal: int
+    quantity: str
+    status: str
+    lot_id: str | None
+
+
+class ListAwardsResult(TypedDict):
+    unvested: list[UnvestedLine]  # first page only, largest first
+    unvested_truncated: bool  # more symbols than fit; GET /accounts/{id}/awards has all
+    awards: list[AwardLine]
+    vests: NotRequired[list[AwardVestLine]]  # one award named: a page of its schedule
+    total: int
+    next_cursor: str | None
+    capture: LotFreshness | None
+    note: str
+    withheld: NotRequired[list[str]]
+
+
+class RecordVestResult(TypedDict):
+    award_id: str
+    vest_id: str | None
+    lot_id: str | None
+    event_id: str | None
+    position_id: str | None
+    linked: bool
+    already_recorded: bool
+    dry_run: bool
+    gross: str
+    withheld_units: str
+    net: str
+    unvested_after: str | None
+
+
+class TermTotalsOut(TypedDict):
+    disposals: int
+    quantity: str
+    proceeds: str
+    cost_basis: str
+    realized_gain: str
+    unknown_basis_quantity: str
+    unknown_proceeds_quantity: str
+
+
+class RealizedGainsResult(TypedDict):
+    account: str
+    year: int
+    symbol: str | None
+    short: TermTotalsOut
+    long: TermTotalsOut
+    unallocated_quantity: str
+    note: str
+
+
+class LotChangeResult(TypedDict):
+    lot_id: str
+    position_id: str
+    status: str
+    remaining: str
+    basis_per_share: str | None
+    cost_basis_known: bool
+
+
+class TransferOutResult(TypedDict):
+    position_id: str
+    symbol: str
+    event_id: str
+    quantity_after: str
+    lots: int
+
+
+class VestStatusResult(TypedDict):
+    vest_id: str
+    award_id: str
+    status: str

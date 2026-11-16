@@ -217,11 +217,15 @@ and counterparty — a payee for ordinary bills, the other account for transfers
 such as card payments, loan payments and contributions — and each recurring
 pattern becomes a **suggestion** in the [suggestions inbox](../../how-to/suggestions/)
 with the evidence attached: the occurrences, the cadence it found (weekly,
-every two weeks, semi-monthly, monthly, every two/three/six months, yearly), how
+every two or four weeks, semi-monthly, monthly, every two/three/six months, yearly), how
 regular the gaps were, and how steady the amount was. A varying amount is not a
 veto — card payments that swing threefold are still monthly; they come through
 as `estimated` (paying the card's balance when the counterparty is a card). A
 single skipped month is tolerated; a pattern that stopped is not proposed.
+Lapsed detector cards are hidden and withdrawn on the next scan. A changed
+latest amount after a stable history is shown explicitly for verification;
+opposite-sign histories do not form a single schedule. See the
+[safeguards](../../how-to/suggestions/#detection-safeguards) for the evidence rules.
 
 Adding a **credit card or loan** account triggers the same scan for payments to
 it right away (`source = account_added`). Detected patterns **never
@@ -252,3 +256,109 @@ sections 6 (schedules and forecasting) and 5 (matching). See the
 Recurrence detection counts each correction chain once, using its latest
 replacement. Editing a posted bank transaction does not double its amount in
 the history, whether the correction was made by a person, an agent or a rule.
+
+
+## Estimate certainty on one occurrence
+
+An **Estimate** badge identifies an uncertain amount, date, or both. Open its
+accessible details in Schedules or the forecast to see the basis, evidence and
+original estimate. **Confirmed upcoming** is still scheduled; it is not posted
+cash. **Match awaiting review** is a proposal, while **Matched actual** identifies
+a linked posted transaction. A link to a pending bank entry is labelled separately.
+
+A schedule's `date_type` is `fixed` or `estimated` (MCP `date_mode`). Use an
+estimated date for an approved reimbursement with an uncertain deposit date, or
+a seasonal service whose arrival varies. Historical detection remains an
+inference even when the previous amounts were identical.
+
+Use **Update evidence** on an occurrence to change one dimension. The REST
+operation is `PATCH /schedules/instances/{transaction_id}/certainty`; the MCP
+tool is `update_occurrence_certainty`. For example, a paystub can confirm this
+paycheck's amount without changing the date or confirming next month's pay:
+
+```json
+{
+  "amount": {
+    "state": "confirmed",
+    "value": "2150.00",
+    "source": "payroll",
+    "as_of": "2026-11-15",
+    "note": "Net amount on this occurrence's paystub"
+  }
+}
+```
+
+Omit `value` to keep the current amount or date. Omit the other dimension
+entirely to leave it alone. Every change needs a source, as-of date and evidence
+note. `history` can support an estimate but cannot confirm an obligation.
+Confirmation never creates a posted transaction. A generic amount/date override
+is not confirmation evidence, and only changes that dimension's certainty.
+
+Confirmed dimensions survive automatic estimate refresh. Reset returns the
+occurrence to its rule but retains the original and superseded evidence. The
+original snapshot stays available after edits, refreshes, matching and unmatching;
+older occurrences migrated into this feature are labelled **First retained
+snapshot**, because their earlier estimates were not recorded.
+
+Read full details with `GET /schedules/instances/{transaction_id}/certainty` or
+MCP `get_schedule_occurrence`. Schedule detail also returns its most recent 50
+matched occurrences. Actual amount and timing differences are computed against
+the original; positive timing variance means later. For a card payment, recording
+a statement confirms only its amount. Unmatching preserves that evidence; reset
+explicitly hands it back to the rule.
+
+An estimate or an ambiguous candidate never resolves automatically. Accept or
+reject its match proposal, or explicitly match the occurrence to the correct
+posted transaction. The posted movement replaces its forecast contribution, so
+it is counted once. Pending-review proposals retain the existing per-account
+forecast treatment; rejecting them restores the expected contribution.
+
+
+## Evidence on projected slots
+
+A fixed amount is a calculation choice, not proof that a future payment is known.
+Keep `amount_type="fixed"` when the model should use the entered Decimal amount.
+Changing it to `estimated` selects a history-based estimator and can change the
+forecast. To mark a fixed planning value uncertain without changing it, annotate
+its occurrence instead.
+
+For a projection beyond the 60-day materialization window, use the forecast
+**Upcoming occurrences and estimate details** list and **Update evidence**. The
+amount calculation is shown separately from the Estimate label. This form keeps
+the amount and date unchanged.
+
+REST: `GET` or `PATCH /schedules/{schedule_id}/occurrences/{occurrence_date}/certainty`.
+MCP: pass `schedule_id` and `occurrence_date` to `get_schedule_occurrence` or
+`update_occurrence_certainty`, instead of `transaction_id`. Forecast detail
+includes that address in `certainty.slot`. For example:
+
+```json
+{
+  "schedule_id": "00000000-0000-4000-8000-000000000001",
+  "occurrence_date": "2027-02-01",
+  "amount": {
+    "state": "estimated",
+    "source": "agent",
+    "as_of": "2026-11-15",
+    "note": "Fixed planning value; no statement for this occurrence yet"
+  }
+}
+```
+
+Omit `value`. A slot address rejects a different amount or date even after the
+slot materializes; use the existing transaction endpoint for an intentional
+value edit. Annotate the date separately when its timing is approximate. One
+slot's confirmation never confirms the following slot. Unannotated fixed rules
+retain their existing certainty defaults; annotate each relevant slot explicitly.
+
+The first annotation saves a **First retained snapshot** with its real capture
+time. Evidence, attribution and history follow the slot into materialization and
+rematerialization. If a rule changes the calculated value, the earlier evidence
+stays visible, with its previous value, and the current value is estimated.
+`{"clear": ["amount"]}` returns amount certainty to its rule default without
+changing the amount; superseded evidence remains in the REST detail's history.
+
+For existing plans, first record the forecast's amounts, dates and daily balances,
+then apply evidence with no `value` fields. Re-read the forecast to verify that
+only certainty changed. The schema migration does not annotate existing plans,
+recalculate history, extend the materialization horizon, or create transactions.

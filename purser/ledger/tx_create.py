@@ -11,7 +11,12 @@ from sqlalchemy.orm import Session
 
 from purser import audit, balances, events
 from purser.core import ledger as core
-from purser.ledger.accounts import _assert_accounts_open, get_account, resolve_account
+from purser.ledger.accounts import (
+    _assert_accounts_open,
+    get_account,
+    refuse_system_account,
+    resolve_account,
+)
 from purser.ledger.errors import LedgerError
 from purser.ledger.payees import resolve_payee
 from purser.models import Account, ApiToken, Posting, Transaction
@@ -55,11 +60,18 @@ def create_flat_transaction(
     occurrence_date: date_type | None = None,
     source_fetch_id: uuid.UUID | None = None,
     content_hash: str | None = None,
+    system_leg: bool = False,
 ) -> Transaction:
+    """The flat form: one real leg, one category leg. ``system_leg`` is the
+    holdings service's alone (decision 103): it lets the second leg be a system
+    account (``equity.securities``, a trade's cash); every caller that books a
+    category someone chose leaves it off, so the system account is refused."""
     account = resolve_account(session, account_ref)
     category = resolve_account(session, category_ref)
     if not category.is_virtual:
         raise LedgerError(f"{category.path} is not a category (virtual account)")
+    if not system_leg:
+        refuse_system_account(category)
     if account.is_virtual:
         raise LedgerError(f"{account.path} is a category; the flat form needs a real account")
     check_category_currency(account.currency, category)
@@ -163,6 +175,7 @@ def create_split_transaction(
         category = get_account(session, line.category_id)
         if not category.is_virtual:
             raise LedgerError(f"{category.path} is not a category (virtual account)")
+        refuse_system_account(category)
         if category.currency.strip() != currency:
             raise LedgerError("currency mismatch (v1 is single-currency per transaction)")
     try:
@@ -221,6 +234,7 @@ def create_split_transfer(
     except ValueError as exc:
         raise LedgerError(f"not a split loan payment: {exc}") from exc
     category = resolve_account(session, remainder_category_ref)
+    refuse_system_account(category)
     if not category.is_virtual:
         raise LedgerError(
             f"remainder_category {category.path} is a real account; name the "

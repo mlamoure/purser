@@ -60,7 +60,10 @@ def test_inventory_covers_the_runtime_and_the_bundles(generator: ModuleType) -> 
     assert {"fastapi", "sqlalchemy", "psycopg", "fastmcp"} <= python.keys()
     assert not {"pytest", "ruff", "mypy", "hypothesis", "testcontainers"} & python.keys()
     # Windows-only markers stay out of a Linux image.
-    assert not {"pywin32", "colorama", "tzdata"} & python.keys()
+    assert not {"pywin32", "colorama"} & python.keys()
+    # python-dateutil 3+ requires tzdata on every platform (it no longer
+    # bundles the zone database), so it ships in the image.
+    assert "tzdata" in python
     assert {
         "react",
         "react-dom",

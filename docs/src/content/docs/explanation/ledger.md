@@ -1,12 +1,12 @@
 ---
 title: The ledger
-description: Flat outside, double-entry inside — why the books cannot be silently wrong.
+description: Balanced postings, correction history, source records and reconciliation.
 ---
 
-Purser's core promise is that the books cannot be silently wrong. Three
-mechanisms deliver it: a double-entry core behind a flat API, immutable
-posted rows with linked corrections, and an append-only raw feed the ledger
-can always be re-derived from.
+Purser checks that transaction postings balance, preserves the history of
+corrections and archives imported source data. Reconciliation compares ledger
+balances with statements. These checks detect inconsistencies; they do not
+guarantee that source data or categorization is correct.
 
 ## Flat outside, double-entry inside
 
@@ -60,8 +60,8 @@ Every transaction moves through `expected -> pending -> posted -> void`:
 - **void** — dead rows kept for lineage: superseded expecteds, merged
   transfer halves, vanished pendings, reversal legs.
 
-Nothing is ever silently edited or deleted; every correction is itself a
-visible ledger event with an audit trail.
+Corrections to posted transactions are recorded as ledger events with an
+audit trail.
 
 ## The raw feed underneath
 
@@ -71,8 +71,9 @@ content-hash idempotent — re-running any import produces zero new rows. A row'
 identity is what the bank sent (account, date, amount, description) plus, for
 identical rows in one payload, which occurrence it is — so two same-day coffees
 at the same price stay two rows, and re-fetching or re-importing them adds
-none. Every ledger row traces to the source bytes that produced it, and the
-ledger is a projection that can be re-derived from the archive.
+none. Imported rows retain links to their source records. Manual entries and
+later corrections have their own audit history; bank payloads alone do not
+contain those decisions.
 
 ## Where the invariants live
 

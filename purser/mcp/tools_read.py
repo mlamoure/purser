@@ -6,13 +6,14 @@ Registration happens on import (the ``@audited_tool`` decorator calls
 """
 
 import uuid
-from datetime import UTC, date, datetime
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from purser import clock, ledger
 from purser.mcp._registry import _amount, _principal, _run, audited_tool
 from purser.mcp.privacy import NOTHING, Emits
 
@@ -77,7 +78,9 @@ async def describe() -> dict[str, Any]:
         categories = [
             a.path
             for a in session.execute(
-                select(Account).where(Account.is_virtual.is_(True)).order_by(Account.path)
+                select(Account)
+                .where(Account.is_virtual.is_(True), Account.type.in_(ledger.CATEGORY_TYPES))
+                .order_by(Account.path)
             ).scalars()
         ]
         return {
@@ -167,6 +170,7 @@ def _reconciliation_field(check: Any) -> dict[str, Any]:
         "reconciliation": {
             "as_of": row.as_of.isoformat(),
             "basis": row.basis,
+            "component": check.component,
             "in_balance": check.in_balance,
             "difference": _amount(check.difference),
         }
@@ -182,7 +186,8 @@ async def list_accounts(include_balances: bool = True) -> list[dict[str, Any]]:
     (marked balance_method='valuation'); brokerage accounts add their latest
     holdings market value on top of it (balance_method='postings+holdings').
     Both carry the overlay's balance_as_of date. A reconciled account carries
-    `reconciliation`: its latest reconciled date and basis, and whether the
+    `reconciliation`: its latest reconciled date, basis and component (cash
+    only for brokerage, balance for other accounts), and whether the
     ledger still matches the statement on that date (difference = ledger
     minus statement target, ledger sign; nonzero means a later write moved
     it)."""
@@ -221,6 +226,25 @@ async def list_accounts(include_balances: bool = True) -> list[dict[str, Any]]:
     return await _run(op)
 
 
+@audited_tool(kind="read", entity="connection", scope="read", emits=NOTHING)
+async def feed_status() -> dict[str, Any]:
+    """Bank feed health in one look: one line per bank login (status ok,
+    needs_login — log in again at the bank through SimpleFIN Bridge — or
+    error, with how many accounts it delivers and how many feed a ledger
+    account), then only the accounts that need attention: not_connected (a
+    feed account no ledger account takes, e.g. a newly opened one), stale Nd
+    (the bank balance has not updated for N days), an act.* code (the bank
+    failed to deliver it), ambiguous_id. Account numbers are never shown.
+    Use it for "did a new account show up?" or "which bank needs me?"."""
+
+    def op(session: Session) -> dict[str, Any]:
+        from purser.feed import inventory
+
+        return inventory.feed_status(session)
+
+    return await _run(op)
+
+
 @audited_tool(kind="read", entity="account", scope="read", emits=NOTHING)
 async def account_balance(account: str, as_of: str | None = None) -> dict[str, Any]:
     """Point-in-time balance of one real account (UUID or path). Open
@@ -231,18 +255,27 @@ async def account_balance(account: str, as_of: str | None = None) -> dict[str, A
     balances alone (method 'postings'; register semantics: chain-head
     pending+posted rows). as_of is an ISO date, default today; 0 before the
     account's first activity; closed accounts answer their whole history.
-    For a balance over TIME, call balance_history instead of looping this."""
+    bank_snapshot carries the latest bank-reported and available balances,
+    their currency, source timestamp/precision, ingestion time and freshness,
+    under the same read scope. Available balance is separate (e.g. remaining
+    credit on a card). Its comparison reports live posted and pending-inclusive
+    totals over ALL recorded dates, the effective/learned/pinned basis and exact
+    bank-minus-ledger difference; matches_either_basis is the separate alert
+    policy. Null means unknown/unavailable, never zero. Even with as_of, this
+    snapshot is LATEST, not historical bank truth. For a balance over TIME,
+    call balance_history instead of looping this."""
 
     def op(session: Session) -> dict[str, Any]:
         from purser import ledger as ledger_service
         from purser import networth as networth_service
+        from purser.feed.snapshot import account_snapshot
 
         target = ledger_service.resolve_account(session, account)
         if target.is_virtual:
             raise ledger_service.LedgerError(
                 f"{target.path} is a category; balances apply to real accounts"
             )
-        effective = date.fromisoformat(as_of) if as_of else datetime.now(UTC).date()
+        effective = date.fromisoformat(as_of) if as_of else clock.ledger_today()
         balance, method, overlay_as_of = networth_service.account_balance_at(
             session, target, effective
         )
@@ -252,6 +285,7 @@ async def account_balance(account: str, as_of: str | None = None) -> dict[str, A
             "balance": _amount(balance),
             "method": method,
             "currency": target.currency.strip(),
+            "bank_snapshot": account_snapshot(session, target).model_dump(mode="json"),
             # present only when an overlay produced the answer (token budget)
             **({"balance_as_of": overlay_as_of.isoformat()} if overlay_as_of else {}),
         }
@@ -441,7 +475,9 @@ async def list_categories(include_descriptions: bool = False) -> list[str] | lis
         from purser.models import Account
 
         accounts = session.execute(
-            select(Account).where(Account.is_virtual.is_(True)).order_by(Account.path)
+            select(Account)
+            .where(Account.is_virtual.is_(True), Account.type.in_(ledger.CATEGORY_TYPES))
+            .order_by(Account.path)
         ).scalars()
         if include_descriptions:
             return [{"path": a.path, "description": a.description} for a in accounts]

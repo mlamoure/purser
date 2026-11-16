@@ -185,7 +185,12 @@ class TestPositions:
         assert resp.status_code == 422 and "in the future" in resp.text
         resp = admin_client.post(
             f"/positions/{position['id']}/events",
-            json={"kind": "sell", "occurred_on": TODAY.isoformat(), "quantity": "1"},
+            json={
+                "kind": "sell",
+                "occurred_on": TODAY.isoformat(),
+                "quantity": "1",
+                "proceeds_to": "none",
+            },
         )
         assert resp.status_code == 422 and TODAY.isoformat() in resp.json()["detail"]
         assert admin_client.get(f"/positions/{uuid.uuid4()}/events").status_code == 404

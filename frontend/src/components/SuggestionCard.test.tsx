@@ -1,7 +1,12 @@
-import { screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { screen, waitFor } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import { apiMock, fail, mockApi, ok } from "../test/api";
-import { matchSuggestion, ruleOut, transferLinkSuggestion } from "../test/fixtures";
+import {
+  matchSuggestion,
+  ruleOut,
+  transferLinkSuggestion,
+  transferPairSuggestion,
+} from "../test/fixtures";
 import { renderWithProviders } from "../test/render";
 import { SuggestionCard } from "./SuggestionCard";
 
@@ -36,7 +41,7 @@ describe("SuggestionCard — transfer_link (#271)", () => {
     mockApi({ [DECIDE]: accepted(2), [SET_STATE]: ok(ruleOut({ state: "active" })) });
     const { user } = renderWithProviders(<SuggestionCard suggestion={transferLinkSuggestion()} />);
 
-    await user.click(screen.getByRole("button", { name: "Accept" }));
+    await user.click(screen.getByRole("button", { name: "Create draft rule" }));
     const activate = await screen.findByRole("button", { name: "Activate (links 2)" });
     expect(apiMock.POST).toHaveBeenCalledWith("/suggestions/{suggestion_id}/decide", {
       params: { path: { suggestion_id: "s-1" } },
@@ -68,7 +73,7 @@ describe("SuggestionCard — transfer_link (#271)", () => {
     });
     const { user } = renderWithProviders(<SuggestionCard suggestion={transferLinkSuggestion()} />);
 
-    await user.click(screen.getByRole("button", { name: "Accept" }));
+    await user.click(screen.getByRole("button", { name: "Create draft rule" }));
     await user.click(await screen.findByRole("button", { name: "Activate (links 1)" }));
     expect(await screen.findByText(/would link 3 historical pair/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Activate (links 3)" }));
@@ -81,7 +86,7 @@ describe("SuggestionCard — transfer_link (#271)", () => {
   it("leaves the rule as a draft when asked", async () => {
     mockApi({ [DECIDE]: accepted(4) });
     const { user } = renderWithProviders(<SuggestionCard suggestion={transferLinkSuggestion()} />);
-    await user.click(screen.getByRole("button", { name: "Accept" }));
+    await user.click(screen.getByRole("button", { name: "Create draft rule" }));
     await user.click(await screen.findByRole("button", { name: "Leave as draft" }));
     expect(apiMock.POST).toHaveBeenCalledTimes(1); // the decide; no activation
   });
@@ -94,7 +99,7 @@ describe("SuggestionCard — transfer_link (#271)", () => {
     expect(screen.queryByDisplayValue("ZEPHYR BKG SVC SENT")).not.toBeInTheDocument();
     await user.type(screen.getByPlaceholderText("3"), "5");
     await user.type(screen.getByPlaceholderText("any amount"), "250.00");
-    await user.click(screen.getByRole("button", { name: "Accept with edits" }));
+    await user.click(screen.getByRole("button", { name: "Create with edits" }));
 
     expect(apiMock.POST).toHaveBeenCalledWith("/suggestions/{suggestion_id}/decide", {
       params: { path: { suggestion_id: "s-1" } },
@@ -160,10 +165,10 @@ describe("SuggestionCard — schedule", () => {
       }),
     });
     const { user } = renderWithProviders(<SuggestionCard suggestion={schedule} />);
-    expect(screen.getByText("75% sure")).toBeInTheDocument();
+    expect(screen.getByText("Pattern strength 75/100")).toBeInTheDocument();
     expect(screen.getByText(/3 occurrences from 2026-03-15 to 2026-05-15/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Accept" }));
+    await user.click(screen.getByRole("button", { name: "Create schedule" }));
     expect(apiMock.POST).toHaveBeenCalledWith("/suggestions/{suggestion_id}/decide", {
       params: { path: { suggestion_id: "s-2" } },
       body: { decision: "accept", reject_scope: "exact" },
@@ -192,14 +197,14 @@ describe("SuggestionCard — match (#246)", () => {
         (_, el) => el?.tagName === "P" && /on assets\.checking · variance/.test(el.textContent ?? ""),
       ),
     ).toBeInTheDocument();
-    expect(screen.getByText("61% sure")).toBeInTheDocument();
+    expect(screen.getByText("Pattern strength 61/100")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Edit/ })).not.toBeInTheDocument();
   });
 
   it("accepts by confirming the proposal", async () => {
     mockApi({ [DECIDE]: decided("accepted") });
     const { user } = renderWithProviders(<SuggestionCard suggestion={matchSuggestion()} />);
-    await user.click(screen.getByRole("button", { name: "Accept" }));
+    await user.click(screen.getByRole("button", { name: "Confirm payment match" }));
     expect(apiMock.POST).toHaveBeenCalledWith("/suggestions/{suggestion_id}/decide", {
       params: { path: { suggestion_id: "s-3" } },
       body: { decision: "accept", reject_scope: "exact" },
@@ -227,7 +232,7 @@ describe("SuggestionCard — match (#246)", () => {
       ),
     });
     const { user } = renderWithProviders(<SuggestionCard suggestion={matchSuggestion()} />);
-    await user.click(screen.getByRole("button", { name: "Accept" }));
+    await user.click(screen.getByRole("button", { name: "Confirm payment match" }));
     expect(await screen.findByText(/no longer proposed/)).toBeInTheDocument();
   });
 });
@@ -263,5 +268,77 @@ describe("SuggestionCard — agent proposal (#250)", () => {
     expect(screen.getByText("Statement 2026-09: 80.00 due on the 3rd")).toBeInTheDocument();
     expect(screen.getByText(/Agent's note:/)).toBeInTheDocument();
     expect(screen.queryByText(/% sure/)).not.toBeInTheDocument();
+  });
+});
+
+describe("SuggestionCard — transfer pair (#386)", () => {
+  const decided = (status: string, transfer: unknown = null) =>
+    ok({
+      suggestion: transferPairSuggestion({ status }),
+      schedule: null,
+      rule: null,
+      projected_links: null,
+      match: null,
+      transfer,
+    });
+
+  it("shows where the money left and arrived, with no edit and no confidence", () => {
+    renderWithProviders(<SuggestionCard suggestion={transferPairSuggestion()} />);
+    expect(screen.getByText(/Link 250\.00 from assets\.checking/)).toBeInTheDocument();
+    expect(screen.getByText("Leaves")).toBeInTheDocument();
+    expect(screen.getByText("Arrives")).toBeInTheDocument();
+    expect(screen.getByText("liabilities.card")).toBeInTheDocument();
+    expect(screen.getByText("EXAMPLE BANK WEB DEBIT")).toBeInTheDocument();
+    expect(screen.getByText("THANK YOU FOR YOUR REMITTANCE")).toBeInTheDocument();
+    expect(screen.getByText("-$250.00")).toBeInTheDocument();
+    expect(screen.getByText("$250.00")).toBeInTheDocument();
+    expect(screen.getByText(/1 day apart/)).toBeInTheDocument();
+    expect(screen.queryByText(/% sure/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Edit/ })).not.toBeInTheDocument();
+  });
+
+  it("accepts by linking the pair as one transfer", async () => {
+    mockApi({
+      [DECIDE]: decided("accepted", { merged_transaction_id: "t-merged", suggestion_id: "s-1" }),
+    });
+    const onDecided = vi.fn();
+    const { user } = renderWithProviders(
+      <SuggestionCard suggestion={transferPairSuggestion()} onDecided={onDecided} />,
+    );
+    await user.click(screen.getByRole("button", { name: "Link as transfer" }));
+    expect(apiMock.POST).toHaveBeenCalledWith("/suggestions/{suggestion_id}/decide", {
+      params: { path: { suggestion_id: "s-4" } },
+      body: { decision: "accept", reject_scope: "exact" },
+    });
+    await waitFor(() => expect(onDecided).toHaveBeenCalledTimes(1));
+  });
+
+  it("rejects exactly this pair as not a transfer", async () => {
+    mockApi({ [DECIDE]: decided("rejected") });
+    const { user } = renderWithProviders(<SuggestionCard suggestion={transferPairSuggestion()} />);
+    await user.click(screen.getByRole("button", { name: "Reject" }));
+    expect(screen.queryByRole("button", { name: /Never/ })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Not a transfer" }));
+    expect(apiMock.POST).toHaveBeenCalledWith("/suggestions/{suggestion_id}/decide", {
+      params: { path: { suggestion_id: "s-4" } },
+      body: { decision: "reject", reject_scope: "exact" },
+    });
+  });
+
+  it("snoozes, and shows the server's refusal when the pair moved on", async () => {
+    mockApi({
+      [DECIDE]: fail(
+        422,
+        "this pair is no longer a transfer candidate — a row was linked, matched or voided; " +
+          "the suggestion is withdrawn",
+      ),
+    });
+    const { user } = renderWithProviders(<SuggestionCard suggestion={transferPairSuggestion()} />);
+    await user.click(screen.getByRole("button", { name: "Snooze 30d" }));
+    expect(apiMock.POST).toHaveBeenCalledWith("/suggestions/{suggestion_id}/decide", {
+      params: { path: { suggestion_id: "s-4" } },
+      body: { decision: "snooze", reject_scope: "exact" },
+    });
+    expect(await screen.findByText(/no longer a transfer candidate/)).toBeInTheDocument();
   });
 });

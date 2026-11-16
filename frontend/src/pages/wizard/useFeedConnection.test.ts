@@ -19,6 +19,7 @@ const row = (mappedPath: string | null = null): Discovered => ({
   mapped_account_id: mappedPath ? "a-1" : null,
   mapped_account_path: mappedPath,
   drift_basis_pinned: false,
+  ambiguous: false,
 });
 
 /** Run `fn` inside act and return what it threw. The error is caught inside

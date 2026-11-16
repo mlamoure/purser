@@ -12,6 +12,7 @@ from datetime import date as date_type
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
+from typing import Any
 from uuid import UUID
 
 from dateutil.rrule import rrulestr
@@ -181,6 +182,7 @@ class ExpectedItem:
     amount: Decimal
     label: str
     transaction_id: UUID | None = None
+    certainty: dict[str, Any] | None = None
     # A rule occurrence beyond the materialized horizon (#235): no row exists
     # yet, the forecaster expanded it on the fly.
     projected: bool = False
@@ -196,6 +198,7 @@ class ForecastEvent:
     label: str
     amount: Decimal
     transaction_id: UUID | None
+    certainty: dict[str, Any] | None = None
     projected: bool = False
     # Dated before the forecast start and still live: it lands on day 0
     # because it is still due, and the flag says so (#235).
@@ -286,6 +289,7 @@ def forecast_balance(
                         transaction_id=i.transaction_id,
                         projected=i.projected,
                         overdue=i.date < start,
+                        certainty=i.certainty,
                         basis=i.basis,
                         range=i.range,
                     )

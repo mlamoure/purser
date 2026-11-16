@@ -666,8 +666,10 @@ class TestSurfaces:
         assert [r["id"] for r in client.get("/suggestions").json()] == [sid]
         assert client.get("/suggestions", params={"kind": "bogus"}).status_code == 422
         # The schedule wrappers are retired (#347): nothing decides a link there.
-        assert client.post(f"/schedules/{sid}/reject").status_code == 404
-        assert client.post(f"/schedules/{sid}/activate").status_code == 404
+        # The installed SPA has a GET catch-all (405 for unknown POSTs);
+        # an API-only build has no catch-all (404). Neither can decide a link.
+        assert client.post(f"/schedules/{sid}/reject").status_code in (404, 405)
+        assert client.post(f"/schedules/{sid}/activate").status_code in (404, 405)
         assert _links(client)[0]["status"] == "open"
         assert client.get("/rules").json() == []
 

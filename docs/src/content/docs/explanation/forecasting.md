@@ -165,3 +165,29 @@ The authoritative spec is
 [`DESIGN.md`](https://github.com/mlamoure/purser/blob/main/DESIGN.md)
 section 6 (schedules and forecasting). The tool contract is in the
 [MCP tool catalog](../../reference/mcp-tools/) under `forecast_balance`.
+
+
+## Independent amount and date uncertainty
+
+Forecast events carry the same per-occurrence certainty shown in Schedules,
+including rule-only projected events. The Estimate badge explains whether amount,
+date or both remain estimated. Confirmed upcoming events remain scheduled until
+matched; confirmation itself does not post money. A confirmed amount has no
+historical amount range even if its date is still uncertain.
+
+The full REST forecast and daily MCP resource include the evidence and original
+snapshot. Compact `forecast_balance` events keep the uncertainty status and
+true-only `amount_estimated` / `date_estimated` flags (omitted means false). Supplied amounts also name their statement or override
+basis; `get_schedule_occurrence` reads detailed provenance for a materialized
+transaction id. All structured amounts and variances use the forecast account's
+perspective, including a transfer's opposite leg. Proposed matches remain
+pending review while retaining the existing forecast suppression rules above.
+
+
+A fixed calculated value can still be an estimate. Projected events expose
+`certainty.slot` (schedule and recurrence date), so evidence does not require a
+materialized transaction. Annotating that slot changes certainty only; the event
+amount, date, calculation basis and daily balances stay the same. Evidence and
+the first retained projection follow the occurrence when it materializes. See
+[projected-slot evidence](../../how-to/schedules-and-bills/#evidence-on-projected-slots)
+for the metadata-only migration path.

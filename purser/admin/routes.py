@@ -84,6 +84,7 @@ class TokenOut(BaseModel):
     last_used_at: datetime | None
     created_at: datetime
     is_current: bool = False  # the token making this request (its own session)
+    integration_id: uuid.UUID | None = None
 
     @classmethod
     def from_model(cls, t: ApiToken, *, current_id: uuid.UUID | None = None) -> "TokenOut":
@@ -96,6 +97,7 @@ class TokenOut(BaseModel):
             last_used_at=t.last_used_at,
             created_at=t.created_at,
             is_current=t.id == current_id,
+            integration_id=t.integration_id,
         )
 
 
@@ -104,6 +106,13 @@ class TokenCreate(BaseModel):
     # Recommended default for agents: read + write (DESIGN §9, #436).
     scopes: list[str] = Field(default=[security.SCOPE_READ, security.SCOPE_WRITE])
     expires_at: datetime | None = None
+    replaces_token_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "Keep this user's integration identity across credential replacement. "
+            "The old token stays valid until explicitly revoked."
+        ),
+    )
 
 
 class TokenCreated(TokenOut):
@@ -456,6 +465,7 @@ def create_token(body: TokenCreate, token: AdminToken, session: DbSession) -> To
             name=body.name,
             scopes=body.scopes,
             expires_at=body.expires_at,
+            replaces_token_id=body.replaces_token_id,
             actor_token_id=token.id,
         )
     except service.IdentityError as exc:

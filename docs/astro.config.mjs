@@ -20,7 +20,7 @@ export default defineConfig({
   integrations: [
     starlight({
       title: 'Purser',
-      description: 'The finance backend for the personal agent stack.',
+      description: 'The privately hosted finance back-end, designed for use by your personal AI Agent.',
       favicon: '/favicon.svg',
       social: [
         { icon: 'github', label: 'Source on GitHub', href: 'https://github.com/mlamoure/purser' },
@@ -39,7 +39,7 @@ export default defineConfig({
         starlightLlmsTxt({
           projectName: 'Purser',
           description:
-            'AI-native, self-hosted personal finance backend: double-entry ledger, SimpleFIN feeds, deterministic matching and forecasting, MCP + REST as the primary interfaces.',
+            'Privately hosted finance back-end for your personal AI agent. Mostly headless, with an administrative UI, MCP and REST interfaces, and controls for sharing financial data.',
         }),
         starlightMdTxt({ format: '.md.txt' }),
         starlightLinksValidator({ errorOnRelativeLinks: false }),

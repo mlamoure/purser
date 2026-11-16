@@ -3,9 +3,14 @@ import { describe, expect, it } from "vitest";
 import type { components } from "../api/schema";
 import { apiMock, fail, mockApi, ok } from "../test/api";
 import { renderWithProviders } from "../test/render";
-import PositionsPanel, { fmtQuantity, utcToday } from "./Positions";
+import PositionsPanel, { fmtQuantity } from "./Positions";
 
 type PositionOut = components["schemas"]["PositionOut"];
+
+// The server's ledger day (#471): a household zone's date, not UTC's or the
+// browser's, so the forms must send this one.
+const LEDGER_DAY = "2026-11-09";
+const CLOCK = { "GET /clock": ok({ ledger_today: LEDGER_DAY, timezone: "America/New_York" }) };
 
 const position = (over: Partial<PositionOut> = {}): PositionOut => ({
   id: "pos-1",
@@ -24,12 +29,15 @@ const position = (over: Partial<PositionOut> = {}): PositionOut => ({
   unrealized_gain: "4090.2500",
   stale_price: false,
   events: 1,
+  tracks_lots: false,
+  open_lots: 0,
   ...over,
 });
 
 describe("PositionsPanel (#390)", () => {
   it("lists positions, flags an unpriced one, and never shows it as zero", async () => {
     mockApi({
+      ...CLOCK,
       "GET /accounts/{account_id}/positions": ok([
         position(),
         position({
@@ -53,6 +61,7 @@ describe("PositionsPanel (#390)", () => {
 
   it("says to check the share count when the value does not fit, not that the price is missing", async () => {
     mockApi({
+      ...CLOCK,
       "GET /accounts/{account_id}/positions": ok([
         position({
           quantity: "1000000000000.000000",
@@ -72,6 +81,7 @@ describe("PositionsPanel (#390)", () => {
     // Prefilled, the basis would ride along with a sell-out (refused: 0 shares
     // have no basis) or a backdated count (today's basis on an older date).
     mockApi({
+      ...CLOCK,
       "GET /accounts/{account_id}/positions": ok([position()]),
       "POST /positions/{position_id}/events": ok({}),
     });
@@ -87,13 +97,14 @@ describe("PositionsPanel (#390)", () => {
     await waitFor(() =>
       expect(apiMock.POST).toHaveBeenCalledWith("/positions/{position_id}/events", {
         params: { path: { position_id: "pos-1" } },
-        body: { kind: "set_quantity", occurred_on: utcToday(), quantity: "0" },
+        body: { kind: "set_quantity", occurred_on: LEDGER_DAY, quantity: "0" },
       }),
     );
   });
 
   it("sends the cost basis the user types", async () => {
     mockApi({
+      ...CLOCK,
       "GET /accounts/{account_id}/positions": ok([position()]),
       "POST /positions/{position_id}/events": ok({}),
     });
@@ -109,7 +120,7 @@ describe("PositionsPanel (#390)", () => {
         params: { path: { position_id: "pos-1" } },
         body: {
           kind: "set_quantity",
-          occurred_on: utcToday(),
+          occurred_on: LEDGER_DAY,
           quantity: "420",
           cost_basis: "1100.5",
         },
@@ -119,6 +130,7 @@ describe("PositionsPanel (#390)", () => {
 
   it("offers Close on a position that holds nothing, and only there", async () => {
     mockApi({
+      ...CLOCK,
       "GET /accounts/{account_id}/positions": ok([
         position(),
         position({ id: "pos-0", symbol: "SOLD", quantity: "0.000000", market_value: "0.0000" }),
@@ -139,6 +151,7 @@ describe("PositionsPanel (#390)", () => {
 
   it("adds a position and shows the server's refusal", async () => {
     mockApi({
+      ...CLOCK,
       "GET /accounts/{account_id}/positions": ok([]),
       "POST /accounts/{account_id}/positions": fail(
         409,
@@ -155,7 +168,7 @@ describe("PositionsPanel (#390)", () => {
     expect(await screen.findByText(/already has an open ACME position/)).toBeInTheDocument();
     expect(apiMock.POST).toHaveBeenCalledWith("/accounts/{account_id}/positions", {
       params: { path: { account_id: "acct-1" } },
-      body: { symbol: "acme", quantity: "10", as_of: utcToday(), cost_basis: "250.00" },
+      body: { symbol: "acme", quantity: "10", as_of: LEDGER_DAY, cost_basis: "250.00" },
     });
   });
 });

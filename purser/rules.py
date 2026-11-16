@@ -546,6 +546,22 @@ def _audit(
     )
 
 
+def _check_category_target(session: Session, category_id: object) -> None:
+    """A categorize rule never books to a system account (decision 103): its
+    target is a category, or a real account (the transfer sugar)."""
+    if not isinstance(category_id, uuid.UUID):
+        return
+    from purser import ledger as ledger_service
+    from purser.models import Account
+
+    target = session.get(Account, category_id)
+    if target is not None and ledger_service.is_system_account(target):
+        raise RuleError(
+            f"{target.path} is a system account: securities trades book their cash to it, "
+            "never a rule"
+        )
+
+
 def create(
     session: Session,
     *,
@@ -567,6 +583,7 @@ def create(
             "a transfer_link rule is created as a draft: activate it with its projected "
             "link count confirmed (POST /rules/{id}/state with confirm_links)"
         )
+    _check_category_target(session, fields.get("category_id"))
     validate_window_days(fields.get("window_days"), rule_type=str(fields.get("type")))
     validate_payee_scope(session, fields.get("payee_scope_id"), rule_type=str(fields.get("type")))
     rule = Rule(**fields)
@@ -615,6 +632,8 @@ def update(
     validate_payee_scope(
         session, changes.get("payee_scope_id", rule.payee_scope_id), rule_type=new_type
     )
+    if "category_id" in changes:
+        _check_category_target(session, changes["category_id"])
     before = _shape(rule)
     for key, value in changes.items():
         setattr(rule, key, value)
@@ -731,8 +750,16 @@ def _live_row_batches(session: Session) -> Iterator[list[Transaction]]:
 
 
 def _candidate_of(tx: Transaction) -> core_rules.Candidate | None:
+    """The row as a rule predicate reads it, or None when no rule may touch
+    it: a row with no real leg, or a securities trade's cash (a leg on a
+    system account, decision 103), which moves only with its trade."""
     real = next((p for p in tx.postings if not p.account.is_virtual), None)
     if real is None:
+        return None
+    if any(
+        p.account.is_virtual and p.account.type in core_ledger.SYSTEM_ACCOUNT_TYPES
+        for p in tx.postings
+    ):
         return None
     return core_rules.Candidate(
         account_id=str(real.account_id),
@@ -925,6 +952,14 @@ def apply_history(
     counts — and reported as ``skipped_transfers``. A split row (decision 87)
     is read-only and left out the same way, reported as ``skipped_splits``.
 
+    An ``[account]`` rule leaves out a row whose only counterpart there is the
+    other side of a pair a person said is not a transfer
+    (``skipped_not_a_transfer``). That is checked on every row before any is
+    applied, and once more as each is applied: when an earlier row of the
+    same run takes the counterpart a later row passed the check with, the
+    later row is skipped then, and the commit's counts differ from its dry
+    run's by that row — the one place they can (#386 review).
+
     ``transfer_link`` needs no apply-history: ``auto_link_pass`` already
     sweeps all live one-sided posted history nightly, so activating the rule
     IS its retroactive application. That asymmetry is the immutability rule
@@ -955,6 +990,7 @@ def apply_history(
     )
 
     from purser import categorize as categorize_service
+    from purser import ledger as ledger_service
     from purser import transfers as transfers_service
 
     # Selection finishes before anything is written. A posted correction
@@ -967,6 +1003,9 @@ def apply_history(
     skipped_transfers = 0
     skipped_splits = 0
     skipped_currency = 0
+    skipped_not_a_transfer = 0
+    # The "not a transfer" memory, read once for the whole run (#386 review).
+    pairs = transfers_service.SuppressedPairs()
     for batch in _live_row_batches(session):
         scanned += len(batch)
         selected: list[Transaction] = []
@@ -999,6 +1038,18 @@ def apply_history(
                 # the dry run is the commit.
                 skipped_currency += 1
                 continue
+            if (
+                rule.type == TYPE_CATEGORIZE
+                and rule.category_id is not None
+                and transfers_service.machine_answer_refused(
+                    session, tx, rule.category_id, pairs=pairs
+                )
+            ):
+                # An '[account]' target whose counterpart for this row is the
+                # other side of a pair a person said is not a transfer: the
+                # automatic conversion would undo that decision (#386 review).
+                skipped_not_a_transfer += 1
+                continue
             selected.append(tx)
         if rule.type == TYPE_CATEGORIZE:
             # Per batch, so the IN list stays one batch long.
@@ -1017,6 +1068,7 @@ def apply_history(
         "skipped_transfers": skipped_transfers,
         "skipped_splits": skipped_splits,
         "skipped_currency": skipped_currency,
+        "skipped_not_a_transfer": skipped_not_a_transfer,
         "payees_aliased": 0,
     }
 
@@ -1031,17 +1083,35 @@ def apply_history(
                 continue
             if tx.status == "posted" and posted == "skip":
                 continue
-            result["posted" if tx.status == "posted" else "pending"] += 1
-            if dry_run or rule.category_id is None:
-                continue
-            categorize_service._apply_category(
-                session,
-                tx,
-                rule.category_id,
-                provenance={"source": "rule", "rule_id": str(rule.id), "stage": "apply_history"},
-                actor_token_id=token.id if token else None,
-                token=token,
-            )
+            counted = "posted" if tx.status == "posted" else "pending"
+            if not dry_run and rule.category_id is not None:
+                try:
+                    categorize_service._apply_category(
+                        session,
+                        tx,
+                        rule.category_id,
+                        provenance={
+                            "source": "rule",
+                            "rule_id": str(rule.id),
+                            "stage": "apply_history",
+                        },
+                        actor_token_id=token.id if token else None,
+                        token=token,
+                        pairs=pairs,
+                    )
+                except transfers_service.MachineAnswerRefused:
+                    # An earlier row of this run took the counterpart this
+                    # row's '[account]' answer passed the selection check
+                    # with; what is left is a pair a person said is not a
+                    # transfer (#386 review). Nothing was written for it.
+                    result["skipped_not_a_transfer"] += 1
+                    continue
+                except ledger_service.RowBusy:
+                    # The '[account]' conversion met a row another writer
+                    # holds (a sale linking it, decision 103): it stays as it
+                    # is, and the count says what was applied.
+                    continue
+            result[counted] += 1
     elif rule.type == TYPE_RENAME and rule.payee_name:
         # Retroactive rename ALIASES the payee entity; no transaction is
         # touched, so the posted guard is never engaged and no reversal pair

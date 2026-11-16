@@ -107,7 +107,7 @@ export default function App() {
   return (
     <div className="min-h-screen">
       <Nav isAdmin={scopes.includes("admin")} />
-      <main className="mx-auto max-w-6xl p-6">
+      <main className="mx-auto min-w-0 max-w-6xl p-3 sm:p-6">
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/accounts/:accountId" element={<AccountRegister />} />

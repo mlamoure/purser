@@ -342,13 +342,13 @@ class TestRecordStatement:
         (reset,) = _audit(client, "schedule.instance_reset")
         assert reset["before_after"]["before"]["statement"]["statement_balance"] == "310.5000"
 
-    def test_the_feed_taking_a_pending_back_keeps_the_statement_and_unmatch_does_not(
+    def test_pending_withdrawal_and_unmatch_preserve_statement_evidence(
         self, with_card: None, client: TestClient, migrated_engine: Engine
     ) -> None:
         """``release_settlement`` copies the statement onto the clone when it
         keeps the pin (the feed voided the pending the payment matched,
-        decision 69), and a user's unmatch re-opens the payment on the rule
-        as before."""
+        decision 69). Unmatch retains statement confirmation (#512); an explicit
+        reset returns the amount to the rule."""
         from purser import matching
         from purser.db import get_sessionmaker
         from purser.models import Transaction
@@ -405,10 +405,17 @@ class TestRecordStatement:
         match_id, _pending = pay_with_a_pending()
         assert client.post(f"/matching/{match_id}/unmatch").status_code == 200
         reopened = {i["occurrence_date"]: i for i in _instances(client, sid)}[slot]
-        assert (reopened["pinned"], reopened["statement_balance"]) == (False, None)
+        assert (reopened["pinned"], reopened["statement_balance"]) == (False, "300.0000")
         client.post("/schedules/materialize")
         reopened = {i["occurrence_date"]: i for i in _instances(client, sid)}[slot]
-        assert (reopened["amount"], reopened["basis"]) == ("-340.0000", "counterparty_balance")
+        assert (reopened["amount"], reopened["basis"]) == ("-300.0000", "statement")
+        assert reopened["certainty"]["amount"]["state"] == "confirmed"
+        assert (
+            client.post(f"/transactions/{reopened['transaction_id']}/reset-instance").status_code
+            == 200
+        )
+        reset = {i["occurrence_date"]: i for i in _instances(client, sid)}[slot]
+        assert (reset["amount"], reset["basis"]) == ("-340.0000", "counterparty_balance")
 
     def test_deleting_the_transaction_takes_the_statement_with_it(
         self, with_card: None, client: TestClient, migrated_engine: Engine
@@ -829,7 +836,8 @@ class TestMcp:
         listed = data["events"]
         # The basis costs events, not the budget: the low plus the largest
         # movements still fit, each saying where its amount came from.
-        assert len(listed) >= 5
+        # Certainty adds facts per event; keep the same 1900-character budget.
+        assert len(listed) >= 4
         assert all(e.get("basis") in ("override", "statement") for e in listed)
 
 

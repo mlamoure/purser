@@ -1,7 +1,7 @@
 """Schedules & forecast API."""
 
 import uuid
-from datetime import date as date_type
+from datetime import date as date_value_type
 from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Literal
@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from purser import occurrences
 from purser import schedules as service
 from purser import suggestions as suggestions_service
 from purser.admin.auth import ReadToken, WriteToken
@@ -54,12 +55,13 @@ class ScheduleOut(BaseModel):
     )
     category_path: str | None = Field(default=None, description="posting template (flat schedules)")
     rrule: str
-    dtstart: date_type
+    dtstart: date_value_type
+    date_type: Literal["fixed", "estimated"] = "fixed"
     amount_type: str
     amount: Decimal | None
     estimate_basis: str | None
     currency: str
-    next_due: date_type | None
+    next_due: date_value_type | None
     autopost_policy: str
     source: str
     status: str
@@ -75,6 +77,7 @@ class ScheduleOut(BaseModel):
             category_path=str(s.category_path) if s.category_path else None,
             rrule=s.rrule,
             dtstart=s.dtstart,
+            date_type=s.date_type,
             amount_type=s.amount_type,
             amount=s.amount,
             estimate_basis=s.estimate_basis,
@@ -113,8 +116,9 @@ class InstanceOut(BaseModel):
     """A live (unmatched) expected instance of a schedule."""
 
     transaction_id: uuid.UUID
-    date: date_type
-    occurrence_date: date_type | None = Field(
+    certainty: occurrences.CertaintyOut | None = None
+    date: date_value_type
+    occurrence_date: date_value_type | None = Field(
         description="the rule slot the instance fills; differs from date after an edit"
     )
     amount: Decimal | None
@@ -125,7 +129,7 @@ class InstanceOut(BaseModel):
         default=None,
         description="the card statement balance recorded for this payment, as printed (owed)",
     )
-    statement_date: date_type | None = Field(
+    statement_date: date_value_type | None = Field(
         default=None, description="the statement's closing date, when recorded"
     )
     statement_source: Literal["human", "agent"] | None = Field(
@@ -135,16 +139,20 @@ class InstanceOut(BaseModel):
 
 class ScheduleDetail(ScheduleOut):
     instances: list[InstanceOut]
+    matched_instances: list[InstanceOut] = Field(
+        default_factory=list, description="Most recent 50 matched occurrences"
+    )
 
 
 class ScheduleCreate(BaseModel):
     name: str
     account: str = Field(description="account id or path")
     rrule: str = Field(description="RFC 5545 RRULE, e.g. FREQ=MONTHLY;BYMONTHDAY=19")
-    dtstart: date_type | None = Field(
+    dtstart: date_value_type | None = Field(
         default=None,
         description="RRULE anchor (first occurrence for anchor-sensitive rules); default today",
     )
+    date_type: Literal["fixed", "estimated"] = "fixed"
     amount_type: Literal["fixed", "estimated"] = "fixed"
     amount: Decimal | None = Field(default=None, decimal_places=4, max_digits=20)
     payee: str | None = None
@@ -176,7 +184,8 @@ class ScheduleUpdate(BaseModel):
 
     name: str | None = None
     rrule: str | None = None
-    dtstart: date_type | None = None
+    dtstart: date_value_type | None = None
+    date_type: Literal["fixed", "estimated"] | None = None
     amount_type: Literal["fixed", "estimated"] | None = None
     amount: Decimal | None = Field(default=None, decimal_places=4, max_digits=20)
     payee: str | None = None
@@ -195,7 +204,7 @@ class ForecastRangeOut(BaseModel):
 
 
 class ForecastPointOut(BaseModel):
-    date: date_type
+    date: date_value_type
     balance: Decimal
 
 
@@ -208,6 +217,7 @@ class ForecastEventOut(BaseModel):
     )
     overdue: bool = Field(default=False, description="dated before today and still due")
     basis: AmountBasisLiteral | None = Field(default=None, description=_BASIS_DESCRIPTION)
+    certainty: occurrences.CertaintyOut | None = None
     range: ForecastRangeOut | None = Field(
         default=None,
         description="an estimated amount's band; null when fixed, overridden or stated",
@@ -215,7 +225,7 @@ class ForecastEventOut(BaseModel):
 
 
 class ForecastDayOut(BaseModel):
-    date: date_type
+    date: date_value_type
     balance: Decimal
     events: list[ForecastEventOut]
     low: Decimal | None = Field(
@@ -253,7 +263,7 @@ class ForecastOut(BaseModel):
     account_path: str
     start_balance: Decimal
     min_balance: Decimal | None
-    first_shortfall: date_type | None
+    first_shortfall: date_value_type | None
     coverage: ForecastCoverage
     days: list[ForecastDayOut]
     pessimistic_low: ForecastPointOut | None = Field(
@@ -291,6 +301,7 @@ def create_schedule(
             name=body.name,
             account_ref=body.account,
             rrule=body.rrule,
+            date_mode=body.date_type,
             amount_type=body.amount_type,
             amount=body.amount,
             payee_name=body.payee,
@@ -329,6 +340,9 @@ def _detail(session: Session, schedule: Schedule) -> ScheduleDetail:
     return ScheduleDetail(
         **base.model_dump(),
         instances=[InstanceOut(**row) for row in service.list_instances(session, schedule)],
+        matched_instances=[
+            InstanceOut(**row) for row in service.list_instances(session, schedule, matched=True)
+        ],
     )
 
 
@@ -359,6 +373,7 @@ def update_schedule(
             name=body.name,
             rrule=body.rrule,
             dtstart=body.dtstart,
+            date_mode=body.date_type,
             amount_type=body.amount_type,
             amount=body.amount,
             estimate_basis=body.estimate_basis,
@@ -452,14 +467,14 @@ class StatementBalanceIn(BaseModel):
         max_digits=20,
         description="as the statement prints it: the amount owed, positive",
     )
-    statement_date: date_type | None = Field(
+    statement_date: date_value_type | None = Field(
         default=None, description="the statement's closing date (today or earlier)"
     )
     transaction_id: uuid.UUID | None = Field(
         default=None, description="the payment instance (exclusive with account + due_date)"
     )
     account: str | None = Field(default=None, description="the credit card, id or path")
-    due_date: date_type | None = Field(
+    due_date: date_value_type | None = Field(
         default=None,
         description=(
             "the statement's payment due date: the card's live payment instance nearest it, "
@@ -555,6 +570,7 @@ def forecast(
                         projected=e.projected,
                         overdue=e.overdue,
                         basis=e.basis,
+                        certainty=e.certainty,
                         range=(
                             ForecastRangeOut(low=e.range[0], high=e.range[1])
                             if e.range is not None
@@ -569,3 +585,82 @@ def forecast(
         pessimistic_low=point(fc.pessimistic_low),
         optimistic_low=point(fc.optimistic_low),
     )
+
+
+@router.get("/instances/{transaction_id}/certainty")
+def get_occurrence_certainty(
+    transaction_id: uuid.UUID, token: ReadToken, session: DbSession
+) -> occurrences.CertaintyOut:
+    """Original estimate, current independent evidence and linked actual; no writes."""
+    from purser import ledger
+
+    try:
+        return occurrences.CertaintyOut(
+            **occurrences.describe(
+                session, ledger.get_transaction(session, transaction_id), history=True
+            )
+        )
+    except LedgerError as exc:
+        raise _handle(exc) from exc
+
+
+@router.patch("/instances/{transaction_id}/certainty")
+def update_occurrence_certainty(
+    transaction_id: uuid.UUID,
+    body: occurrences.CertaintyUpdate,
+    token: WriteToken,
+    session: DbSession,
+) -> occurrences.CertaintyOut:
+    """Update only the supplied dimensions on one occurrence, never post it.
+    `clear` returns a dimension's certainty to the rule's without moving its value."""
+    try:
+        result = occurrences.update(session, tx_id=transaction_id, change=body, token=token)
+    except LedgerError as exc:
+        raise _handle(exc) from exc
+    session.commit()
+    return occurrences.CertaintyOut(**result)
+
+
+@router.get("/{schedule_id}/occurrences/{occurrence_date}/certainty")
+def get_slot_certainty(
+    schedule_id: uuid.UUID,
+    occurrence_date: date_value_type,
+    token: ReadToken,
+    session: DbSession,
+) -> occurrences.CertaintyOut:
+    """One rule slot's certainty, with or without an instance (#518). A
+    materialized slot reads its instance (`slot.transaction_id`); a projected
+    slot (today .. 365 days) reads its slot evidence over the rule's states,
+    with its first retained projection when previously annotated. No writes."""
+    try:
+        return occurrences.CertaintyOut(
+            **occurrences.describe_slot(
+                session, schedule_id=schedule_id, slot=occurrence_date, history=True
+            )
+        )
+    except LedgerError as exc:
+        raise _handle(exc) from exc
+
+
+@router.patch("/{schedule_id}/occurrences/{occurrence_date}/certainty")
+def update_slot_certainty(
+    schedule_id: uuid.UUID,
+    occurrence_date: date_value_type,
+    body: occurrences.CertaintyUpdate,
+    token: WriteToken,
+    session: DbSession,
+) -> occurrences.CertaintyOut:
+    """Set or clear amount/date evidence on one rule slot (#518). A projected
+    slot keeps the rule's amount and date (a `value` must equal them), moves
+    no cash and creates no transaction; its evidence moves onto the instance
+    when the slot materializes. This address is metadata-only even after
+    materialization; numeric edits use the transaction endpoint. Other slots are
+    untouched. Audited `schedule.slot_certainty_update`."""
+    try:
+        result = occurrences.update_slot(
+            session, schedule_id=schedule_id, slot=occurrence_date, change=body, token=token
+        )
+    except LedgerError as exc:
+        raise _handle(exc) from exc
+    session.commit()
+    return occurrences.CertaintyOut(**result)

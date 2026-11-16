@@ -13,7 +13,7 @@ from purser import crypto
 from purser.config import get_settings
 from purser.logging import configure_logging, get_logger
 
-app = typer.Typer(help="Purser — the finance backend for the personal agent stack.")
+app = typer.Typer(help="Purser — the privately hosted finance back-end for your personal AI agent.")
 
 admin_app = typer.Typer(help="Guarded remediation commands (offline; back up first).")
 app.add_typer(admin_app, name="admin")
@@ -54,6 +54,29 @@ def _release_migration_lock(connection: Connection) -> None:
     connection.commit()
 
 
+def _record_env_timezone(connection: Connection) -> None:
+    """Write this process's PURSER_TIMEZONE to ``ledger_clock`` (#471,
+    decision 105), so the readmodel's SQL ledger day sees the same env default
+    as the app (a runtime override in ``app_settings`` wins over both). Runs
+    on every startup under the migration lock; a zone the database's tz data
+    does not know stops startup, because the readmodel views would fail on it.
+    Not audited: it mirrors deployment configuration, like the derived tables
+    (section 3.5), and changes nothing a user wrote."""
+    tz = get_settings().timezone
+    known = connection.execute(
+        text("SELECT 1 FROM pg_timezone_names WHERE name = :tz"), {"tz": tz}
+    ).first()
+    if known is None:
+        raise RuntimeError(f"PURSER_TIMEZONE {tz!r} is not known to the database's time zone data")
+    connection.execute(
+        text(
+            "UPDATE ledger_clock SET env_timezone = :tz, updated_at = now()"
+            " WHERE env_timezone IS DISTINCT FROM :tz"
+        ),
+        {"tz": tz},
+    )
+
+
 def run_migrations(database_url: str | None = None) -> None:
     """Upgrade the database to head under the migration lock, then check the
     encryption canary. ``database_url`` defaults to PURSER_DATABASE_URL.
@@ -89,6 +112,7 @@ def run_migrations(database_url: str | None = None) -> None:
             try:
                 cfg.attributes["connection"] = connection
                 command.upgrade(cfg, "head")
+                _record_env_timezone(connection)
                 # env.py has committed already; committing again pins the order
                 # "commit, then unlock" whatever its transaction handling becomes.
                 connection.commit()
@@ -226,6 +250,11 @@ def purge_feed_rows(
     yes: bool = typer.Option(
         False, "--yes", help="Execute the purge (default is a dry-run pre-flight report)."
     ),
+    include_corrections: bool = typer.Option(
+        False,
+        "--include-corrections",
+        help="Purge each corrected feed row's whole correction chain (refused without it).",
+    ),
 ) -> None:
     """Hard-delete an account's FEED-ORIGIN rows so the archive can re-derive them.
 
@@ -243,7 +272,12 @@ def purge_feed_rows(
 
     from purser.admin.feed_repair import run_purge
 
-    run_purge(ref, since=date_type.fromisoformat(since) if since else None, execute=yes)
+    run_purge(
+        ref,
+        since=date_type.fromisoformat(since) if since else None,
+        execute=yes,
+        include_corrections=include_corrections,
+    )
 
 
 @admin_app.command("replay-archive")

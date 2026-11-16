@@ -77,6 +77,7 @@ _GUARD_TRIGGERS: tuple[tuple[str, str], ...] = (
     ("transactions", "transactions_posted_immutable"),
     ("postings", "postings_posted_immutable"),
     ("position_events", "position_events_immutable"),  # append-only (#390)
+    ("holdings_captures", "holdings_captures_immutable"),  # append-only (#393)
 )
 
 

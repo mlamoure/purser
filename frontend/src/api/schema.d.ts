@@ -49,6 +49,51 @@ export interface paths {
         patch: operations["update_account_accounts__account_id__patch"];
         trace?: never;
     };
+    "/accounts/{account_id}/award-captures": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Capture Awards
+         * @description Bulk, idempotent award input: grants and their vests still to come,
+         *     keyed by grant reference and vest date. Same dry-run / `expect_hash` /
+         *     retry / conflict contract as lot captures. A scheduled vest a complete
+         *     capture leaves out is a conflict (forfeit it explicitly), never a
+         *     forfeit; one on or before `as_of` is counted as due and unrecorded.
+         */
+        post: operations["capture_awards_accounts__account_id__award_captures_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/accounts/{account_id}/awards": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Awards
+         * @description The account's equity awards with their unvested units and next vest,
+         *     and the unvested total per symbol (informational: never net worth).
+         */
+        get: operations["list_awards_accounts__account_id__awards_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/accounts/{account_id}/balance": {
         parameters: {
             query?: never;
@@ -63,7 +108,9 @@ export interface paths {
          *     brokerage accounts add their latest holdings market value on top of the
          *     postings basis (decision 50); everything else answers from the stored
          *     running balances (decision 37), never recomputed. 0 before first
-         *     activity; closed accounts answer for their whole history.
+         *     activity; closed accounts answer for their whole history. ``bank_snapshot``
+         *     is the latest archived bank report, not a historical snapshot at ``as_of``;
+         *     its comparison uses live postings over all recorded dates.
          */
         get: operations["balance_as_of_accounts__account_id__balance_get"];
         put?: never;
@@ -101,6 +148,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/accounts/{account_id}/captures": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Captures
+         * @description The account's applied captures, newest first: provenance and capture
+         *     freshness.
+         */
+        get: operations["list_captures_accounts__account_id__captures_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/accounts/{account_id}/close": {
         parameters: {
             query?: never;
@@ -116,6 +184,35 @@ export interface paths {
          *     adjustment (when nonzero), unmap any feed link, then make it read-only.
          */
         post: operations["close_account_accounts__account_id__close_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/accounts/{account_id}/lot-captures": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Capture Lots
+         * @description Bulk, idempotent lot input: a broker's lot list as of a day. A dry run
+         *     (the default) returns the plan and its `plan_hash`; commit with
+         *     `dry_run: false` and `expect_hash`. A commit whose state changed since
+         *     the preview is 409 `preview_stale`; one with conflicts is 409
+         *     `capture_conflicts` unless `skip_conflicts` (then a symbol with any
+         *     conflict is left out whole). The exact request again is a no-op
+         *     (`retry`); the same holdings observed later record freshness only
+         *     (`repeat_of`). A lower remaining quantity, an increase, a lot missing
+         *     from a complete capture, a differing basis, an ambiguous identity or an
+         *     older capture is a conflict, never a sale, a deletion or an edit.
+         */
+        post: operations["capture_lots_accounts__account_id__lot_captures_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -153,6 +250,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/accounts/{account_id}/realized-gains": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Realized Gains
+         * @description Realized gains of the account's lot dispositions in a calendar year,
+         *     by term (long only after the one-year anniversary).
+         */
+        get: operations["realized_gains_accounts__account_id__realized_gains_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/accounts/{account_id}/reconcile": {
         parameters: {
             query?: never;
@@ -165,7 +283,9 @@ export interface paths {
         /**
          * Reconcile Account
          * @description Reconcile a checking, savings, cash or credit-card account to a statement
-         *     balance (issue #268).
+         *     balance, or explicitly reconcile only a manual brokerage account's cash
+         *     with ``component="cash"``. Never pass total brokerage value as cash.
+         *     Holdings, awards and prices are unchanged; readbacks identify the component.
          *
          *     Purser compares the statement figure with its own balance on ``as_of`` in
          *     the chosen ``basis`` and posts ONE adjustment for the difference, dated
@@ -264,6 +384,57 @@ export interface paths {
         };
         /** List Audit */
         get: operations["list_audit_audit_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/audit/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Activity */
+        get: operations["activity_audit_activity_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/audit/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Export Activity */
+        get: operations["export_activity_audit_export_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/audit/options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Options */
+        get: operations["options_audit_options_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -501,6 +672,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/award-vests/{vest_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Award Vest
+         * @description Forfeit a scheduled vest, reinstate a forfeited one, or set a vest
+         *     that was LINKED to an existing lot back to scheduled. A vest recorded as
+         *     an event goes back by reversing that event.
+         */
+        patch: operations["update_award_vest_award_vests__vest_id__patch"];
+        trace?: never;
+    };
+    "/awards/{award_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Award
+         * @description One award with its whole vest schedule.
+         */
+        get: operations["get_award_awards__award_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Award
+         * @description Correct an award's granted or cancelled units (audited).
+         */
+        patch: operations["update_award_awards__award_id__patch"];
+        trace?: never;
+    };
+    "/awards/{award_id}/vests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Record Vest
+         * @description Record a vest: a `vest` event adds the net shares and opens their lot,
+         *     or `lot` links a lot already held (no shares added). The same vest again
+         *     with the same figures is a no-op (`already_recorded`).
+         */
+        post: operations["record_vest_awards__award_id__vests_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/categories": {
         parameters: {
             query?: never;
@@ -607,6 +846,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/clock": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Clock
+         * @description The ledger day and the household time zone it follows (#471, decision
+         *     105). Read scope: a client that dates a write (a share count, a position)
+         *     needs the server's "today", which the time zone setting decides and which
+         *     is not the browser's or UTC's date.
+         */
+        get: operations["get_clock_clock_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/config": {
         parameters: {
             query?: never;
@@ -664,6 +926,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/connections/inventory": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Feed Inventory
+         * @description Every account SimpleFIN delivers, connected or not, grouped by bank
+         *     login: the login's issue, and per account whether it feeds a ledger
+         *     account, how old its bank balance is, whether holdings and transactions
+         *     arrive, and any account-level issue. Read scope; account numbers and
+         *     SimpleFIN ids are withheld from non-admin API tokens (#482).
+         */
+        get: operations["feed_inventory_connections_inventory_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/connections/{connection_id}/backfill": {
         parameters: {
             query?: never;
@@ -713,6 +999,29 @@ export interface paths {
         put?: never;
         /** Map Account */
         post: operations["map_account_connections__connection_id__map_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/connections/{connection_id}/refetch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Trigger Refetch
+         * @description Re-fetch a date range (at most 90 days) for some or all mapped
+         *     accounts and import what is missing — for a gap a bank outage left that
+         *     the automatic repair did not cover. Archive-first, idempotent; shares
+         *     the daily fetch budget. Agents may run it (write scope).
+         */
+        post: operations["trigger_refetch_connections__connection_id__refetch_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -936,6 +1245,56 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/lots/{lot_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Lot
+         * @description One lot with every disposition that drew on it (reversed ones
+         *     included, `live: false`).
+         */
+        get: operations["get_lot_lots__lot_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Correct Lot Basis
+         * @description Set or correct a lot's basis (per share, total, or both agreeing;
+         *     neither sets it back to unknown). Refused (422 `basis_locked`) while a
+         *     disposition drew on the lot: its basis came from it.
+         */
+        patch: operations["correct_lot_basis_lots__lot_id__patch"];
+        trace?: never;
+    };
+    "/lots/{lot_id}/void": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Void Lot
+         * @description Void a lot adopted from a capture: it stops counting and stays as
+         *     read-only history. Refused (422 `lot_has_dispositions`) while a live
+         *     sale or transfer out draws on it — reverse those first — and for a lot
+         *     opened by an event (reverse the event instead).
+         */
+        post: operations["void_lot_lots__lot_id__void_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/matching/confirm-transfer": {
         parameters: {
             query?: never;
@@ -953,7 +1312,8 @@ export interface paths {
          *     `remainder` and `remainder_category`. An ordinary confirm also proposes a
          *     payee-scoped transfer_link rule in the suggestions inbox (never active
          *     until accepted and its link count confirmed); the response then carries
-         *     that suggestion's `suggestion_id`.
+         *     that suggestion's `suggestion_id`. A pair with an open kind=transfer_pair
+         *     card accepts that card.
          */
         post: operations["confirm_transfer_matching_confirm_transfer_post"];
         delete?: never;
@@ -1031,12 +1391,44 @@ export interface paths {
         };
         /**
          * Transfer Candidates
-         * @description Opposite-amount pairs across accounts — candidates only, never merged
-         *     without confirm.
+         * @description Opposite-amount pairs across accounts with no signal that links them —
+         *     candidates only, never merged without confirm. A pure read: it emits
+         *     nothing and writes nothing (the matching pass after each import, and the
+         *     daily job, emits `transfer.candidate` and keeps the inbox cards). Pairs
+         *     a person unlinked or rejected as not a transfer are left out; each pair
+         *     names its open inbox card, `suggestion_id`, when it has one.
          */
         get: operations["transfer_candidates_matching_transfer_candidates_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/matching/transfer-candidates/reject": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reject Transfer Candidate
+         * @description Not a transfer (write scope, like rejecting the card): remember that
+         *     these two rows are not one transfer, whether or not the pair has an
+         *     inbox card and however old it is. The pair's kind=transfer_pair
+         *     suggestion is rejected — written rejected when it had no card — and from
+         *     then on the automatic link paths, the candidate list and the inbox leave
+         *     the pair alone; an explicit confirm-transfer can still link it. Repeating
+         *     it changes nothing (`already_rejected`). 422 when the rows no longer
+         *     pair: both must be live one-sided bank rows of exactly opposite amounts
+         *     on two accounts, inside the transfer window.
+         */
+        post: operations["reject_transfer_candidate_matching_transfer_candidates_reject_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1248,6 +1640,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/networth/potential": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Potential Net Worth
+         * @description Home's potential assets/net worth including unvested stock at recorded
+         *     prices, before tax withholding, conditional on vesting. Current snapshot
+         *     only: no price forecast and no historical award reconstruction. Closed
+         *     accounts are excluded; hidden accounts count as they do in owned net worth.
+         */
+        get: operations["potential_net_worth_networth_potential_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/networth/series": {
         parameters: {
             query?: never;
@@ -1277,8 +1692,10 @@ export interface paths {
         /**
          * Reverse Position Event
          * @description Reverse an event (corrections are reversals, never edits). Refused when
-         *     the remaining history would go below zero on some date. The body (a
-         *     `note`) is optional.
+         *     the remaining history would go below zero on some date. A trade's cash
+         *     goes with it, through the reversal pair every posted correction uses:
+         *     Purser's own cash row is corrected to zero, and a linked row gets its
+         *     category back. The body (a `note`) is optional.
          */
         post: operations["reverse_position_event_position_events__event_id__reverse_post"];
         delete?: never;
@@ -1302,7 +1719,9 @@ export interface paths {
         head?: never;
         /**
          * Update Position
-         * @description Rename a position, or close one that holds nothing today.
+         * @description Rename a position, close one that holds nothing today, or reopen a
+         *     closed one (`closed: false`) to correct its events: reverse the wrong
+         *     event, record the right one, close it again.
          */
         patch: operations["update_position_positions__position_id__patch"];
         trace?: never;
@@ -1322,14 +1741,52 @@ export interface paths {
         put?: never;
         /**
          * Record Position Event
-         * @description Record a `set_quantity`, `buy` or `sell`. The whole history is checked
+         * @description Record a `set_quantity`, `buy`, `sell`, `vest` or `transfer_out`.
+         *
+         *     On a position that tracks lots, a `sell` or `transfer_out` names the
+         *     lots it draws on (`lot_method` or `lots`; 422 `allocation_required`
+         *     otherwise), a `buy` opens a lot unless `unallocated`, and every write is
+         *     refused (422 with `detail.code`) that would leave a lot below zero or
+         *     the lots holding more than the position on any day. The whole history is checked
          *     after it: an event that would leave the position below zero on ANY date
          *     (a backdated sell, say) is refused with 422 naming that date. Any event,
          *     a backdate or not, that would leave this position holding shares on a
          *     day a CLOSED position in the same symbol held them or sold out is
          *     refused with 409 (positions never overlap).
+         *
+         *     A sale moves its net proceeds to the account's cash unless `proceeds_to`
+         *     is `none`; a buy takes its cost from the cash only with `funded_from`
+         *     `cash`. That cash is one posted system row against `equity.securities`
+         *     (it joins the unreviewed set), or an existing row linked with
+         *     `transaction_id`. When the account already shows a posted one-sided row
+         *     of exactly that amount around the settlement date, the call is refused
+         *     with 409 naming it, so the cash is never counted twice: link that row,
+         *     or pass `force_cash` when it is a different payment.
          */
         post: operations["record_position_event_positions__position_id__events_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/positions/{position_id}/lots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Lots
+         * @description A position's lots in FIFO order (acquisition date, then ordinal), a
+         *     page at a time, with the position's lot summary: shares in lots,
+         *     unallocated shares, known basis and shares of unknown basis, and when
+         *     the broker's lots were last captured.
+         */
+        get: operations["list_lots_positions__position_id__lots_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1557,6 +2014,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/schedules/instances/{transaction_id}/certainty": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Occurrence Certainty
+         * @description Original estimate, current independent evidence and linked actual; no writes.
+         */
+        get: operations["get_occurrence_certainty_schedules_instances__transaction_id__certainty_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Occurrence Certainty
+         * @description Update only the supplied dimensions on one occurrence, never post it.
+         *     `clear` returns a dimension's certainty to the rule's without moving its value.
+         */
+        patch: operations["update_occurrence_certainty_schedules_instances__transaction_id__certainty_patch"];
+        trace?: never;
+    };
     "/schedules/materialize": {
         parameters: {
             query?: never;
@@ -1651,6 +2133,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/schedules/{schedule_id}/occurrences/{occurrence_date}/certainty": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Slot Certainty
+         * @description One rule slot's certainty, with or without an instance (#518). A
+         *     materialized slot reads its instance (`slot.transaction_id`); a projected
+         *     slot (today .. 365 days) reads its slot evidence over the rule's states,
+         *     with its first retained projection when previously annotated. No writes.
+         */
+        get: operations["get_slot_certainty_schedules__schedule_id__occurrences__occurrence_date__certainty_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Update Slot Certainty
+         * @description Set or clear amount/date evidence on one rule slot (#518). A projected
+         *     slot keeps the rule's amount and date (a `value` must equal them), moves
+         *     no cash and creates no transaction; its evidence moves onto the instance
+         *     when the slot materializes. This address is metadata-only even after
+         *     materialization; numeric edits use the transaction endpoint. Other slots are
+         *     untouched. Audited `schedule.slot_certainty_update`.
+         */
+        patch: operations["update_slot_certainty_schedules__schedule_id__occurrences__occurrence_date__certainty_patch"];
+        trace?: never;
+    };
     "/schedules/{schedule_id}/pause": {
         parameters: {
             query?: never;
@@ -1725,10 +2239,34 @@ export interface paths {
          * List Suggestions
          * @description The inbox: open suggestions by confidence (snoozed ones hidden until
          *     their date unless include_snoozed). `kind` narrows it to schedules, to
-         *     the transfer-link rules manual confirms proposed, or to the matcher's
-         *     open match proposals.
+         *     the transfer-link rules manual confirms proposed, to the matcher's open
+         *     match proposals, or to the recent transfer candidates (transfer_pair).
+         *     At most `limit` rows a page; GET /suggestions/counts says how many of
+         *     each kind there are, and `offset` reaches the next page.
          */
         get: operations["list_suggestions_suggestions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/suggestions/counts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Suggestion Counts
+         * @description How many open suggestions of each kind wait (snoozed ones hidden
+         *     until their date, as in the inbox): the totals beside the pages GET
+         *     /suggestions lists, so a page never hides a kind (#386 review).
+         */
+        get: operations["suggestion_counts_suggestions_counts_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1777,7 +2315,12 @@ export interface paths {
          *     auto-accepts, and nothing here activates a rule. A match suggestion's
          *     accept confirms the proposal (marking its bank row reviewed) and reject
          *     rejects it for good; it has nothing to edit. If its proposal is already
-         *     gone the suggestion is withdrawn and the call answers 422.
+         *     gone the suggestion is withdrawn and the call answers 422. A
+         *     transfer_pair suggestion's accept confirms the transfer (as POST
+         *     /matching/confirm-transfer does: `transfer` names the merged row and the
+         *     transfer_link suggestion it proposed) and reject remembers that the pair
+         *     is not a transfer — the automatic link paths leave it alone too; nothing
+         *     to edit, and a pair whose rows moved on withdraws it with a 422.
          */
         post: operations["decide_suggestions__suggestion_id__decide_post"];
         delete?: never;
@@ -1893,6 +2436,27 @@ export interface paths {
          *     and MCP can never disagree about what a reviewer sees.
          */
         get: operations["review_batch_transactions_review_batch_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/transactions/review-summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Review Summary
+         * @description Review counts and register destinations. Transfers count once globally,
+         *     but appear on both accounts; per-account totals must not be summed.
+         */
+        get: operations["review_summary_transactions_review_summary_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2204,6 +2768,75 @@ export interface components {
             /** Type */
             type: string;
         };
+        /** AccountDetailOut */
+        AccountDetailOut: {
+            /** Balance */
+            balance?: string | null;
+            /** Balance As Of */
+            balance_as_of?: string | null;
+            /** Balance Method */
+            balance_method?: string | null;
+            bank_snapshot: components["schemas"]["BankSnapshot"];
+            /** Closed At */
+            closed_at: string | null;
+            /** Connection Id */
+            connection_id: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Currency */
+            currency: string;
+            /** Description */
+            description: string | null;
+            /** Drift Basis Override */
+            drift_basis_override?: ("pending_inclusive" | "posted_only") | null;
+            /** External Id */
+            external_id: string | null;
+            /**
+             * Feed Balance Is Cash
+             * @default false
+             */
+            feed_balance_is_cash: boolean;
+            /**
+             * Feed Invert
+             * @default false
+             */
+            feed_invert: boolean;
+            /** Feed Start */
+            feed_start?: string | null;
+            /** Hidden At */
+            hidden_at: string | null;
+            /**
+             * Holdings Source
+             * @default feed
+             * @enum {string}
+             */
+            holdings_source: "feed" | "manual";
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Is Virtual */
+            is_virtual: boolean;
+            /** Min Balance */
+            min_balance: string | null;
+            /** Name */
+            name: string;
+            /** Parent Id */
+            parent_id: string | null;
+            /** Path */
+            path: string;
+            /** Postings Balance */
+            postings_balance?: string | null;
+            /** Reconciled Through */
+            reconciled_through?: string | null;
+            reconciliation?: components["schemas"]["ReconciliationOut"] | null;
+            /** Type */
+            type: string;
+        };
         /**
          * AccountOptions
          * @description Per-file-account import knobs. ``cutoff``: import only rows strictly older
@@ -2243,6 +2876,11 @@ export interface components {
             drift_basis_override?: ("pending_inclusive" | "posted_only") | null;
             /** External Id */
             external_id: string | null;
+            /**
+             * Feed Balance Is Cash
+             * @default false
+             */
+            feed_balance_is_cash: boolean;
             /**
              * Feed Invert
              * @default false
@@ -2293,9 +2931,9 @@ export interface components {
          *     too; a plain bool, so absent/None simply leaves it unchanged.
          *     ``drift_basis_override`` (§7.3, decision 83) is admin-only as well, with
          *     ``feed_start``'s explicit-null-clears rule. ``holdings_source`` (§8,
-         *     decision 88) is admin-only too; absent/None leaves it unchanged.
-         *     ``min_balance`` (§3.4, #466) is write scope, with the explicit-null-clears
-         *     rule.
+         *     decision 88) and ``feed_balance_is_cash`` (§7.3, decision 103) are
+         *     admin-only too; absent/None leaves them unchanged. ``min_balance`` (§3.4,
+         *     #466) is write scope, with the explicit-null-clears rule.
          */
         AccountUpdate: {
             /** Description */
@@ -2305,6 +2943,11 @@ export interface components {
              * @description Pin the ledger basis the post-sync balance-drift check compares this account's bank balance on: `posted_only` (the bank leaves pending charges out of its balance) or `pending_inclusive`. An explicit null clears the pin and the basis is learned from the account's sync history again; absent leaves it unchanged. Admin scope; checking, savings, cash and credit-card accounts only (422 otherwise).
              */
             drift_basis_override?: ("pending_inclusive" | "posted_only") | null;
+            /**
+             * Feed Balance Is Cash
+             * @description Say that this brokerage account's feed balance is its CASH, as for a cash sweep whose positions are tracked by hand (`holdings_source` `manual`; 422 otherwise). The post-sync drift check then compares that balance with the account's transactions, like a checking account's. Off by default because many brokers report the whole account value instead. Turning it off clears a drift-basis pin; switching the account back to the feed turns it off. Admin scope.
+             */
+            feed_balance_is_cash?: boolean | null;
             /** Feed Invert */
             feed_invert?: boolean | null;
             /** Feed Start */
@@ -2329,6 +2972,99 @@ export interface components {
              */
             path?: string | null;
         };
+        /** ActivityOut */
+        ActivityOut: {
+            /** Action */
+            action: string;
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            /** Before After */
+            before_after: {
+                [key: string]: unknown;
+            } | null;
+            /** Channel */
+            channel: string | null;
+            /** Completion Point */
+            completion_point: string | null;
+            /** Entity Id */
+            entity_id: string | null;
+            /** Entity Type */
+            entity_type: string;
+            /** Extra Fields */
+            extra_fields: string[];
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            identity: components["schemas"]["AuditIdentity"];
+            /** Kind */
+            kind: string;
+            /** Outcome */
+            outcome: string;
+            /** Request Id */
+            request_id: string | null;
+            /** Requested Extra */
+            requested_extra: string[];
+            sharing: components["schemas"]["SharingSummary"] | null;
+            /** Technical */
+            technical: {
+                [key: string]: unknown;
+            };
+        };
+        /** ActivityPage */
+        ActivityPage: {
+            /** Items */
+            items: components["schemas"]["ActivityOut"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+            /**
+             * Until
+             * Format: date-time
+             */
+            until: string;
+        };
+        /** ActualOut */
+        ActualOut: {
+            /** Amount */
+            amount: string | null;
+            /** Date */
+            date: string;
+            /** Match Id */
+            match_id: string;
+            /** Match State */
+            match_state: string;
+            /** Status */
+            status: string;
+            /** Transaction Id */
+            transaction_id: string;
+            variance?: components["schemas"]["VarianceOut"] | null;
+        };
+        /** AmountEvidence */
+        AmountEvidence: {
+            /**
+             * As Of
+             * Format: date
+             */
+            as_of: string;
+            /** Note */
+            note: string;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "history" | "statement" | "payroll" | "invoice" | "approval" | "user" | "agent" | "other";
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "estimated" | "confirmed";
+            /** Value */
+            value?: number | string | null;
+        };
         /** ApplyHistory */
         ApplyHistory: {
             /**
@@ -2348,6 +3084,69 @@ export interface components {
              * @enum {string}
              */
             posted: "skip" | "correct";
+        };
+        /** AuditIdentity */
+        AuditIdentity: {
+            /** Authorization */
+            authorization?: {
+                [key: string]: unknown;
+            } | null;
+            /** Created At */
+            created_at?: string | null;
+            /**
+             * Historical
+             * @default true
+             */
+            historical: boolean;
+            /** Integration Id */
+            integration_id?: string | null;
+            /**
+             * Kind
+             * @default system
+             */
+            kind: string;
+            /**
+             * Name
+             * @default System
+             */
+            name: string;
+            /** Scopes */
+            scopes?: string[];
+            /** Token Id */
+            token_id?: string | null;
+            /** User Id */
+            user_id?: string | null;
+            /** User Name */
+            user_name?: string | null;
+        };
+        /** AuditOption */
+        AuditOption: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+        };
+        /** AuditOptions */
+        AuditOptions: {
+            /** Accounts */
+            accounts: components["schemas"]["AuditOption"][];
+            /** Capture Health */
+            capture_health: {
+                [key: string]: unknown;
+            };
+            /** Data Types */
+            data_types: string[];
+            /** Integrations */
+            integrations: components["schemas"]["AuditOption"][];
+            /** Retained Since */
+            retained_since: string | null;
+            /**
+             * Retention Cutoff
+             * Format: date-time
+             */
+            retention_cutoff: string;
+            /** Retention Days */
+            retention_days: number;
         };
         /** AuditOut */
         AuditOut: {
@@ -2425,6 +3224,155 @@ export interface components {
             /** Next Cursor */
             next_cursor: string | null;
         };
+        /** AwardCaptureBody */
+        AwardCaptureBody: {
+            /**
+             * As Of
+             * Format: date
+             */
+            as_of: string;
+            /** Awards */
+            awards: components["schemas"]["CaptureAwardIn"][];
+            /**
+             * Captured At
+             * Format: date-time
+             */
+            captured_at: string;
+            /**
+             * Completeness
+             * @enum {string}
+             */
+            completeness: "complete" | "partial";
+            /**
+             * Dry Run
+             * @default true
+             */
+            dry_run: boolean;
+            /** Expect Hash */
+            expect_hash?: string | null;
+            /**
+             * Skip Conflicts
+             * @default false
+             */
+            skip_conflicts: boolean;
+            /** Source Note */
+            source_note?: string | null;
+        };
+        /** AwardCaptureOut */
+        AwardCaptureOut: {
+            /** Applied */
+            applied: boolean;
+            /** Capture Id */
+            capture_id: string | null;
+            /** Changes */
+            changes: components["schemas"]["AwardPlanItemOut"][];
+            /** Conflicts */
+            conflicts: components["schemas"]["AwardPlanItemOut"][];
+            /** Dry Run */
+            dry_run: boolean;
+            /** Due Unrecorded */
+            due_unrecorded: number;
+            /** Not In Capture */
+            not_in_capture: number;
+            /** Plan Hash */
+            plan_hash: string;
+            /** Repeat Of */
+            repeat_of: string | null;
+            /** Retry */
+            retry: boolean;
+            /** Stale */
+            stale: boolean;
+            /** Unchanged */
+            unchanged: number;
+        };
+        /** AwardOut */
+        AwardOut: {
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            /** Cancelled Quantity */
+            cancelled_quantity: string;
+            /** Due Unrecorded */
+            due_unrecorded: number;
+            /** Forfeited Quantity */
+            forfeited_quantity: string;
+            /** Grant Ref */
+            grant_ref: string | null;
+            /** Grant Ref Withheld */
+            grant_ref_withheld: boolean;
+            /**
+             * Granted On
+             * Format: date
+             */
+            granted_on: string;
+            /** Granted Quantity */
+            granted_quantity: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Next Vest Date */
+            next_vest_date: string | null;
+            /** Next Vest Quantity */
+            next_vest_quantity: string | null;
+            /** Plan */
+            plan: string | null;
+            /** Reported As Of */
+            reported_as_of: string | null;
+            /** Reported Vested Quantity */
+            reported_vested_quantity: string | null;
+            /** Scheduled Quantity */
+            scheduled_quantity: string;
+            /** Symbol */
+            symbol: string;
+            /** Unscheduled Quantity */
+            unscheduled_quantity: string | null;
+            /** Unvested Known */
+            unvested_known: boolean;
+            /** Unvested Quantity */
+            unvested_quantity: string;
+            /** Vested Quantity */
+            vested_quantity: string;
+            /** Vests */
+            vests?: components["schemas"]["VestOut"][] | null;
+        };
+        /** AwardPlanItemOut */
+        AwardPlanItemOut: {
+            /** Award */
+            award?: number | null;
+            /** Award Id */
+            award_id?: string | null;
+            /** Kind */
+            kind: string;
+            /** Message */
+            message?: string | null;
+            /** Quantity */
+            quantity?: string | null;
+            /** Vest Date */
+            vest_date?: string | null;
+            /** Vest Id */
+            vest_id?: string | null;
+        };
+        /** AwardUpdate */
+        AwardUpdate: {
+            /** Cancelled Quantity */
+            cancelled_quantity?: number | string | null;
+            /** Granted Quantity */
+            granted_quantity?: number | string | null;
+            /** Note */
+            note?: string | null;
+        };
+        /** AwardsOut */
+        AwardsOut: {
+            /** Awards */
+            awards: components["schemas"]["AwardOut"][];
+            capture: components["schemas"]["FreshnessOut"] | null;
+            /** Unvested */
+            unvested: components["schemas"]["UnvestedOut"][];
+        };
         /** BackfillOut */
         BackfillOut: {
             /** Backfill Complete */
@@ -2437,6 +3385,11 @@ export interface components {
             empty_windows: number;
             /** Imported */
             imported: number;
+            /**
+             * Linked Trade Cash
+             * @default 0
+             */
+            linked_trade_cash: number;
             /** Qif Overlap */
             qif_overlap: {
                 [key: string]: number;
@@ -2471,7 +3424,7 @@ export interface components {
             target_date?: string | null;
             /**
              * Windows
-             * @default 4
+             * @default 8
              */
             windows: number;
         };
@@ -2494,6 +3447,7 @@ export interface components {
             as_of: string;
             /** Balance */
             balance: string;
+            bank_snapshot: components["schemas"]["BankSnapshot"];
             /** Currency */
             currency: string;
             /** Method */
@@ -2552,6 +3506,97 @@ export interface components {
             /** Truncated */
             truncated: boolean;
         };
+        /**
+         * BankComparison
+         * @description Live ledger comparison, not a reconstruction at the bank timestamp.
+         */
+        BankComparison: {
+            /**
+             * Basis
+             * @enum {string}
+             */
+            basis: "posted_only" | "pending_inclusive";
+            /**
+             * Basis Learned
+             * @enum {string}
+             */
+            basis_learned: "posted_only" | "pending_inclusive";
+            /** Basis Pinned */
+            basis_pinned: boolean;
+            /** Difference */
+            difference: string;
+            /** Ledger Balance */
+            ledger_balance: string;
+            /**
+             * Ledger Cutoff
+             * @default all_recorded_dates
+             * @constant
+             */
+            ledger_cutoff: "all_recorded_dates";
+            /** Matches Either Basis */
+            matches_either_basis: boolean;
+            /** Pending Inclusive Balance */
+            pending_inclusive_balance: string;
+            /** Posted Balance */
+            posted_balance: string;
+        };
+        /**
+         * BankSnapshot
+         * @description Latest archived snapshot, even when the enclosing ledger read is historical.
+         *
+         *     Null amounts are unknown; zero is a reported or computed zero. Available
+         *     balance is independent (e.g. remaining credit on a card), never ledger cash.
+         */
+        BankSnapshot: {
+            /** Age Days */
+            age_days?: number | null;
+            /** Available Balance */
+            available_balance?: string | null;
+            /**
+             * Available Balance Status
+             * @default missing
+             * @enum {string}
+             */
+            available_balance_status: "reported" | "missing" | "invalid";
+            /** Balance */
+            balance?: string | null;
+            /** Balance At */
+            balance_at?: string | null;
+            /** Balance Date */
+            balance_date?: string | null;
+            comparison?: components["schemas"]["BankComparison"] | null;
+            /** Comparison Unavailable */
+            comparison_unavailable?: ("no_bank_balance" | "currency_unknown" | "currency_mismatch" | "account_type" | "not_connected" | "connection_disabled" | "account_closed" | "no_snapshot" | "account_missing" | "ambiguous_account") | null;
+            /** Currency */
+            currency?: string | null;
+            /** Fetched At */
+            fetched_at?: string | null;
+            /**
+             * Freshness
+             * @default unknown
+             * @enum {string}
+             */
+            freshness: "fresh" | "stale" | "unknown" | "future";
+            /**
+             * Kind
+             * @default latest
+             * @constant
+             */
+            kind: "latest";
+            /** Source */
+            source?: "simplefin" | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "ok" | "not_connected" | "connection_disabled" | "account_closed" | "no_snapshot" | "account_missing" | "ambiguous_account" | "balance_missing" | "balance_invalid";
+            /**
+             * Time Precision
+             * @default unknown
+             * @enum {string}
+             */
+            time_precision: "timestamp" | "date" | "unknown";
+        };
         /** BreakdownItem */
         BreakdownItem: {
             /**
@@ -2568,6 +3613,167 @@ export interface components {
             /** Value */
             value: string;
         };
+        /** CaptureAwardIn */
+        CaptureAwardIn: {
+            /** Cancelled Quantity */
+            cancelled_quantity?: number | string | null;
+            /** Grant Ref */
+            grant_ref: string;
+            /**
+             * Granted On
+             * Format: date
+             */
+            granted_on: string;
+            /** Granted Quantity */
+            granted_quantity: number | string;
+            /** Plan */
+            plan?: string | null;
+            /**
+             * Schedule
+             * @description Vests not yet delivered.
+             */
+            schedule?: components["schemas"]["CaptureVestIn"][];
+            /** Symbol */
+            symbol: string;
+            /**
+             * Vested Quantity
+             * @description As the broker reports.
+             */
+            vested_quantity?: number | string | null;
+        };
+        /** CaptureLotIn */
+        CaptureLotIn: {
+            /**
+             * Acquired On
+             * Format: date
+             */
+            acquired_on: string;
+            /**
+             * Acquisition
+             * @default unknown
+             * @enum {string}
+             */
+            acquisition: "buy" | "rsu_vest" | "plan_purchase" | "espp_purchase" | "transfer_in" | "drip" | "gift" | "unknown";
+            /** Basis Per Share */
+            basis_per_share?: number | string | null;
+            /**
+             * Cost Basis
+             * @description Total basis of the REMAINING shares, as the broker shows it.
+             */
+            cost_basis?: number | string | null;
+            /**
+             * External Ref
+             * @description The broker's lot reference, when it shows one: the lot's identity.
+             */
+            external_ref?: string | null;
+            /**
+             * Ordinal
+             * @description Without a reference, tells lots of one acquisition date and plan apart (required when there are several; keep it stable between captures).
+             */
+            ordinal?: number | null;
+            /**
+             * Plan
+             * @description Plan or source label.
+             */
+            plan?: string | null;
+            /**
+             * Quantity
+             * @description Shares remaining in the lot on `as_of` (the broker's figure).
+             */
+            quantity: number | string;
+        };
+        /**
+         * CaptureOut
+         * @description A capture's plan (dry run) or what its commit applied.
+         */
+        CaptureOut: {
+            /** Applied */
+            applied: boolean;
+            /** Capture Id */
+            capture_id: string | null;
+            /** Conflicts */
+            conflicts: number;
+            /**
+             * Created Lots
+             * @default []
+             */
+            created_lots: string[];
+            /** Dry Run */
+            dry_run: boolean;
+            /** Plan Hash */
+            plan_hash: string;
+            /** Repeat Of */
+            repeat_of: string | null;
+            /** Retry */
+            retry: boolean;
+            /**
+             * Skipped Symbols
+             * @default []
+             */
+            skipped_symbols: string[];
+            /** Symbols */
+            symbols: components["schemas"]["SymbolPlanOut"][];
+        };
+        /** CapturePositionIn */
+        CapturePositionIn: {
+            /** Lots */
+            lots: components["schemas"]["CaptureLotIn"][];
+            /** Name */
+            name?: string | null;
+            /** Symbol */
+            symbol: string;
+        };
+        /** CaptureRecordOut */
+        CaptureRecordOut: {
+            /**
+             * As Of
+             * Format: date
+             */
+            as_of: string;
+            /**
+             * Captured At
+             * Format: date-time
+             */
+            captured_at: string;
+            /** Completeness */
+            completeness: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Kind */
+            kind: string;
+            /** Origin */
+            origin: string;
+            /** Repeat Of */
+            repeat_of: string | null;
+            /** Result */
+            result: {
+                [key: string]: unknown;
+            };
+            /** Source Note */
+            source_note: string | null;
+            /** Symbols */
+            symbols: string[];
+        };
+        /** CaptureVestIn */
+        CaptureVestIn: {
+            /** Ordinal */
+            ordinal?: number | null;
+            /** Quantity */
+            quantity: number | string;
+            /**
+             * Vest Date
+             * Format: date
+             */
+            vest_date: string;
+        };
         /**
          * CategoryUpdate
          * @description Name + description only — no path/re-parenting (ltree cascade and
@@ -2578,6 +3784,52 @@ export interface components {
             description?: string | null;
             /** Name */
             name?: string | null;
+        };
+        /** CertaintyOut */
+        CertaintyOut: {
+            actual?: components["schemas"]["ActualOut"] | null;
+            amount: components["schemas"]["DimensionOut"];
+            /** Amount Estimated */
+            amount_estimated: boolean;
+            date: components["schemas"]["DimensionOut"];
+            /** Date Estimated */
+            date_estimated: boolean;
+            /** History */
+            history?: {
+                [key: string]: unknown;
+            }[] | null;
+            original?: components["schemas"]["OriginalOut"] | null;
+            /** @description the rule slot: projected slots take evidence by schedule_id + occurrence_date */
+            slot?: components["schemas"]["SlotOut"] | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "estimated" | "confirmed" | "pending_review" | "matched" | "matched_pending";
+        };
+        /** CertaintyUpdate */
+        CertaintyUpdate: {
+            amount?: components["schemas"]["AmountEvidence"] | null;
+            /**
+             * Clear
+             * @description dimensions whose evidence returns to the rule's; values are untouched
+             */
+            clear?: ("amount" | "date")[];
+            date?: components["schemas"]["DateEvidence"] | null;
+        };
+        /** ClockOut */
+        ClockOut: {
+            /**
+             * Ledger Today
+             * Format: date
+             * @description Today in the household time zone: the newest date a dated write accepts.
+             */
+            ledger_today: string;
+            /**
+             * Timezone
+             * @description The household time zone (IANA name) the ledger day uses.
+             */
+            timezone: string;
         };
         /** CloseAccount */
         CloseAccount: {
@@ -2625,6 +3877,8 @@ export interface components {
             ai_provider?: ("none" | "openai" | "anthropic") | null;
             /** Audit Retention Days */
             audit_retention_days?: number | null;
+            /** Feed Stale Days */
+            feed_stale_days?: number | null;
             /** Grafana Url */
             grafana_url?: string | null;
             /** Oidc Auto Provision */
@@ -2650,6 +3904,11 @@ export interface components {
             /** Session Ttl Days */
             session_ttl_days?: number | null;
             sync_schedule?: components["schemas"]["SyncSchedule"] | null;
+            /**
+             * Timezone
+             * @description IANA time zone name (e.g. America/New_York); the ledger day follows it
+             */
+            timezone?: string | null;
             /** Transfer Auto Link */
             transfer_auto_link?: boolean | null;
         };
@@ -2663,6 +3922,8 @@ export interface components {
             ai_provider: string;
             /** Audit Retention Days */
             audit_retention_days: number;
+            /** Feed Stale Days */
+            feed_stale_days: number;
             /** Grafana Url */
             grafana_url: string | null;
             /** Oidc Auto Provision */
@@ -2686,6 +3947,8 @@ export interface components {
             /** Session Ttl Days */
             session_ttl_days: number;
             sync_schedule: components["schemas"]["SyncSchedule"];
+            /** Timezone */
+            timezone: string;
             /** Transfer Auto Link */
             transfer_auto_link: boolean;
         };
@@ -2788,6 +4051,28 @@ export interface components {
              */
             date_format: string;
         };
+        /** DateEvidence */
+        DateEvidence: {
+            /**
+             * As Of
+             * Format: date
+             */
+            as_of: string;
+            /** Note */
+            note: string;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "history" | "statement" | "payroll" | "invoice" | "approval" | "user" | "agent" | "other";
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "estimated" | "confirmed";
+            /** Value */
+            value?: string | null;
+        };
         /** DecisionOut */
         DecisionOut: {
             /** @description match decisions: the match the decision produced (confirmed or rejected) */
@@ -2802,6 +4087,8 @@ export interface components {
             /** @description the schedule an accept produced (active, materialized) */
             schedule?: components["schemas"]["ScheduleOut"] | null;
             suggestion: components["schemas"]["SuggestionOut"];
+            /** @description transfer_pair accepts: the transfer the pair merged into and the transfer_link suggestion the confirm proposed */
+            transfer?: components["schemas"]["TransferPairDecisionOut"] | null;
         };
         /** DecisionRequest */
         DecisionRequest: {
@@ -2821,7 +4108,7 @@ export interface components {
             note?: string | null;
             /**
              * Reject Scope
-             * @description exact = just this suggestion. counterparty = never suggest this (account, counterparty/payee) again — for a transfer_link, this account pair with any payee. A match rejects exactly.
+             * @description exact = just this suggestion. counterparty = never suggest this (account, counterparty/payee) again — for a transfer_link, this account pair with any payee. A match and a transfer_pair reject exactly.
              * @default exact
              * @enum {string}
              */
@@ -2867,12 +4154,45 @@ export interface components {
             /** Suggestions */
             suggestions: components["schemas"]["SuggestionRef"][];
         };
+        /** DimensionOut */
+        DimensionOut: {
+            /** As Of */
+            as_of?: string | null;
+            /** Evidence Value */
+            evidence_value?: string | null;
+            /** Note */
+            note?: string | null;
+            /** Set At */
+            set_at?: string | null;
+            /** Set By */
+            set_by?: string | null;
+            /** Source */
+            source: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "estimated" | "confirmed";
+            /** Value */
+            value: string | null;
+            /** Value Overridden */
+            value_overridden?: boolean | null;
+        };
         /** DiscoveredOut */
         DiscoveredOut: {
+            /**
+             * Ambiguous
+             * @default false
+             */
+            ambiguous: boolean;
+            /** Available Balance */
+            available_balance?: string | null;
             /** Balance */
             balance: string | null;
             /** Balance Date */
             balance_date?: string | null;
+            /** Conn Id */
+            conn_id?: string | null;
             /** Currency */
             currency: string;
             /** Drift */
@@ -2898,6 +4218,40 @@ export interface components {
             name: string | null;
             /** Org */
             org: string | null;
+        };
+        /** DispositionOut */
+        DispositionOut: {
+            /** Cost Basis */
+            cost_basis: string | null;
+            /**
+             * Disposed On
+             * Format: date
+             */
+            disposed_on: string;
+            /**
+             * Event Id
+             * Format: uuid
+             */
+            event_id: string;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Live */
+            live: boolean;
+            /** Lot Id */
+            lot_id: string | null;
+            /** Method */
+            method: string;
+            /** Proceeds */
+            proceeds: string | null;
+            /** Quantity */
+            quantity: string;
+            /** Realized Gain */
+            realized_gain: string | null;
+            /** Term */
+            term: ("short" | "long") | null;
         };
         /** EncryptionKeyOut */
         EncryptionKeyOut: {
@@ -3052,6 +4406,7 @@ export interface components {
              * @description where the amount comes from: fixed, an estimate basis (last, rolling_avg_3, rolling_avg_12, counterparty_balance = the card's current balance), override (a pinned instance: the amount is yours) or statement (a recorded card statement balance, decision 80)
              */
             basis?: ("fixed" | "last" | "rolling_avg_3" | "rolling_avg_12" | "counterparty_balance" | "override" | "statement") | null;
+            certainty?: components["schemas"]["CertaintyOut"] | null;
             /** Label */
             label: string;
             /**
@@ -3115,6 +4470,86 @@ export interface components {
             /** Low */
             low: string;
         };
+        /**
+         * FreshnessOut
+         * @description When the broker's lots were last observed (capture freshness), as
+         *     opposed to the price's date (quote freshness, on the position).
+         */
+        FreshnessOut: {
+            /**
+             * As Of
+             * Format: date
+             */
+            as_of: string;
+            /**
+             * Capture Id
+             * Format: uuid
+             */
+            capture_id: string;
+            /** Captured At */
+            captured_at: string;
+            /** Completeness */
+            completeness: string;
+        };
+        /**
+         * GapRepairOut
+         * @description The re-fetch a sync ran (or owes) for accounts back from an outage.
+         */
+        GapRepairOut: {
+            /** Accounts */
+            accounts: string[];
+            /** Deferred */
+            deferred?: ("rate_budget" | "fetch_error") | null;
+            /**
+             * End
+             * Format: date
+             */
+            end: string;
+            /**
+             * Imported
+             * @default 0
+             */
+            imported: number;
+            /**
+             * Linked Trade Cash
+             * @default 0
+             */
+            linked_trade_cash: number;
+            /**
+             * Pages
+             * @default 0
+             */
+            pages: number;
+            /** Raw Fetch Id */
+            raw_fetch_id?: string | null;
+            /**
+             * Skipped
+             * @default 0
+             */
+            skipped: number;
+            /**
+             * Skipped Before Feed Start
+             * @default 0
+             */
+            skipped_before_feed_start: number;
+            /**
+             * Skipped Masked Duplicate
+             * @default 0
+             */
+            skipped_masked_duplicate: number;
+            /**
+             * Skipped Redescribed
+             * @default 0
+             */
+            skipped_redescribed: number;
+            /**
+             * Start
+             * Format: date
+             */
+            start: string;
+            /** Unreachable Before */
+            unreachable_before?: string | null;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -3142,6 +4577,13 @@ export interface components {
             last_errors: string[];
             /** Last Fetch At */
             last_fetch_at: string | null;
+            /**
+             * Last Issues
+             * @default []
+             */
+            last_issues: components["schemas"]["IssueOut"][];
+            /** Protocol Version */
+            protocol_version?: number | null;
             /** Provider */
             provider: string;
             /** Status */
@@ -3161,6 +4603,8 @@ export interface components {
             as_of: string;
             /** Cost Basis */
             cost_basis: string | null;
+            /** In Transit */
+            in_transit?: string | null;
             /** Market Value */
             market_value: string | null;
             /** Position Id */
@@ -3324,6 +4768,7 @@ export interface components {
              * @enum {string}
              */
             basis: "fixed" | "last" | "rolling_avg_3" | "rolling_avg_12" | "counterparty_balance" | "override" | "statement";
+            certainty?: components["schemas"]["CertaintyOut"] | null;
             /**
              * Date
              * Format: date
@@ -3362,6 +4807,90 @@ export interface components {
              */
             transaction_id: string;
         };
+        /** InventoryAccountOut */
+        InventoryAccountOut: {
+            /** Account */
+            account: string | null;
+            /**
+             * Ambiguous
+             * @default false
+             */
+            ambiguous: boolean;
+            /** Balance Date */
+            balance_date: string | null;
+            /**
+             * Closed
+             * @default false
+             */
+            closed: boolean;
+            /** Connected */
+            connected: boolean;
+            /** Days Since Balance */
+            days_since_balance: number | null;
+            /** External Id */
+            external_id?: string | null;
+            /** Holdings */
+            holdings: number;
+            issue?: components["schemas"]["InventoryIssueOut"] | null;
+            /** Name */
+            name: string | null;
+            /** Stale */
+            stale: boolean;
+            /** Transactions */
+            transactions: number;
+        };
+        /** InventoryConnectionOut */
+        InventoryConnectionOut: {
+            /** Connection Id */
+            connection_id?: string | null;
+            /** Last Sync At */
+            last_sync_at: string | null;
+            /** Logins */
+            logins: components["schemas"]["InventoryLoginOut"][];
+            /** Protocol Version */
+            protocol_version?: number | null;
+            /** Stale Days */
+            stale_days: number;
+            /** Status */
+            status: string;
+        };
+        /** InventoryIssueOut */
+        InventoryIssueOut: {
+            /** Code */
+            code: string;
+            /** Message */
+            message: string;
+        };
+        /** InventoryLoginOut */
+        InventoryLoginOut: {
+            /** Accounts */
+            accounts: components["schemas"]["InventoryAccountOut"][];
+            /** Conn Id */
+            conn_id?: string | null;
+            /** Institution */
+            institution: string | null;
+            issue?: components["schemas"]["InventoryIssueOut"] | null;
+            /** Url */
+            url?: string | null;
+        };
+        /**
+         * IssueOut
+         * @description One error the server reported with a fetch (SimpleFIN v2 ``errlist``,
+         *     #479). ``code`` is ``gen.*`` (general), ``con.*`` (one bank login: e.g.
+         *     ``con.auth``, log in again) or ``act.*`` (one account: ``act.failed``,
+         *     ``act.missingdata``, try again later). A v1 message has no code and reads
+         *     as a naked ``gen.``.
+         */
+        IssueOut: {
+            /** Account Id */
+            account_id?: string | null;
+            /** Code */
+            code: string;
+            /** Conn Id */
+            conn_id?: string | null;
+            /** Msg */
+            msg: string;
+        };
         /** LoginRequest */
         LoginRequest: {
             /**
@@ -3371,6 +4900,278 @@ export interface components {
             email: string;
             /** Password */
             password: string;
+        };
+        /**
+         * LotAllocationIn
+         * @description One lot a sell or transfer_out draws on: `lot_id`, or the broker's
+         *     `external_ref` (matched by blind index), or `unallocated: true` for
+         *     shares outside every lot.
+         */
+        LotAllocationIn: {
+            /** External Ref */
+            external_ref?: string | null;
+            /** Lot Id */
+            lot_id?: string | null;
+            /** Quantity */
+            quantity: number | string;
+            /**
+             * Unallocated
+             * @default false
+             */
+            unallocated: boolean;
+        };
+        /** LotBasisUpdate */
+        LotBasisUpdate: {
+            /** Basis Per Share */
+            basis_per_share?: number | string | null;
+            /** Cost Basis */
+            cost_basis?: number | string | null;
+            /** Note */
+            note?: string | null;
+        };
+        /** LotCaptureBody */
+        LotCaptureBody: {
+            /**
+             * As Of
+             * Format: date
+             * @description The day the broker's figures are as of.
+             */
+            as_of: string;
+            /**
+             * Basis Policy
+             * @default keep
+             * @enum {string}
+             */
+            basis_policy: "keep" | "replace";
+            /**
+             * Captured At
+             * Format: date-time
+             * @description When the figures were read (an ISO instant).
+             */
+            captured_at: string;
+            /**
+             * Completeness
+             * @description `complete`: each listed symbol's lot list is the broker's whole list (missing lots become conflicts, the share count is recounted up to the total). `partial`: only the rows given; nothing is inferred from absence, and the share count never changes.
+             * @enum {string}
+             */
+            completeness: "complete" | "partial";
+            /**
+             * Dry Run
+             * @description Preview only (the default).
+             * @default true
+             */
+            dry_run: boolean;
+            /**
+             * Expect Hash
+             * @description Commit: the `plan_hash` of the preview being committed.
+             */
+            expect_hash?: string | null;
+            /** Positions */
+            positions: components["schemas"]["CapturePositionIn"][];
+            /**
+             * Skip Conflicts
+             * @default false
+             */
+            skip_conflicts: boolean;
+            /** Source Note */
+            source_note?: string | null;
+        };
+        /** LotDetailOut */
+        LotDetailOut: {
+            /**
+             * Acquired On
+             * Format: date
+             */
+            acquired_on: string;
+            /** Acquisition */
+            acquisition: string;
+            /** Award Vest Id */
+            award_vest_id: string | null;
+            /** Basis Per Share */
+            basis_per_share: string | null;
+            /** Basis Source */
+            basis_source: string | null;
+            /** Capture Id */
+            capture_id: string | null;
+            /** Cost Basis */
+            cost_basis: string | null;
+            /** Disposition Rows */
+            disposition_rows: components["schemas"]["DispositionOut"][];
+            /** Dispositions */
+            dispositions: number;
+            /**
+             * Effective On
+             * Format: date
+             */
+            effective_on: string;
+            /** External Ref */
+            external_ref: string | null;
+            /** External Ref Withheld */
+            external_ref_withheld: boolean;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Opened By Event Id */
+            opened_by_event_id: string | null;
+            /** Ordinal */
+            ordinal: number;
+            /**
+             * Origin
+             * @enum {string}
+             */
+            origin: "event" | "capture";
+            /** Plan */
+            plan: string | null;
+            /**
+             * Position Id
+             * Format: uuid
+             */
+            position_id: string;
+            /** Quantity */
+            quantity: string;
+            /** Remaining */
+            remaining: string;
+            /** Remaining Basis */
+            remaining_basis: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "open" | "closed" | "voided" | "reversed";
+            /** Voided At */
+            voided_at: string | null;
+        };
+        /**
+         * LotOpenIn
+         * @description The lot a buy or vest opens. Basis defaults to the event's own (a
+         *     priced buy's cost with fees; a vest's fair market value); otherwise the
+         *     given per-share and/or total basis; otherwise unknown.
+         */
+        LotOpenIn: {
+            /**
+             * Acquired On
+             * @description Defaults to the event date; never after it.
+             */
+            acquired_on?: string | null;
+            /** Acquisition */
+            acquisition?: ("buy" | "rsu_vest" | "plan_purchase" | "espp_purchase" | "transfer_in" | "drip" | "gift" | "unknown") | null;
+            /** Basis Per Share */
+            basis_per_share?: number | string | null;
+            /** Cost Basis */
+            cost_basis?: number | string | null;
+            /** External Ref */
+            external_ref?: string | null;
+            /** Plan */
+            plan?: string | null;
+        };
+        /** LotOut */
+        LotOut: {
+            /**
+             * Acquired On
+             * Format: date
+             */
+            acquired_on: string;
+            /** Acquisition */
+            acquisition: string;
+            /** Award Vest Id */
+            award_vest_id: string | null;
+            /** Basis Per Share */
+            basis_per_share: string | null;
+            /** Basis Source */
+            basis_source: string | null;
+            /** Capture Id */
+            capture_id: string | null;
+            /** Cost Basis */
+            cost_basis: string | null;
+            /** Dispositions */
+            dispositions: number;
+            /**
+             * Effective On
+             * Format: date
+             */
+            effective_on: string;
+            /** External Ref */
+            external_ref: string | null;
+            /** External Ref Withheld */
+            external_ref_withheld: boolean;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Opened By Event Id */
+            opened_by_event_id: string | null;
+            /** Ordinal */
+            ordinal: number;
+            /**
+             * Origin
+             * @enum {string}
+             */
+            origin: "event" | "capture";
+            /** Plan */
+            plan: string | null;
+            /**
+             * Position Id
+             * Format: uuid
+             */
+            position_id: string;
+            /** Quantity */
+            quantity: string;
+            /** Remaining */
+            remaining: string;
+            /** Remaining Basis */
+            remaining_basis: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "open" | "closed" | "voided" | "reversed";
+            /** Voided At */
+            voided_at: string | null;
+        };
+        /** LotPageOut */
+        LotPageOut: {
+            /** Lots */
+            lots: components["schemas"]["LotOut"][];
+            /** Next Cursor */
+            next_cursor: string | null;
+            summary: components["schemas"]["LotSummaryOut"];
+            /** Total */
+            total: number;
+        };
+        /** LotSummaryOut */
+        LotSummaryOut: {
+            /** Basis Known */
+            basis_known: string;
+            /** Basis Unknown Quantity */
+            basis_unknown_quantity: string;
+            capture: components["schemas"]["FreshnessOut"] | null;
+            /** Cost Basis */
+            cost_basis: string | null;
+            /** Lots Quantity */
+            lots_quantity: string;
+            /** Open Lots */
+            open_lots: number;
+            /**
+             * Position Id
+             * Format: uuid
+             */
+            position_id: string;
+            /** Quantity */
+            quantity: string;
+            /** Symbol */
+            symbol: string;
+            /** Tracks Lots */
+            tracks_lots: boolean;
+            /** Unallocated Quantity */
+            unallocated_quantity: string;
+        };
+        /** LotVoid */
+        LotVoid: {
+            /** Note */
+            note?: string | null;
         };
         /** ManualMatchRequest */
         ManualMatchRequest: {
@@ -3519,6 +5320,38 @@ export interface components {
             /** Net Worth */
             net_worth: string;
         };
+        /** OriginalOut */
+        OriginalOut: {
+            /** Amount */
+            amount: string;
+            /** Amount Basis */
+            amount_basis: string;
+            /** As Of */
+            as_of: string;
+            /** Backfilled */
+            backfilled: boolean;
+            /** Date */
+            date: string;
+            /** Date Basis */
+            date_basis: string;
+            /** Window */
+            window?: {
+                [key: string]: unknown;
+            } | null;
+        };
+        /** PlanItemOut */
+        PlanItemOut: {
+            /** Kind */
+            kind: string;
+            /** Lot Id */
+            lot_id?: string | null;
+            /** Message */
+            message?: string | null;
+            /** Quantity */
+            quantity?: string | null;
+            /** Row */
+            row?: number | null;
+        };
         /** PositionCreate */
         PositionCreate: {
             /**
@@ -3564,11 +5397,38 @@ export interface components {
              */
             fees?: number | string | null;
             /**
+             * Force Cash
+             * @description Post the trade's cash even though the account already shows a row of exactly that amount around the settlement date (the 409 `cash_already_recorded` names it): for a true coincidence, a different payment that is not this trade's cash. The trade's audit row records the override and the row it posted over. Not with `transaction_id`, nor on a trade that moves no cash.
+             */
+            force_cash?: boolean | null;
+            /**
+             * Funded From
+             * @description `buy` only. `cash`: the cost (quantity x price + fees, rounded half up to the cent) leaves the account's cash on the trade date (or `settle_on`). `none` (the default): the money came from outside the account, e.g. a payroll plan purchase.
+             */
+            funded_from?: ("cash" | "none") | null;
+            /**
+             * Gross Quantity
+             * @description `vest` only: the gross units that vested (net `quantity` + withheld).
+             */
+            gross_quantity?: number | string | null;
+            /**
              * Kind
-             * @description `set_quantity` (the absolute share count on that date), `buy` or `sell` (a change by `quantity`).
+             * @description `set_quantity` (the absolute share count on that date), `buy` or `sell` (a change by `quantity`), `vest` (the NET shares an award vest delivered; `price` is the fair market value per share) or `transfer_out` (shares that left with no price and no cash).
              * @enum {string}
              */
-            kind: "set_quantity" | "buy" | "sell";
+            kind: "set_quantity" | "buy" | "sell" | "vest" | "transfer_out";
+            /** @description `buy`/`vest`: the lot it opens. A vest always opens one; a buy opens one when this is given or the position already tracks lots. */
+            lot?: components["schemas"]["LotOpenIn"] | null;
+            /**
+             * Lot Method
+             * @description `sell`/`transfer_out` on a position that tracks lots: draw on its lots first in, first out (`fifo`, by acquisition date), last in (`lifo`) or highest basis per share first (`hifo`; refused while a candidate lot has no basis). A method never takes unallocated shares. Give this or `lots`.
+             */
+            lot_method?: ("fifo" | "lifo" | "hifo") | null;
+            /**
+             * Lots
+             * @description `sell`/`transfer_out`: specific identification. The quantities add up to `quantity`; each lot gives at most what it has left after every disposal recorded so far.
+             */
+            lots?: components["schemas"]["LotAllocationIn"][] | null;
             /** Note */
             note?: string | null;
             /**
@@ -3582,6 +5442,11 @@ export interface components {
              * @description Per share, `buy`/`sell` only. A buy's price adds to the cost basis; without one the basis becomes unknown.
              */
             price?: number | string | null;
+            /**
+             * Proceeds To
+             * @description `sell` only. `cash` (the default): the net proceeds (quantity x price - fees, rounded half up to the cent) land on the account, balanced against the system account `equity.securities`, on the trade date (or `settle_on`). `none`: no cash moves, e.g. shares withheld for tax. Refused with 409 when the account already shows that cash.
+             */
+            proceeds_to?: ("cash" | "none") | null;
             /** Quantity */
             quantity: number | string;
             /**
@@ -3589,8 +5454,28 @@ export interface components {
              * @description A reversed event of this position, on the same date, that this one corrects. The correction takes that event's place in the day's order; without `replaces` a new event goes after every event already recorded that day.
              */
             replaces?: string | null;
+            /**
+             * Settle On
+             * @description When the cash posts: by default the trade date, the day the shares leave the holdings (so net worth does not dip); a later date posts it at settlement instead. The double-count check looks from the trade to five days after `settle_on`, or after the next business day (T+1) when it is not given. A trade that links its cash (`transaction_id`) settles on that row's date, and its window comes from the trade alone (next business day + 5 days).
+             */
+            settle_on?: string | null;
             /** Source Note */
             source_note?: string | null;
+            /**
+             * Transaction Id
+             * @description Link the trade's cash to this posted row on the account (one real leg, one category leg) instead of posting new cash: the row is re-booked to `equity.securities` through the reversal-pair correction. It must hold exactly the trade's cash (its net, to the cent, so the trade needs its `price`), dated from the trade to five days after the next business day (`settle_on` does not widen it), and no row of its correction chain may settle a bill; any other row is a 422.
+             */
+            transaction_id?: string | null;
+            /**
+             * Unallocated
+             * @description `buy` only: keep its shares outside every lot on a position that tracks lots.
+             */
+            unallocated?: boolean | null;
+            /**
+             * Withheld Quantity
+             * @description `vest` only: units withheld for tax (default 0).
+             */
+            withheld_quantity?: number | string | null;
         };
         /** PositionEventOut */
         PositionEventOut: {
@@ -3603,6 +5488,10 @@ export interface components {
             created_at: string;
             /** Fees */
             fees: string | null;
+            /** Funded From */
+            funded_from?: ("cash" | "none") | null;
+            /** Gross Quantity */
+            gross_quantity?: string | null;
             /**
              * Id
              * Format: uuid
@@ -3612,7 +5501,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "set_quantity" | "buy" | "sell";
+            kind: "set_quantity" | "buy" | "sell" | "vest" | "transfer_out";
             /** Note */
             note: string | null;
             /**
@@ -3632,6 +5521,8 @@ export interface components {
             position_id: string;
             /** Price */
             price: string | null;
+            /** Proceeds To */
+            proceeds_to?: ("cash" | "none") | null;
             /** Quantity */
             quantity: string;
             /** Replaces Id */
@@ -3640,8 +5531,14 @@ export interface components {
             reversed_by: string | null;
             /** Reverses Id */
             reverses_id: string | null;
+            /** Settle On */
+            settle_on?: string | null;
             /** Source Note */
             source_note: string | null;
+            /** Transaction Id */
+            transaction_id?: string | null;
+            /** Withheld Quantity */
+            withheld_quantity?: string | null;
         };
         /**
          * PositionEventResult
@@ -3663,6 +5560,8 @@ export interface components {
              * Format: uuid
              */
             account_id: string;
+            /** Basis Unknown Quantity */
+            basis_unknown_quantity?: string | null;
             /** Closed At */
             closed_at: string | null;
             /** Cost Basis */
@@ -3678,6 +5577,11 @@ export interface components {
             market_value: string | null;
             /** Name */
             name: string | null;
+            /**
+             * Open Lots
+             * @default 0
+             */
+            open_lots: number;
             /**
              * Opened On
              * Format: date
@@ -3695,6 +5599,13 @@ export interface components {
             stale_price: boolean;
             /** Symbol */
             symbol: string;
+            /**
+             * Tracks Lots
+             * @default false
+             */
+            tracks_lots: boolean;
+            /** Unallocated Quantity */
+            unallocated_quantity?: string | null;
             /** Unrealized Gain */
             unrealized_gain: string | null;
             /** Value Out Of Range */
@@ -3709,9 +5620,9 @@ export interface components {
         PositionUpdate: {
             /**
              * Closed
-             * @description Close the position (it must hold nothing today); a closed position is read-only history. There is no reopen: open a new position instead.
+             * @description `true` closes the position (it must hold nothing today); a closed position is read-only history. `false` reopens a closed one so an event can be corrected (reverse it, record it again, close again); refused (409) while another position in the symbol is open on the account, or a later one exists.
              */
-            closed?: true | null;
+            closed?: boolean | null;
             /** Name */
             name?: string | null;
         };
@@ -3735,6 +5646,51 @@ export interface components {
             id: string;
             /** Memo */
             memo: string | null;
+        };
+        /**
+         * PotentialNetWorthOut
+         * @description Current-price, pre-withholding scenario if all captured awards vest.
+         *
+         *     Unknown quantities or unavailable valuations leave complete totals null;
+         *     known_unvested_value remains the explicitly partial priced amount.
+         *     This does not change owned balances, net worth or historical series.
+         */
+        PotentialNetWorthOut: {
+            /**
+             * As Of
+             * Format: date
+             */
+            as_of: string;
+            /** Complete */
+            complete: boolean;
+            /** Known Unvested Value */
+            known_unvested_value: string;
+            /** Liabilities */
+            liabilities: string;
+            /** Next Vest Date */
+            next_vest_date: string | null;
+            /** Oldest Price As Of */
+            oldest_price_as_of: string | null;
+            /** Owned Assets */
+            owned_assets: string;
+            /** Owned Net Worth */
+            owned_net_worth: string;
+            /** Potential Assets */
+            potential_assets: string | null;
+            /** Potential Net Worth */
+            potential_net_worth: string | null;
+            /** Stale Price Symbols */
+            stale_price_symbols: string[];
+            /** Unknown Quantity Awards */
+            unknown_quantity_awards: number;
+            /** Unpriced Symbols */
+            unpriced_symbols: string[];
+            /** Unsupported Currency Awards */
+            unsupported_currency_awards: number;
+            /** Unvested Awards */
+            unvested_awards: number;
+            /** Unvested Value */
+            unvested_value: string | null;
         };
         /** PriceCreate */
         PriceCreate: {
@@ -3853,12 +5809,33 @@ export interface components {
              */
             date_format: string;
         };
+        /** RealizedGainsOut */
+        RealizedGainsOut: {
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            long: components["schemas"]["TermOut"];
+            /**
+             * Note
+             * @default Informational: Purser computes no tax.
+             */
+            note: string;
+            short: components["schemas"]["TermOut"];
+            /** Symbol */
+            symbol: string | null;
+            /** Unallocated Quantity */
+            unallocated_quantity: string;
+            /** Year */
+            year: number;
+        };
         /** ReconcileRequest */
         ReconcileRequest: {
             /**
              * As Of
              * Format: date
-             * @description The statement date: the balance is the one at the end of this day. Today (UTC) or earlier; a future date is rejected.
+             * @description The statement date: the balance is the one at the end of this day. Today (household time zone) or earlier; a future date is rejected.
              */
             as_of: string;
             /**
@@ -3868,6 +5845,13 @@ export interface components {
              * @enum {string}
              */
             basis: "posted" | "pending_inclusive";
+            /**
+             * Component
+             * @description Use cash explicitly for a manual brokerage account: statement_balance must be cash only, excluding securities and unvested awards. Other eligible account types use balance. Holdings and prices are never adjusted.
+             * @default balance
+             * @enum {string}
+             */
+            component: "balance" | "cash";
             /**
              * Dry Run
              * @description Return exactly what the call would do — the same computation, conflicts included — without writing anything.
@@ -3907,6 +5891,11 @@ export interface components {
             basis: "posted" | "pending_inclusive";
             /** Category */
             category: string | null;
+            /**
+             * Component
+             * @enum {string}
+             */
+            component: "balance" | "cash";
             /** Created */
             created: boolean;
             /** Dry Run */
@@ -3949,6 +5938,11 @@ export interface components {
              */
             basis: "posted" | "pending_inclusive";
             /**
+             * Component
+             * @enum {string}
+             */
+            component: "balance" | "cash";
+            /**
              * Created At
              * Format: date-time
              */
@@ -3968,6 +5962,135 @@ export interface components {
             statement_balance: string;
             /** Target Balance */
             target_balance: string;
+        };
+        /** RefetchOut */
+        RefetchOut: {
+            /** Accounts */
+            accounts: string[];
+            /**
+             * End
+             * Format: date
+             */
+            end: string;
+            /** Imported */
+            imported: number;
+            /**
+             * Linked Trade Cash
+             * @default 0
+             */
+            linked_trade_cash: number;
+            /**
+             * Pages
+             * @default 1
+             */
+            pages: number;
+            /**
+             * Raw Fetch Id
+             * Format: uuid
+             */
+            raw_fetch_id: string;
+            /** Skipped */
+            skipped: number;
+            /**
+             * Skipped Before Feed Start
+             * @default 0
+             */
+            skipped_before_feed_start: number;
+            /**
+             * Skipped Masked Duplicate
+             * @default 0
+             */
+            skipped_masked_duplicate: number;
+            /**
+             * Skipped Redescribed
+             * @default 0
+             */
+            skipped_redescribed: number;
+            /**
+             * Start
+             * Format: date
+             */
+            start: string;
+        };
+        /** RefetchRequest */
+        RefetchRequest: {
+            /** Accounts */
+            accounts?: string[] | null;
+            /** End */
+            end?: string | null;
+            /**
+             * Start
+             * Format: date
+             */
+            start: string;
+        };
+        /** RejectTransferCandidateOut */
+        RejectTransferCandidateOut: {
+            /**
+             * Already Rejected
+             * @description true when the pair was already rejected: nothing changed
+             */
+            already_rejected: boolean;
+            /**
+             * Status
+             * @description rejected
+             */
+            status: string;
+            /**
+             * Suggestion Id
+             * Format: uuid
+             * @description the pair's kind=transfer_pair suggestion, now rejected (exact)
+             */
+            suggestion_id: string;
+        };
+        /** RejectTransferCandidateRequest */
+        RejectTransferCandidateRequest: {
+            /**
+             * Incoming Id
+             * Format: uuid
+             */
+            incoming_id: string;
+            /**
+             * Note
+             * @description why it is not a transfer (kept encrypted)
+             */
+            note?: string | null;
+            /**
+             * Outgoing Id
+             * Format: uuid
+             */
+            outgoing_id: string;
+        };
+        /** ReviewAccountSummary */
+        ReviewAccountSummary: {
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            /** Agent Pending */
+            agent_pending: number;
+            /** Name */
+            name: string;
+            /** Path */
+            path: string;
+            /** Pending */
+            pending: number;
+            /** Total */
+            total: number;
+        };
+        /** ReviewSummary */
+        ReviewSummary: {
+            /** Accounts */
+            accounts: components["schemas"]["ReviewAccountSummary"][];
+            /** Agent Pending */
+            agent_pending: number;
+            /** Oldest Date */
+            oldest_date: string | null;
+            /** Pending */
+            pending: number;
+            /** Total */
+            total: number;
         };
         /** RollupOut */
         RollupOut: {
@@ -4165,6 +6288,12 @@ export interface components {
              */
             counterparty_account?: string | null;
             /**
+             * Date Type
+             * @default fixed
+             * @enum {string}
+             */
+            date_type: "fixed" | "estimated";
+            /**
              * Dtstart
              * @description RRULE anchor (first occurrence for anchor-sensitive rules); default today
              */
@@ -4218,6 +6347,12 @@ export interface components {
             /** Currency */
             currency: string;
             /**
+             * Date Type
+             * @default fixed
+             * @enum {string}
+             */
+            date_type: "fixed" | "estimated";
+            /**
              * Dtstart
              * Format: date
              */
@@ -4233,6 +6368,11 @@ export interface components {
             id: string;
             /** Instances */
             instances: components["schemas"]["InstanceOut"][];
+            /**
+             * Matched Instances
+             * @description Most recent 50 matched occurrences
+             */
+            matched_instances?: components["schemas"]["InstanceOut"][];
             /** Name */
             name: string;
             /** Next Due */
@@ -4269,6 +6409,12 @@ export interface components {
             counterparty_account_id?: string | null;
             /** Currency */
             currency: string;
+            /**
+             * Date Type
+             * @default fixed
+             * @enum {string}
+             */
+            date_type: "fixed" | "estimated";
             /**
              * Dtstart
              * Format: date
@@ -4311,6 +6457,8 @@ export interface components {
             category?: string | null;
             /** Counterparty Account */
             counterparty_account?: string | null;
+            /** Date Type */
+            date_type?: ("fixed" | "estimated") | null;
             /** Dtstart */
             dtstart?: string | null;
             /** Estimate Basis */
@@ -4359,6 +6507,54 @@ export interface components {
             /** Password */
             password: string;
         };
+        /** SharingSummary */
+        SharingSummary: {
+            /** Accounts */
+            accounts?: string[];
+            /**
+             * Count Unit
+             * @default records
+             */
+            count_unit: string;
+            /** Data Types */
+            data_types?: string[];
+            /**
+             * Empty
+             * @default false
+             */
+            empty: boolean;
+            /** Fields */
+            fields?: string[];
+            /**
+             * Partial
+             * @default false
+             */
+            partial: boolean;
+            /** Record Count */
+            record_count?: number | null;
+            /** Requested Accounts */
+            requested_accounts?: string[];
+            /** Requested Coverage */
+            requested_coverage?: {
+                [key: string]: string;
+            };
+            /**
+             * Response Has More
+             * @default false
+             */
+            response_has_more: boolean;
+            /** Returned Dates */
+            returned_dates?: {
+                [key: string]: string;
+            } | null;
+            /**
+             * Version
+             * @default 1
+             */
+            version: number;
+            /** Withheld */
+            withheld?: string[];
+        };
         /**
          * SignDiagnostic
          * @description Sign diagnostic over non-transfer rows (raw amounts). Monetary fields are
@@ -4373,6 +6569,20 @@ export interface components {
             positive: string;
             /** Suspect */
             suspect: boolean;
+        };
+        /** SlotOut */
+        SlotOut: {
+            /** Occurrence Date */
+            occurrence_date: string;
+            /** Projected */
+            projected: boolean;
+            /** Schedule Id */
+            schedule_id: string;
+            /**
+             * Transaction Id
+             * @description the instance filling the slot; null = projected
+             */
+            transaction_id: string | null;
         };
         /** StaleOut */
         StaleOut: {
@@ -4434,6 +6644,7 @@ export interface components {
              * @enum {string}
              */
             basis: "fixed" | "last" | "rolling_avg_3" | "rolling_avg_12" | "counterparty_balance" | "override" | "statement";
+            certainty?: components["schemas"]["CertaintyOut"] | null;
             /**
              * Date
              * Format: date
@@ -4512,6 +6723,23 @@ export interface components {
             /** Url */
             url: string;
         };
+        /**
+         * SuggestionCountsOut
+         * @description Open suggestions the inbox shows, snoozed ones left out: the total
+         *     and each kind's count.
+         */
+        SuggestionCountsOut: {
+            /** Match */
+            match: number;
+            /** Schedule */
+            schedule: number;
+            /** Total */
+            total: number;
+            /** Transfer Link */
+            transfer_link: number;
+            /** Transfer Pair */
+            transfer_pair: number;
+        };
         /** SuggestionOut */
         SuggestionOut: {
             /** Confidence */
@@ -4522,7 +6750,7 @@ export interface components {
             decided_at: string | null;
             /**
              * Draft
-             * @description The typed draft accept applies unchanged. schedule: name, account, counterparty_account, rrule, dtstart, amount_type, amount, estimate_basis, payee, category, autopost_policy. transfer_link: from_account, to_account, payee, payee_id, amount_exact, window_days, effective_from. match: expected_id, posted_id, account, label, expected_date, expected_amount, posted_date, posted_amount, variance (posted - expected).
+             * @description The typed draft accept applies unchanged. schedule: name, account, counterparty_account, rrule, dtstart, amount_type, amount, estimate_basis, payee, category, autopost_policy. transfer_link: from_account, to_account, payee, payee_id, amount_exact, window_days, effective_from. match: expected_id, posted_id, account, label, expected_date, expected_amount, posted_date, posted_amount, variance (posted - expected). transfer_pair: outgoing_id, incoming_id, from_account, to_account, amount (moved, positive), outgoing_date, incoming_date, date_gap_days, outgoing_description, incoming_description.
              */
             draft: {
                 [key: string]: unknown;
@@ -4544,10 +6772,10 @@ export interface components {
             id: string;
             /**
              * Kind
-             * @description schedule: a recurring bill or transfer to expect (draft = a schedule). transfer_link: proposed by a manual transfer confirm (draft = a transfer_link rule for that account pair, scoped to the payee and its aliases). match: an open match proposal pairing an expected row with a bank row (draft = the pair; accept confirms it, reject rejects it for good).
+             * @description schedule: a recurring bill or transfer to expect (draft = a schedule). transfer_link: proposed by a manual transfer confirm (draft = a transfer_link rule for that account pair, scoped to the payee and its aliases). match: an open match proposal pairing an expected row with a bank row (draft = the pair; accept confirms it, reject rejects it for good). transfer_pair: a transfer candidate, two bank rows of exactly opposite amounts on two accounts that nothing links automatically (draft = the pair; accept confirms the transfer, reject remembers it is not one).
              * @enum {string}
              */
-            kind: "schedule" | "transfer_link" | "match";
+            kind: "schedule" | "transfer_link" | "match" | "transfer_pair";
             /** Reject Scope */
             reject_scope: string | null;
             /** Result Entity Id */
@@ -4565,7 +6793,7 @@ export interface components {
             source: string;
             /**
              * Status
-             * @description open | accepted | rejected | withdrawn (closed by the system: the match proposal it mirrored was rescinded, carried or purged)
+             * @description open | accepted | rejected | withdrawn (closed by the system: the match proposal it mirrored was rescinded, carried or purged; the transfer pair stopped being a candidate or was linked automatically; a detected schedule pattern is no longer supported by current history)
              */
             status: string;
         };
@@ -4603,6 +6831,29 @@ export interface components {
              */
             suggestion_id: string;
         };
+        /** SymbolPlanOut */
+        SymbolPlanOut: {
+            /** Changes */
+            changes: components["schemas"]["PlanItemOut"][];
+            /** Conflicts */
+            conflicts: components["schemas"]["PlanItemOut"][];
+            /** Latest Capture As Of */
+            latest_capture_as_of: string | null;
+            /** Not In Capture */
+            not_in_capture: number;
+            /** Position Id */
+            position_id: string | null;
+            /** Skipped Zero */
+            skipped_zero: number;
+            /** Stale */
+            stale: boolean;
+            /** Symbol */
+            symbol: string;
+            /** Target Quantity */
+            target_quantity: string | null;
+            /** Unchanged */
+            unchanged: number;
+        };
         /** SymbolPriceOut */
         SymbolPriceOut: {
             /** Close */
@@ -4620,6 +6871,7 @@ export interface components {
         SyncOut: {
             /** Errors */
             errors: string[];
+            gap_repair?: components["schemas"]["GapRepairOut"] | null;
             /** Gap Stats */
             gap_stats?: {
                 [key: string]: number;
@@ -4642,6 +6894,16 @@ export interface components {
             /** Imported */
             imported: number;
             /**
+             * Issues
+             * @default []
+             */
+            issues: components["schemas"]["IssueOut"][];
+            /**
+             * Linked Trade Cash
+             * @default 0
+             */
+            linked_trade_cash: number;
+            /**
              * Manual Period Rows Deleted
              * @default 0
              */
@@ -4659,6 +6921,11 @@ export interface components {
             /** Skipped */
             skipped: number;
             /**
+             * Skipped Ambiguous Accounts
+             * @default 0
+             */
+            skipped_ambiguous_accounts: number;
+            /**
              * Skipped Before Feed Start
              * @default 0
              */
@@ -4673,6 +6940,11 @@ export interface components {
              * @default 0
              */
             skipped_redescribed: number;
+            /**
+             * Skipped Trade Cash Pending
+             * @default 0
+             */
+            skipped_trade_cash_pending: number;
             /**
              * Skipped Zero Amount
              * @default 0
@@ -4705,12 +6977,34 @@ export interface components {
              */
             preset: "daily" | "every_12h" | "every_6h" | "hourly";
         };
+        /** TermOut */
+        TermOut: {
+            /** Cost Basis */
+            cost_basis: string;
+            /** Disposals */
+            disposals: number;
+            /** Proceeds */
+            proceeds: string;
+            /** Quantity */
+            quantity: string;
+            /** Realized Gain */
+            realized_gain: string;
+            /** Unknown Basis Quantity */
+            unknown_basis_quantity: string;
+            /** Unknown Proceeds Quantity */
+            unknown_proceeds_quantity: string;
+        };
         /** TokenCreate */
         TokenCreate: {
             /** Expires At */
             expires_at?: string | null;
             /** Name */
             name: string;
+            /**
+             * Replaces Token Id
+             * @description Keep this user's integration identity across credential replacement. The old token stays valid until explicitly revoked.
+             */
+            replaces_token_id?: string | null;
             /**
              * Scopes
              * @default [
@@ -4734,6 +7028,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Integration Id */
+            integration_id?: string | null;
             /**
              * Is Current
              * @default false
@@ -4764,6 +7060,8 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Integration Id */
+            integration_id?: string | null;
             /**
              * Is Current
              * @default false
@@ -4880,6 +7178,11 @@ export interface components {
              * @default false
              */
             schedule_pinned: boolean;
+            /**
+             * Securities Trade
+             * @default false
+             */
+            securities_trade: boolean;
             /** Source Fetch Id */
             source_fetch_id: string | null;
             /**
@@ -4971,6 +7274,11 @@ export interface components {
              */
             schedule_pinned: boolean;
             /**
+             * Securities Trade
+             * @default false
+             */
+            securities_trade: boolean;
+            /**
              * Split Lines
              * @description Category legs of a split transaction (one real leg plus two or more category legs, decision 87); 0 for every other row. Split rows are read-only.
              * @default 0
@@ -5022,6 +7330,11 @@ export interface components {
              * Format: uuid
              */
             outgoing_id: string;
+            /**
+             * Suggestion Id
+             * @description the pair's open kind=transfer_pair card in the suggestions inbox (decide it with POST /suggestions/{suggestion_id}/decide); null when it has none — a row is still pending (cards are for posted pairs only), its newer leg is older than the card window, or no matching pass has run since it appeared. POST /matching/transfer-candidates/reject says 'not a transfer' either way
+             */
+            suggestion_id?: string | null;
         };
         /** TransferCreate */
         TransferCreate: {
@@ -5045,6 +7358,20 @@ export interface components {
             /** To Account */
             to_account: string;
         };
+        /** TransferPairDecisionOut */
+        TransferPairDecisionOut: {
+            /**
+             * Merged Transaction Id
+             * Format: uuid
+             * @description the ONE transfer transaction the two bank rows became
+             */
+            merged_transaction_id: string;
+            /**
+             * Suggestion Id
+             * @description the payee-scoped transfer_link suggestion the confirm proposed (or refreshed) in the inbox, as POST /matching/confirm-transfer does (decision 67); null when it proposed none (no payee on either row, or a rule or rejection already covers it)
+             */
+            suggestion_id?: string | null;
+        };
         /** UnlinkResult */
         UnlinkResult: {
             /** Resurrected Ids */
@@ -5059,15 +7386,25 @@ export interface components {
         };
         /** UnmatchedOut */
         UnmatchedOut: {
+            /** Account Id */
+            account_id?: string | null;
+            /** Account Name */
+            account_name?: string | null;
+            /** Account Path */
+            account_path?: string | null;
             /** Aging Days */
             aging_days: number;
             /** Amount */
             amount: string | null;
+            /** Amount Estimated */
+            amount_estimated?: boolean | null;
             /**
              * Date
              * Format: date
              */
             date: string;
+            /** Date Estimated */
+            date_estimated?: boolean | null;
             /** Description */
             description: string | null;
             /** Has Proposed Match */
@@ -5084,11 +7421,42 @@ export interface components {
              * @description the bank row an open match proposal pairs this expected with; POST /matching/match with this pair confirms the proposal (decision 76)
              */
             proposed_posted_id?: string | null;
+            /** Schedule Id */
+            schedule_id?: string | null;
+            /** Schedule Status */
+            schedule_status?: string | null;
             /**
              * Transaction Id
              * Format: uuid
              */
             transaction_id: string;
+        };
+        /**
+         * UnvestedOut
+         * @description Unvested units valued at the latest close, for information only:
+         *     never counted in net worth, balances or holdings.
+         */
+        UnvestedOut: {
+            /** Awards */
+            awards: number;
+            /** Complete */
+            complete: boolean;
+            /** Next Vest Date */
+            next_vest_date: string | null;
+            /** Next Vest Units */
+            next_vest_units: string | null;
+            /** Price */
+            price: string | null;
+            /** Price As Of */
+            price_as_of: string | null;
+            /** Symbol */
+            symbol: string;
+            /** Units */
+            units: string;
+            /** Unscheduled */
+            unscheduled: string;
+            /** Value */
+            value: string | null;
         };
         /** UserCreate */
         UserCreate: {
@@ -5192,6 +7560,134 @@ export interface components {
             /** Value */
             value: string;
         };
+        /** VarianceOut */
+        VarianceOut: {
+            /** Amount */
+            amount: string;
+            /** Days */
+            days: number;
+        };
+        /** VestOut */
+        VestOut: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Lot Id */
+            lot_id: string | null;
+            /** Ordinal */
+            ordinal: number;
+            /** Quantity */
+            quantity: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "scheduled" | "vested" | "forfeited";
+            /**
+             * Vest Date
+             * Format: date
+             */
+            vest_date: string;
+            /** Vest Event Id */
+            vest_event_id: string | null;
+            /** Vested Fmv */
+            vested_fmv: string | null;
+            /** Vested Gross */
+            vested_gross: string | null;
+            /** Vested Net */
+            vested_net: string | null;
+            /** Vested Withheld */
+            vested_withheld: string | null;
+        };
+        /** VestRecord */
+        VestRecord: {
+            /**
+             * Dry Run
+             * @default false
+             */
+            dry_run: boolean;
+            /**
+             * Fmv
+             * @description Per share at vest.
+             */
+            fmv?: number | string | null;
+            /**
+             * Force New Lot
+             * @default false
+             */
+            force_new_lot: boolean;
+            /** Gross Quantity */
+            gross_quantity: number | string;
+            /**
+             * Lot
+             * @description Link this existing lot (id or broker reference) instead of adding shares.
+             */
+            lot?: string | null;
+            /** Lot Ref */
+            lot_ref?: string | null;
+            /**
+             * Net Quantity
+             * @description Checked if given.
+             */
+            net_quantity?: number | string | null;
+            /** Note */
+            note?: string | null;
+            /** Ordinal */
+            ordinal?: number | null;
+            /** Plan */
+            plan?: string | null;
+            /** Source Note */
+            source_note?: string | null;
+            /**
+             * Vest Date
+             * Format: date
+             */
+            vest_date: string;
+            /**
+             * Withheld Quantity
+             * @description Required explicit units withheld for tax (zero only when known); all of them (net 0) records the vest with no shares and no lot.
+             */
+            withheld_quantity: number | string;
+        };
+        /** VestResultOut */
+        VestResultOut: {
+            /** Already Recorded */
+            already_recorded: boolean;
+            /**
+             * Award Id
+             * Format: uuid
+             */
+            award_id: string;
+            /** Dry Run */
+            dry_run: boolean;
+            /** Event Id */
+            event_id: string | null;
+            /** Gross Quantity */
+            gross_quantity: string;
+            /** Linked */
+            linked: boolean;
+            /** Lot Id */
+            lot_id: string | null;
+            /** Net Quantity */
+            net_quantity: string;
+            /** Position Id */
+            position_id: string | null;
+            vest: components["schemas"]["VestOut"] | null;
+            /** Withheld Quantity */
+            withheld_quantity: string;
+        };
+        /** VestUpdate */
+        VestUpdate: {
+            /** Note */
+            note?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "scheduled" | "forfeited";
+        };
     };
     responses: never;
     parameters: never;
@@ -5285,7 +7781,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AccountOut"];
+                    "application/json": components["schemas"]["AccountDetailOut"];
                 };
             };
             /** @description Validation Error */
@@ -5341,10 +7837,86 @@ export interface operations {
             };
         };
     };
+    capture_awards_accounts__account_id__award_captures_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AwardCaptureBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AwardCaptureOut"];
+                };
+            };
+            /** @description `preview_stale` or `capture_conflicts` (detail.code). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_awards_accounts__account_id__awards_get: {
+        parameters: {
+            query?: {
+                symbol?: string | null;
+                include_vests?: boolean;
+            };
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AwardsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     balance_as_of_accounts__account_id__balance_get: {
         parameters: {
             query?: {
-                /** @description defaults to today (UTC) */
+                /** @description defaults to the ledger day */
                 as_of?: string | null;
             };
             header?: never;
@@ -5380,7 +7952,7 @@ export interface operations {
             query?: {
                 /** @description defaults to end - 90d */
                 start?: string | null;
-                /** @description defaults to today (UTC) */
+                /** @description defaults to the ledger day */
                 end?: string | null;
             };
             header?: never;
@@ -5398,6 +7970,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BalanceSeries"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_captures_accounts__account_id__captures_get: {
+        parameters: {
+            query?: {
+                kind?: ("lots" | "awards") | null;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CaptureRecordOut"][];
                 };
             };
             /** @description Validation Error */
@@ -5434,6 +8040,48 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["CloseResult"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    capture_lots_accounts__account_id__lot_captures_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LotCaptureBody"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CaptureOut"];
+                };
+            };
+            /** @description `preview_stale` or `capture_conflicts` (detail.code). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
@@ -5501,6 +8149,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PositionOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    realized_gains_accounts__account_id__realized_gains_get: {
+        parameters: {
+            query: {
+                year: number;
+                symbol?: string | null;
+            };
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RealizedGainsOut"];
                 };
             };
             /** @description Validation Error */
@@ -5726,6 +8408,109 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    activity_audit_activity_get: {
+        parameters: {
+            query?: {
+                view?: "sharing" | "changes" | "access" | "technical";
+                integration_id?: string | null;
+                actor_token_id?: string | null;
+                account_id?: string | null;
+                data_type?: string | null;
+                outcome?: ("shared" | "empty" | "denied" | "failed" | "uncertain" | "legacy" | "changed") | null;
+                extra?: boolean;
+                since?: string | null;
+                until?: string | null;
+                request_id?: string | null;
+                cursor?: string | null;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActivityPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    export_activity_audit_export_get: {
+        parameters: {
+            query?: {
+                view?: "sharing" | "changes" | "access" | "technical";
+                integration_id?: string | null;
+                actor_token_id?: string | null;
+                account_id?: string | null;
+                data_type?: string | null;
+                outcome?: ("shared" | "empty" | "denied" | "failed" | "uncertain" | "legacy" | "changed") | null;
+                extra?: boolean;
+                since?: string | null;
+                until?: string | null;
+                request_id?: string | null;
+                format?: "json" | "csv";
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    options_audit_options_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditOptions"];
                 };
             };
         };
@@ -6023,6 +8808,149 @@ export interface operations {
             };
         };
     };
+    update_award_vest_award_vests__vest_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                vest_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VestUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VestOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_award_awards__award_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                award_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AwardOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_award_awards__award_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                award_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AwardUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AwardOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    record_vest_awards__award_id__vests_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                award_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["VestRecord"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VestResultOut"];
+                };
+            };
+            /** @description `vest_conflict`: recorded differently, forfeited, or a possible duplicate lot. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_categories_categories_get: {
         parameters: {
             query?: never;
@@ -6218,6 +9146,26 @@ export interface operations {
             };
         };
     };
+    get_clock_clock_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClockOut"];
+                };
+            };
+        };
+    };
     get_config_config_get: {
         parameters: {
             query?: never;
@@ -6355,6 +9303,26 @@ export interface operations {
             };
         };
     };
+    feed_inventory_connections_inventory_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InventoryConnectionOut"][];
+                };
+            };
+        };
+    };
     trigger_backfill_connections__connection_id__backfill_post: {
         parameters: {
             query?: never;
@@ -6445,6 +9413,41 @@ export interface operations {
                     "application/json": {
                         [key: string]: string;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    trigger_refetch_connections__connection_id__refetch_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                connection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RefetchRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RefetchOut"];
                 };
             };
             /** @description Validation Error */
@@ -6761,6 +9764,107 @@ export interface operations {
             };
         };
     };
+    get_lot_lots__lot_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                lot_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LotDetailOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    correct_lot_basis_lots__lot_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                lot_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LotBasisUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LotOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    void_lot_lots__lot_id__void_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                lot_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["LotVoid"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LotOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     confirm_transfer_matching_confirm_transfer_post: {
         parameters: {
             query?: never;
@@ -6873,7 +9977,10 @@ export interface operations {
     };
     transfer_candidates_matching_transfer_candidates_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description only pairs whose newer leg is at most this many days old (0 = dated today, at most 36500); omit for the whole history */
+                lookback_days?: number | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -6887,6 +9994,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TransferCandidateOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reject_transfer_candidate_matching_transfer_candidates_reject_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RejectTransferCandidateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RejectTransferCandidateOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -7308,6 +10457,26 @@ export interface operations {
             };
         };
     };
+    potential_net_worth_networth_potential_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PotentialNetWorthOut"];
+                };
+            };
+        };
+    };
     net_worth_series_networth_series_get: {
         parameters: {
             query: {
@@ -7399,6 +10568,13 @@ export interface operations {
                     "application/json": components["schemas"]["PositionOut"];
                 };
             };
+            /** @description Reopen refused: another position in the symbol is open on the account, or a later position in it exists (a symbol's positions never overlap in time). */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -7463,6 +10639,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PositionEventResult"];
+                };
+            };
+            /** @description Either an open position in that symbol exists (`detail` is a message), or the account already shows this trade's cash: `detail.code` is `cash_already_recorded` with the row's `transaction_id`, `date` and `amount`. Link it with `transaction_id` when it is this trade's cash, or pass `force_cash` when it is a different payment of the same amount. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_lots_positions__position_id__lots_get: {
+        parameters: {
+            query?: {
+                status?: "open" | "closed" | "voided" | "reversed" | "all";
+                limit?: number;
+                cursor?: string | null;
+            };
+            header?: never;
+            path: {
+                position_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LotPageOut"];
                 };
             };
             /** @description Validation Error */
@@ -7905,6 +11123,72 @@ export interface operations {
             };
         };
     };
+    get_occurrence_certainty_schedules_instances__transaction_id__certainty_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                transaction_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CertaintyOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_occurrence_certainty_schedules_instances__transaction_id__certainty_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                transaction_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CertaintyUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CertaintyOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     materialize_schedules_materialize_post: {
         parameters: {
             query?: never;
@@ -8057,6 +11341,74 @@ export interface operations {
             };
         };
     };
+    get_slot_certainty_schedules__schedule_id__occurrences__occurrence_date__certainty_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                schedule_id: string;
+                occurrence_date: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CertaintyOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_slot_certainty_schedules__schedule_id__occurrences__occurrence_date__certainty_patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                schedule_id: string;
+                occurrence_date: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CertaintyUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CertaintyOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     pause_schedule_schedules__schedule_id__pause_post: {
         parameters: {
             query?: never;
@@ -8141,11 +11493,14 @@ export interface operations {
         parameters: {
             query?: {
                 status?: "open" | "accepted" | "rejected" | "withdrawn" | "all";
-                kind?: ("schedule" | "transfer_link" | "match") | null;
+                kind?: ("schedule" | "transfer_link" | "match" | "transfer_pair") | null;
                 /** @description account id or path (either side) */
                 account?: string | null;
                 include_snoozed?: boolean;
+                sort?: "confidence" | "oldest";
                 limit?: number;
+                /** @description rows of earlier pages to skip, for the next page */
+                offset?: number;
             };
             header?: never;
             path?: never;
@@ -8160,6 +11515,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SuggestionOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    suggestion_counts_suggestions_counts_get: {
+        parameters: {
+            query?: {
+                account?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SuggestionCountsOut"];
                 };
             };
             /** @description Validation Error */
@@ -8481,6 +11867,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    review_summary_transactions_review_summary_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReviewSummary"];
                 };
             };
         };

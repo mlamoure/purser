@@ -76,12 +76,81 @@ again, so the payment links when its bank rows arrive.
 
 ## Confirm-first candidates
 
-An amount-and-window pair with **no** signal is a `transfer.candidate` event,
-not an auto-link: it looks like a transfer but Purser will not merge it
-silently. Confirm it yourself — `confirm_transfer` over MCP, or the register's
-confirm control — to merge the pair, or leave it as two categorized rows. A
+An amount-and-window pair with **no** signal is a **candidate**, not an
+auto-link: it looks like a transfer but Purser will not merge it silently. A
 bank row already matched to an expected transfer is still listed with its
 counterpart, and confirming the pair carries the match onto the transfer.
+Posted rows pair first, as the auto-linker pairs them; a pending row pairs
+only with what is left, so it never takes a posted row's counterpart.
+Positive rows explicitly labeled as refunds, cash-back/reward credits,
+dividends or earned-interest credits are excluded from this amount-and-date
+candidate search. A coincidentally equal debit is not evidence that an earned
+credit moved between your accounts. Explicit confirmation remains available
+when you have verified that the bank mislabeled a genuine transfer.
+
+A bank row the categorize pass categorized after it posted stays a transfer
+leg: correcting a posted row writes a reversal and a replacement, and the
+replacement carries the bank line on — it links, absorbs, and gets its card,
+just as the original would have. A row **you** (or an agent) categorized by
+hand stays out of every automatic link: the category you chose is a
+decision, and only an explicit confirm or `[account]` edit makes it part of a
+transfer. Editing only its description or payee is no such decision — the
+row stays uncategorized and still links. Confirming ids you read before the
+categorize pass corrected one of them links the replacement.
+
+You meet candidates in two places:
+
+- **The suggestions inbox.** After each import and the nightly matching job,
+  a candidate whose two sides have both posted, the newer in the last **60
+  days**, becomes a `transfer_pair` card on the Dashboard (and in MCP
+  `list_suggestions`), and Purser emits one `transfer.candidate` event for
+  it. A pair with a side still pending waits until both post. **Link as transfer**
+  merges the pair; **Not a transfer** remembers that it is not one; snooze
+  hides it for 30 days. See the [suggestions inbox](../../how-to/suggestions/).
+- **The register.** Every candidate, however old, shows a **Link ⇄** button
+  on its rows, and a **✗** beside it for "not a transfer". Over the API the
+  list is `GET /matching/transfer-candidates`: the whole history by default,
+  or `?lookback_days=N` for pairs whose newer side is at most N days old. Each
+  pair names its inbox card as `suggestion_id` when it has one. Reading the
+  list changes nothing.
+
+To merge a pair yourself, use the card, the register's Link ⇄, or
+`confirm_transfer` (MCP) / `POST /matching/confirm-transfer`. Or leave it as
+two categorized rows.
+
+### Not a transfer
+
+Rejecting a candidate is remembered, and not only by the inbox. Purser never
+links that pair automatically again: not by a keyword in the bank text, not by
+a `transfer_link` rule you activate later (its projected link count leaves the
+pair out, so the count you confirm is still what gets linked), and not by an
+AI or rule conversion to `[account]` — an AI or rule answer that names the
+other row's account counts as no answer at all, so neither row becomes a
+transfer to the other's account by automation (the categorize pass leaves
+the row to its next tier; a rule's apply-history skips it and reports
+`skipped_not_a_transfer`). The pair also leaves the candidate list.
+Each row stays free for its real counterpart, though: if the money actually
+went to another of your accounts, that pair can still link or become a card.
+The rejection follows each row through what comes after it — the posted row
+the bank replaces a pending one with (also while an outage repair or a
+manual re-fetch has brought the posted row in but no regular sync has
+retired the pending yet), the replacement a correction writes, and the copy
+an unlink brings back — so it holds for the same bank lines, and rejecting
+by the old ids or the new ones is the same rejection.
+
+The register's ✗ rejects through the pair's card when it has one. For an older
+pair with no card, it uses:
+
+```bash
+curl -sX POST https://purser.example.com/matching/transfer-candidates/reject \
+  -H "Authorization: Bearer $PURSER_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"outgoing_id": "CHECKING_ROW_ID", "incoming_id": "SAVINGS_ROW_ID"}'
+```
+
+It needs **write** scope, like deciding a card. Repeating it changes nothing
+(`already_rejected: true`). To link a rejected pair after all, confirm it
+explicitly; like an unlink, a rejection binds only the automatic paths.
 
 ## From a confirm to a rule
 
@@ -213,15 +282,23 @@ this way: unlink them so their bank rows come back as separate transactions
 **Absorb** handles the late-arriving side: when an imported row matches an
 existing transfer's unbacked side and carries a name signal (or the pair is
 declared, within the rule's window), it is voided into that transfer instead
-of duplicating it (a `transfer.absorbed` event). **Unlink** undoes a link —
+of duplicating it (a `transfer.absorbed` event). A side a bank row already
+accounts for is never absorbed into: the side of a merged bank row, and the
+own side of a bank row you (or the categorize pass) converted to
+`[account]` — so a second, real payment of the same amount from that
+account stays a row of its own. **Unlink** undoes a link —
 the merged transfer splits back into its one-sided originals (with their
 content hashes moved onto the resurrected rows) and a `transfer.unlinked`
 event fires. If the transfer settled an expectation, such as a scheduled
 transfer's instance, that settlement goes with it: the instance is due again
 in its slot and the next matching run decides what settles it — it is never
 brought back as a posted copy. A pair you explicitly unlinked is suppressed
-from the **auto** paths only; an explicit confirm or convert can always relink
-it.
+from the **auto** paths only, and from the candidate list; an explicit confirm
+or convert can always relink it. The resurrected rows are your bank rows
+again — even one the categorize pass had recategorized — so each can still
+link with a different counterpart, and a transfer that survives the unlink
+(one you made with `[account]`) has its side open again for the bank row
+that does belong to it, never for the row you unlinked.
 
 The authoritative spec is
 [`DESIGN.md`](https://github.com/mlamoure/purser/blob/main/DESIGN.md)

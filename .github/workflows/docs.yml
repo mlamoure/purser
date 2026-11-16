@@ -1,6 +1,9 @@
 # Documentation site: builds docs/ for both hosting targets (site root and the
 # /purser subpath) and deploys the /purser build to GitHub Pages at
-# https://mlamoure.github.io/purser/ on pushes to main.
+# https://mlamoure.github.io/purser/ once a release is out: after "Docker
+# qualification and release" succeeds for a v* tag, so the setup pages never
+# name an image that failed to publish. Pull requests build only; a manual run
+# on main rebuilds and deploys the current main.
 #
 # Gate: the repository variable PURSER_DOCS_PUBLICATION_ENABLED must be 'true'
 # (Settings -> Secrets and variables -> Actions -> Variables) for anything to
@@ -10,8 +13,9 @@
 # Actions are pinned by full commit SHA; the comment names the release.
 name: Documentation
 on:
-  push:
-    branches: [main]
+  workflow_run:
+    workflows: ['Docker qualification and release']
+    types: [completed]
   pull_request:
   workflow_dispatch:
 permissions: {}
@@ -20,7 +24,14 @@ concurrency:
   cancel-in-progress: false
 jobs:
   build:
-    if: vars.PURSER_DOCS_PUBLICATION_ENABLED == 'true'
+    # From workflow_run: only a successful release run for a pushed tag (the
+    # same workflow also qualifies pull requests and manual runs).
+    if: >-
+      vars.PURSER_DOCS_PUBLICATION_ENABLED == 'true' &&
+      (github.event_name != 'workflow_run' ||
+       (github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push' &&
+        startsWith(github.event.workflow_run.head_branch, 'v')))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -31,6 +42,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The released tag's commit, not whatever main is now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '26'

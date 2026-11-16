@@ -4,11 +4,13 @@ import { api, errorDetail } from "../../lib/api";
 import { fmtAmount } from "../../lib/utils";
 import { Badge, Button, Card, CardTitle, ErrorText, Input, Label, Table, Td, Th } from "../../components/ui";
 import type { components } from "../../api/schema";
+import { FeedHealth, GapRepairNote, RefetchCard } from "./FeedStatus";
 
 type SyncSchedule = components["schemas"]["SyncSchedule"];
 type ConfigOut = components["schemas"]["ConfigOut"];
 type BackfillOut = components["schemas"]["BackfillOut"];
 type DiscoveredOut = components["schemas"]["DiscoveredOut"];
+type GapRepair = components["schemas"]["GapRepairOut"];
 type DriftBasis = NonNullable<DiscoveredOut["drift_basis"]>;
 
 // The ledger basis an account's drift is measured on (issue #283): chosen per
@@ -50,6 +52,7 @@ function SyncScheduleCard({ config }: { config: ConfigOut }) {
   const [dailyTime, setDailyTime] = useState(
     `${pad(initial.hour ?? 6)}:${pad(initial.minute ?? 30)}`,
   );
+  const [staleDays, setStaleDays] = useState(String(config.values.feed_stale_days));
   const [error, setError] = useState<string | null>(null);
 
   const save = useMutation({
@@ -62,7 +65,13 @@ function SyncScheduleCard({ config }: { config: ConfigOut }) {
               minute: Number(dailyTime.split(":")[1]),
             }
           : { preset };
-      const { error: err } = await api.PUT("/config", { body: { sync_schedule: schedule } });
+      const days = Number(staleDays);
+      if (!Number.isInteger(days) || days < 1 || days > 90) {
+        throw new Error("Stale after must be a whole number of days from 1 to 90.");
+      }
+      const { error: err } = await api.PUT("/config", {
+        body: { sync_schedule: schedule, feed_stale_days: days },
+      });
       if (err) throw new Error(errorDetail(err));
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["config"] }),
@@ -74,7 +83,8 @@ function SyncScheduleCard({ config }: { config: ConfigOut }) {
       <CardTitle>Sync schedule</CardTitle>
       <p className="mb-4 text-sm text-muted-foreground">
         How often Purser pulls new data from SimpleFIN. All times are UTC; the Bridge allows at
-        most 24 fetches per day.
+        most 24 fetches per day. An account whose bank balance has not updated for more than
+        &ldquo;Stale after&rdquo; days is flagged (event <code>feed.stale</code>, and the agent digest).
       </p>
       <div className="flex items-end gap-2">
         <div className="space-y-1">
@@ -97,6 +107,18 @@ function SyncScheduleCard({ config }: { config: ConfigOut }) {
             <Input type="time" value={dailyTime} onChange={(e) => setDailyTime(e.target.value)} />
           </div>
         )}
+        <div className="space-y-1">
+          <Label htmlFor="feed-stale-days">Stale after (days)</Label>
+          <Input
+            id="feed-stale-days"
+            type="number"
+            min={1}
+            max={90}
+            className="w-24"
+            value={staleDays}
+            onChange={(e) => setStaleDays(e.target.value)}
+          />
+        </div>
         <Button disabled={save.isPending} onClick={() => { setError(null); save.mutate(); }}>
           Save
         </Button>
@@ -249,12 +271,22 @@ function FeedAccounts({ connectionId }: { connectionId: string }) {
   );
 }
 
+// The latest fetch's errors, each with its SimpleFIN code when the server sent
+// one (protocol v2, #479); a v1 message has no code and shows as-is.
+function bridgeErrors(c: components["schemas"]["HealthOut"]): string {
+  if (c.last_issues.length === 0) return c.last_errors.join("; ");
+  return c.last_issues
+    .map((i) => (i.code && i.code !== "gen." ? `${i.code}: ${i.msg}` : i.msg))
+    .join("; ");
+}
+
 export default function SimpleFin() {
   const qc = useQueryClient();
   const [setupToken, setSetupToken] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [backfillResult, setBackfillResult] = useState<BackfillOut | null>(null);
+  const [gapRepair, setGapRepair] = useState<GapRepair | null>(null);
 
   const connections = useQuery({
     queryKey: ["connections"],
@@ -268,6 +300,7 @@ export default function SimpleFin() {
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["connections"] });
     qc.invalidateQueries({ queryKey: ["discovered"] });
+    qc.invalidateQueries({ queryKey: ["inventory"] });
   };
 
   return (
@@ -303,12 +336,12 @@ export default function SimpleFin() {
                     <Badge variant="green">All history fetched</Badge>
                   ) : (
                     <span className="text-xs text-muted-foreground">
-                      back to {c.backfill_cursor ?? "~90 days"}
+                      back to {c.backfill_cursor ?? "~88 days"}
                     </span>
                   )}
                 </Td>
                 <Td className="max-w-64 truncate text-xs text-muted-foreground">
-                  {c.last_errors.join("; ") || "—"}
+                  {bridgeErrors(c) || "—"}
                 </Td>
                 <Td>
                   <div className="flex flex-col items-start gap-1">
@@ -319,11 +352,14 @@ export default function SimpleFin() {
                       onClick={async () => {
                         setBusy(true);
                         setError(null);
-                        const { error: err } = await api.POST("/connections/{connection_id}/sync", {
-                          params: { path: { connection_id: c.id } },
-                        });
+                        setGapRepair(null);
+                        const { data, error: err } = await api.POST(
+                          "/connections/{connection_id}/sync",
+                          { params: { path: { connection_id: c.id } } },
+                        );
                         setBusy(false);
                         if (err) setError(errorDetail(err));
+                        else if (data?.gap_repair) setGapRepair(data.gap_repair);
                         refresh();
                       }}
                     >
@@ -339,7 +375,7 @@ export default function SimpleFin() {
                         setBackfillResult(null);
                         const { data, error: err } = await api.POST(
                           "/connections/{connection_id}/backfill",
-                          { params: { path: { connection_id: c.id } }, body: { windows: 4 } },
+                          { params: { path: { connection_id: c.id } }, body: { windows: 8 } },
                         );
                         setBusy(false);
                         if (err) setError(errorDetail(err));
@@ -359,6 +395,7 @@ export default function SimpleFin() {
           <p className="text-sm text-muted-foreground">No SimpleFIN connections yet.</p>
         )}
         <ErrorText>{error}</ErrorText>
+        {gapRepair && <GapRepairNote repair={gapRepair} />}
         {backfillResult && (
           <div className="mt-3 space-y-2">
             <p className="text-sm text-muted-foreground">
@@ -387,8 +424,14 @@ export default function SimpleFin() {
         </p>
       </Card>
 
+      <FeedHealth />
+
       {(connections.data ?? []).map((c) => (
         <FeedAccounts key={c.id} connectionId={c.id} />
+      ))}
+
+      {(connections.data ?? []).map((c) => (
+        <RefetchCard key={`refetch-${c.id}`} connectionId={c.id} />
       ))}
 
       <Card>

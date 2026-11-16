@@ -17,6 +17,14 @@ an ltree, a spending rollup is a single indexed subtree query — everything und
 `expenses.dining` is `path <@ 'expenses.dining'`, one query, no recursion in
 application code.
 
+One virtual account is not a category: `equity.securities`, the other side of
+a securities trade's cash (see [Track holdings by hand](../../how-to/manual-holdings/)).
+Like a category it is virtual, so it stays out of net worth; unlike one it is
+never offered as a category, never counted as income or spending, and no rule,
+schedule or classifier can book to it. The `equity` subtree belongs to it:
+no category or account can be created at `equity` or under it (a 422 says
+so), and a rollup or spending summary of that subtree counts nothing.
+
 A path is labels joined by single dots, each label made of letters, digits,
 `_` and `-`. A malformed path such as `expenses..dining` or
 `expenses.eating out` is rejected with a 422 whose message names the

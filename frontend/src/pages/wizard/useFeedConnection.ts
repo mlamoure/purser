@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { components } from "../../api/schema";
 import { api, errorDetail } from "../../lib/api";
 
@@ -18,6 +18,7 @@ export function accountLabel(d: Pick<Discovered, "name" | "external_id">): strin
  * throw the API's error detail for the calling step to show. */
 export function useFeedConnection() {
   const [connectionId, setConnectionId] = useState<string | null>(null);
+  const claimed = useRef<{ setupToken: string; id: string } | null>(null);
   const [discovered, setDiscovered] = useState<Discovered[]>([]);
 
   const refreshDiscovered = async (cid: string) => {
@@ -31,11 +32,16 @@ export function useFeedConnection() {
   /** Exchange a setup token (once — the access URL is stored encrypted), run
    * the first fetch, and list the accounts it found. */
   const connect = async (setupToken: string) => {
-    const { data, error } = await api.POST("/connections", {
-      body: { setup_token: setupToken },
-    });
-    if (error) throw new Error(errorDetail(error));
-    const cid = data!.id;
+    // A claim is one-time. If the fetch failed, retry the saved connection;
+    // claiming the same setup token again would strand the wizard.
+    if (claimed.current?.setupToken !== setupToken) {
+      const { data, error } = await api.POST("/connections", {
+        body: { setup_token: setupToken },
+      });
+      if (error) throw new Error(errorDetail(error));
+      claimed.current = { setupToken, id: data!.id };
+    }
+    const cid = claimed.current.id;
     setConnectionId(cid);
     const { error: syncError } = await api.POST("/connections/{connection_id}/sync", {
       params: { path: { connection_id: cid } },

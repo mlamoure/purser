@@ -989,3 +989,24 @@ def test_migration_0032_round_trips(database_url: str) -> None:
         assert "carried_from" not in columns and "escalated_at" in columns
     finally:
         engine.dispose()
+
+
+class TestReviewSummary:
+    def test_routes_pending_and_posted_without_counting_manual_rows(
+        self,
+        seeded: None,
+        client: TestClient,
+        db_session: Session,
+    ) -> None:
+        posted = _feed_row(db_session, when=date(2026, 10, 1))
+        _feed_row(db_session, status="pending", when=date(2026, 10, 3))
+        db_session.commit()
+        response = client.get("/transactions/review-summary")
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["total"] == 2 and data["pending"] == 1
+        assert data["oldest_date"] == "2026-10-01"
+        assert data["accounts"][0]["total"] == 2
+        assert data["accounts"][0]["pending"] == 1
+        client.post("/transactions/mark-reviewed", json={"transaction_ids": [str(posted)]})
+        assert client.get("/transactions/review-summary").json()["total"] == 1

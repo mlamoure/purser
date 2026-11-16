@@ -43,9 +43,10 @@ transactions, a transfer pair, one recurring bill and one card-payment
 transfer schedule — enough to exercise
 matching, forecasting, and every read tool without a bank connection.
 
-Skips silently when the database already holds user data — any real
-(non-category) account or any transaction. `--force` seeds anyway and writes
-a `seed.force` audit row.
+Skips silently when the database already holds user data — any real account
+or any transaction. What the migrations seed (the category tree and the
+system account `equity.securities`) does not count. `--force` seeds anyway
+and writes a `seed.force` audit row.
 
 ## Guarded admin commands
 
@@ -69,6 +70,7 @@ deliberately a CLI, not an API — no token scope can delete an account.
 purser admin purge-feed-rows <path-or-uuid>                      # dry-run report
 purser admin purge-feed-rows <path-or-uuid> --since 2026-05-01   # bounded
 purser admin purge-feed-rows <path-or-uuid> --yes                # execute
+purser admin purge-feed-rows <path-or-uuid> --include-corrections --yes
 ```
 
 Hard-delete an account's **feed-origin** rows (any status) so the archive
@@ -77,6 +79,28 @@ such as a sign-inverted stream. QIF, manual, and agent rows are never
 touched; merge-linked transfers unlink first so the counterpart's bank line
 survives; the raw feed archive stays whole. Dry-run by default. Follow with
 `replay-archive`.
+
+A feed row that was **corrected** after import (recategorized by a person, an
+agent or a rule, or re-booked as a securities trade's cash) is refused: its
+correction would stay behind beside the row the replay re-lands, and the
+account would count it twice. The dry run counts such rows and their
+correction chains, and lists the ones a person or an agent corrected.
+`--include-corrections` purges each corrected row together with its whole
+correction chain; a correction a person made is then lost, so make it again
+after the replay. A chain that converted the row to a transfer (a leg on
+another account) is refused either way: convert it back to a category first.
+
+A feed row that a securities sale or purchase linked as its cash (see
+[Track holdings by hand](../../how-to/manual-holdings/)) is refused even with
+`--include-corrections`: the dry run counts such rows, and `--yes` exits
+naming each trade and these steps:
+
+1. Reopen the position if it is closed.
+2. If the account's holdings come from the feed, switch it to manual.
+3. Reverse the trade, which gives the row its category back.
+4. Purge with `--include-corrections`.
+5. Replay the archive.
+6. Record the trade again, linking the re-imported row (`transaction_id`).
 
 ### purser admin replay-archive
 

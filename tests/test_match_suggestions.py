@@ -536,14 +536,13 @@ class TestTheSweep:
     def test_a_skipped_bills_card_is_withdrawn(
         self, seeded: dict[str, str], client: TestClient, migrated_engine: Engine
     ) -> None:
-        """Voiding (skipping) the expected leaves its proposal live — confirming
-        it fails "stale" — so the sweep takes the card out of the inbox."""
+        """Skipping releases the bank row and withdraws its card immediately."""
         pair = _proposed_bill(client, migrated_engine)
         assert client.post(f"/transactions/{pair['expected_id']}/void").status_code == 200
 
-        client.post("/matching/run")
-
+        assert _match(migrated_engine, pair["expected_id"]).state == "rejected"
         assert _only_card(client)["status"] == "withdrawn"
+        assert client.get("/suggestions/counts").json()["match"] == 0
 
     def test_a_held_transfer_leg_gets_a_card_only_after_its_window(
         self, seeded: dict[str, str], client: TestClient, migrated_engine: Engine
@@ -778,3 +777,50 @@ def test_migration_0034_round_trips(database_url: str) -> None:
             conn.execute(insert, {"k": "match", "s": "open", "f": "match:again"})
     finally:
         engine.dispose()
+
+
+class TestLiveAttention:
+    def test_void_expected_is_hidden_before_a_sweep(
+        self,
+        seeded: dict[str, str],
+        client: TestClient,
+        migrated_engine: Engine,
+    ) -> None:
+        pair = _proposed_bill(client, migrated_engine)
+        card = _only_card(client)
+        # A legacy void can predate the new status-transition cleanup.
+        with migrated_engine.begin() as conn:
+            conn.execute(
+                text("UPDATE transactions SET status = 'void' WHERE id = :id"),
+                {"id": pair["expected_id"]},
+            )
+        assert _cards(client, "open") == []
+        assert client.get("/suggestions/counts").json()["match"] == 0
+        assert client.get(f"/suggestions/{card['id']}").status_code == 200
+
+    def test_variance_uses_current_signed_legs_and_account_counts(
+        self,
+        seeded: dict[str, str],
+        client: TestClient,
+        migrated_engine: Engine,
+    ) -> None:
+        pair = _proposed_bill(client, migrated_engine)
+        with migrated_engine.begin() as conn:
+            conn.execute(
+                text("UPDATE matches SET variance = 999 WHERE expected_id = :id"),
+                {"id": pair["expected_id"]},
+            )
+        card = _cards(client, "open")[0]
+        assert Decimal(card["draft"]["variance"]) == Decimal("85.00")
+        assert (
+            client.get("/suggestions/counts", params={"account": seeded["assets.checking"]}).json()[
+                "match"
+            ]
+            == 1
+        )
+        assert (
+            client.get("/suggestions/counts", params={"account": seeded["assets.savings"]}).json()[
+                "match"
+            ]
+            == 0
+        )

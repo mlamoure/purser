@@ -25,7 +25,12 @@ from purser import ledger as ledger_service
 from purser.models import (
     Account,
     AccountReconciliation,
+    Award,
+    AwardVest,
+    HoldingsCapture,
     HoldingsSnapshot,
+    Lot,
+    LotDisposition,
     Match,
     Position,
     PositionEvent,
@@ -44,6 +49,12 @@ _POSTED_GUARD_TRIGGERS = (
     ("transactions", "transactions_posted_immutable"),
     ("transactions", "transactions_posted_undeletable"),
     ("postings", "postings_posted_immutable"),
+    ("position_events", "position_events_immutable"),
+    # Lots, their dispositions and capture evidence (#393): append-only /
+    # never-deleted rows that go only with their account.
+    ("lots", "lots_guard"),
+    ("lot_dispositions", "lot_dispositions_immutable"),
+    ("holdings_captures", "holdings_captures_immutable"),
 )
 
 
@@ -210,6 +221,10 @@ def guarded_delete(session: Session, doomed: list[uuid.UUID]) -> dict[str, int]:
     3. with the posted-immutable guards disabled: lineage pointers
        (``superseded_by`` / ``reverses_id``) on SURVIVING transactions NULLed
        (the 0010-migration precedent), then postings, then the transactions.
+       A position event naming a doomed row as its trade's cash (decision 103)
+       has that pointer NULLed too, with the append-only guard on position
+       events disabled the same way; the purge only reaches a row whose trade
+       was reversed, so the events it unlinks no longer count.
 
     Running balances follow the transactions by FK cascade.
     """
@@ -217,6 +232,7 @@ def guarded_delete(session: Session, doomed: list[uuid.UUID]) -> dict[str, int]:
         "matches_deleted": 0,
         "reviews_deleted": 0,
         "lineage_nulled": 0,
+        "position_events_unlinked": 0,
         "postings_deleted": 0,
         "transactions_deleted": 0,
     }
@@ -249,6 +265,13 @@ def guarded_delete(session: Session, doomed: list[uuid.UUID]) -> dict[str, int]:
                     .values({column.key: None})
                 )
             )
+        counts["position_events_unlinked"] = _rowcount(
+            session.execute(
+                update(PositionEvent)
+                .where(PositionEvent.transaction_id.in_(doomed))
+                .values(transaction_id=None)
+            )
+        )
         # Postings first (FK), then the transactions themselves.
         counts["postings_deleted"] = _rowcount(
             session.execute(delete(Posting).where(Posting.transaction_id.in_(doomed)))
@@ -320,6 +343,36 @@ def execute_delete(
         )
     )
 
+    # Positions tracked by hand (#390) go before the transactions: a trade's
+    # event names its cash row by FK (decision 103). Manual snapshots first
+    # (they reference the positions), then the events, then the positions.
+    # security_prices is global and stays.
+    holdings_deleted = _rowcount(
+        session.execute(delete(HoldingsSnapshot).where(HoldingsSnapshot.account_id == account.id))
+    )
+    position_ids = select(Position.id).where(Position.account_id == account.id)
+    # Lots and awards (#393) reference the events and positions: vests (they
+    # name lots and events) first, then awards, dispositions, lots, and the
+    # account's capture records (the raw payloads stay, like every raw row).
+    award_ids = select(Award.id).where(Award.account_id == account.id)
+    award_vests_deleted = _rowcount(
+        session.execute(delete(AwardVest).where(AwardVest.award_id.in_(award_ids)))
+    )
+    awards_deleted = _rowcount(session.execute(delete(Award).where(Award.account_id == account.id)))
+    lot_dispositions_deleted = _rowcount(
+        session.execute(delete(LotDisposition).where(LotDisposition.position_id.in_(position_ids)))
+    )
+    lots_deleted = _rowcount(session.execute(delete(Lot).where(Lot.position_id.in_(position_ids))))
+    captures_deleted = _rowcount(
+        session.execute(delete(HoldingsCapture).where(HoldingsCapture.account_id == account.id))
+    )
+    position_events_deleted = _rowcount(
+        session.execute(delete(PositionEvent).where(PositionEvent.position_id.in_(position_ids)))
+    )
+    positions_deleted = _rowcount(
+        session.execute(delete(Position).where(Position.account_id == account.id))
+    )
+
     # 2-4. Matches, review marks, lineage pointers on survivors, postings and
     # the transactions themselves — the shared guarded delete.
     deleted = guarded_delete(session, doomed)
@@ -336,26 +389,12 @@ def execute_delete(
             },
         )
 
-    # 5. Schedules targeting the account; valuations / holdings snapshots for it;
-    # its positions and their events.
+    # 5. Schedules targeting the account; valuations for it.
     schedules_deleted = _rowcount(
         session.execute(delete(Schedule).where(Schedule.account_id == account.id))
     )
     valuations_deleted = _rowcount(
         session.execute(delete(Valuation).where(Valuation.account_id == account.id))
-    )
-    holdings_deleted = _rowcount(
-        session.execute(delete(HoldingsSnapshot).where(HoldingsSnapshot.account_id == account.id))
-    )
-    # Positions tracked by hand (#390): their manual snapshots went just above
-    # (they reference the positions); then the events, then the positions.
-    # security_prices is global and stays.
-    position_ids = select(Position.id).where(Position.account_id == account.id)
-    position_events_deleted = _rowcount(
-        session.execute(delete(PositionEvent).where(PositionEvent.position_id.in_(position_ids)))
-    )
-    positions_deleted = _rowcount(
-        session.execute(delete(Position).where(Position.account_id == account.id))
     )
     # Inbox rows naming the account, open or decided: derived state, like its
     # schedules, and their FKs would otherwise refuse the account row (#399).
@@ -376,6 +415,11 @@ def execute_delete(
         "reconciliations_deleted": reconciliations_deleted,
         "positions_deleted": positions_deleted,
         "position_events_deleted": position_events_deleted,
+        "lots_deleted": lots_deleted,
+        "lot_dispositions_deleted": lot_dispositions_deleted,
+        "awards_deleted": awards_deleted,
+        "award_vests_deleted": award_vests_deleted,
+        "captures_deleted": captures_deleted,
         "suggestions_deleted": suggestions_deleted,
     }
     audit.record(

@@ -1,14 +1,19 @@
 ---
 title: Privacy and agents
-description: How Purser lets your agent see only what a task needs — privatized defaults, include, payee references, and present.
+description: Control financial data sharing through access scopes, MCP disclosure defaults, per-call requests and auditing.
 ---
 
-Everything an agent reads from Purser lands in its model provider's context.
-Your agent is your own and may see anything, but Purser lets it expose only
-what a task needs, the way an agent can use a password-manager secret without
-the secret entering the chat. There is no approval step: the agent chooses,
-the tool guidance teaches it to choose well, and your settings set the
-defaults. The authoritative spec is design section 9.
+You decide what financial information to share with your AI agent. Purser
+provides access scopes, disclosure defaults and an audit log. It does not
+prescribe how much information you should share. Data returned to an agent
+may enter its model's context; where that data goes depends on the agent and
+provider you use.
+
+Token scopes control which operations are allowed. MCP disclosure settings
+control which fields are returned by default. An agent with read access can
+request omitted fields per call without another approval step. These settings
+are not field-level access restrictions. For scope details, see
+[Security model](../security/). The authoritative spec is design section 9.
 
 ## Two settings
 
@@ -29,8 +34,8 @@ Amounts are exact or left out, never rounded or made up: a number that is not
 true is something an agent might reason from or repeat.
 
 External account identifiers (the bank's account ids and connection ids) are
-left out for agents by default, whatever the settings: no agent task needs
-them. A call that passes `include: ["external_ids"]` gets them.
+left out for agents by default, whatever the settings. A call that passes
+`include: ["external_ids"]` gets them.
 
 ## Every omission is named
 
@@ -43,15 +48,23 @@ would conclude the value is unknown and might try to fix it.
 A setting is a default, not a limit. Every tool that can return a withheld
 field takes `include`, any of `payee`, `description`, `amount` and
 `external_ids`, and returns exactly those fields on that call. The audit log
-marks every call that asked for more than your defaults: open **Audit Log**
-and choose **Agent disclosures beyond privacy defaults** to see what your AI
-chose to see.
+separately records additional fields requested and fields observed in the final
+response. Open **Audit Log > Data shared** for all integration reads, including
+ordinary reads within the defaults and aggregate answers. **Only fields returned
+beyond privacy defaults** narrows the view to observed extra fields; it is not a
+list of all sharing. Failed or empty requests do not prove those fields were
+returned. Some free-text responses have only a partial field inventory.
+
+Authorization means the integration has permission to act. It does not mean the
+user approved each individual read. The log identifies the credential Purser
+served; downstream model providers and forwarding are not verified. For evidence,
+retention and capture failures, see [Security](../security/).
 
 ## Working by reference
 
 Payee references and transaction ids work as inputs everywhere a payee or a
 row is named: `search_transactions(payee=...)`, `update_transaction`,
-`propose_rule`, `match`, memory links. Purser resolves them. A payee name you
+`propose_rule`, `match`, links on financial notes. Purser resolves them. A payee name you
 typed yourself is still accepted as a filter, because you disclosed it, not
 Purser; the answer stays privatized.
 
@@ -67,7 +80,7 @@ full detail, in Purser for you when you are signed in. The agent can reply
 "your four largest charges this week" followed by the link and the values never pass
 through its model. The link carries only transaction ids and the note.
 
-## What this is not
+## MCP, REST and the web UI
 
 These settings govern what Purser hands an agent over MCP. Purser's own web
 pages always show you full detail. REST serves full detail to any token that

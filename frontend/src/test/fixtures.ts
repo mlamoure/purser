@@ -18,6 +18,7 @@ export const accountOut = (over: Partial<Schemas["AccountOut"]> = {}): Schemas["
   is_virtual: false,
   feed_invert: false,
   holdings_source: "feed",
+  feed_balance_is_cash: false,
   min_balance: null,
   closed_at: null,
   hidden_at: null,
@@ -182,5 +183,63 @@ export const ruleOut = (over: Partial<Schemas["RuleOut"]> = {}): Schemas["RuleOu
   note: null,
   window_days: 3,
   payee_scope: "ZEPHYR BKG SVC SENT",
+  ...over,
+});
+
+/** A transfer_pair suggestion (#386, decision 102): 250.00 leaves checking and
+ * arrives on the card a day later, with nothing in the bank text to link it. */
+export const transferPairSuggestion = (
+  over: Partial<Schemas["SuggestionOut"]> = {},
+): Schemas["SuggestionOut"] => ({
+  id: "s-4",
+  kind: "transfer_pair",
+  status: "open",
+  source: "detected",
+  confidence: null,
+  headline:
+    "Link 250.00 from assets.checking (2026-10-14) to liabilities.card (2026-10-15) as one " +
+    "transfer",
+  draft: {
+    version: 1,
+    outgoing_id: "t-out",
+    incoming_id: "t-in",
+    from_account: "assets.checking",
+    to_account: "liabilities.card",
+    amount: "250.00",
+    outgoing_date: "2026-10-14",
+    incoming_date: "2026-10-15",
+    date_gap_days: 1,
+    outgoing_description: "EXAMPLE BANK WEB DEBIT",
+    incoming_description: "THANK YOU FOR YOUR REMITTANCE",
+  },
+  evidence_summary: {
+    count: 1,
+    first: "2026-10-14",
+    last: "2026-10-14",
+    amount_range: { low: "250.00", high: "250.00" },
+    cadence: null,
+  },
+  snooze_until: null,
+  seen_count: 1,
+  created_at: "2026-10-15T07:00:00Z",
+  decided_at: null,
+  reject_scope: null,
+  result_entity_type: null,
+  result_entity_id: null,
+  ...over,
+});
+
+/** A transfer candidate as the register lists it; `suggestion_id` names its
+ * inbox card when it has one. */
+export const transferCandidate = (
+  over: Partial<Schemas["TransferCandidateOut"]> = {},
+): Schemas["TransferCandidateOut"] => ({
+  outgoing_id: "t-out",
+  incoming_id: "t-in",
+  amount: "250.0000",
+  date_gap_days: 1,
+  outgoing_description: "EXAMPLE BANK WEB DEBIT",
+  incoming_description: "THANK YOU FOR YOUR REMITTANCE",
+  suggestion_id: null,
   ...over,
 });

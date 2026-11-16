@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine, select, text
 from sqlalchemy.orm import Session
 
-from purser import db, networth
+from purser import clock, db, networth
 from purser.holdings import prices
 from purser.models import Account, AuditLog, Event, HoldingsSnapshot, SecurityPrice
 from tests.test_mcp import LiveServer, _mcp_raw, live_server, seeded_tokens  # noqa: F401
@@ -680,6 +680,9 @@ class TestRoundTrips:
         fund = _symbol()
         _close(db_session, fund, _ago(3), "2.000000")
         _row(db_session, account.id, _ago(1), fund, "5", "0")
+        # The default day is the ledger day (#471): its time zone setting is a
+        # cached config read, not part of the aggregate, so warm it first.
+        clock.ledger_today()
         with _statements(db_session) as seen:
             addend = networth.holdings_addends(db_session, [account.id])[account.id][0]
         assert addend == Decimal("10.0000")

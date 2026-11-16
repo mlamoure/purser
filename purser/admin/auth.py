@@ -76,6 +76,9 @@ def get_current_token(
     # the resolved actor after the response (issue #122). Its absence is the
     # "nothing to audit" signal for public/unauthenticated requests.
     request.state.audit_actor = token.id
+    from purser.sharing import identity
+
+    request.state.audit_identity = identity(session, token)
     return token
 
 

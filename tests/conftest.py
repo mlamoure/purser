@@ -6,6 +6,7 @@ semantics.
 
 import base64
 import os
+import time
 from collections.abc import Iterator
 from decimal import Decimal
 
@@ -19,6 +20,14 @@ from testcontainers.postgres import PostgresContainer
 import purser.config
 import purser.db
 
+# The suite runs with the default household time zone (UTC, decision 105), and
+# many tests compute their expected dates with ``date.today()``. Pin the test
+# process to UTC so that host-local "today" is the ledger day on any host —
+# a developer box in New York at 19:30 is already tomorrow in UTC. Tests of the
+# time-zone setting itself (tests/test_ledger_day.py) pin purser.clock instead.
+os.environ["TZ"] = "UTC"
+time.tzset()
+
 # Encryption at rest is required (issue #93): the key must exist before
 # migrations run (0007 seeds the canary + encrypts the backfill with it).
 # One fixed key for the whole suite; tests that exercise missing/rotated
@@ -28,9 +37,23 @@ import purser.db
 TEST_ENCRYPTION_KEY = base64.urlsafe_b64encode(b"purser-test-suite-key-not-secret").decode()
 
 
+# The test database is thrown away after the run, so it gets no crash safety:
+# durability off and the data directory in memory. Most tests start with
+# reset_db, a TRUNCATE ... CASCADE that otherwise waits on fsync for every
+# table it empties — about 250 ms per test with the defaults, under 20 ms with
+# this (#502). The semantics the suite relies on (ltree, JSONB, triggers,
+# NUMERIC, transactions) are unchanged; only what survives a crash is.
+TEST_POSTGRES_COMMAND = "postgres -c fsync=off -c synchronous_commit=off -c full_page_writes=off"
+
+
 @pytest.fixture(scope="session")
 def database_url() -> Iterator[str]:
-    with PostgresContainer("postgres:16", driver="psycopg") as pg:
+    container = (
+        PostgresContainer("postgres:16", driver="psycopg")
+        .with_command(TEST_POSTGRES_COMMAND)
+        .with_tmpfs_mount("/var/lib/postgresql/data")
+    )
+    with container as pg:
         yield pg.get_connection_url()
 
 

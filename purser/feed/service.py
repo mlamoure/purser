@@ -15,15 +15,15 @@ import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from purser import audit, crypto, events
+from purser import appsettings, audit, clock, crypto, events
 from purser import ledger as ledger_service
-from purser.feed import drift, importer, reconcile, simplefin
+from purser.feed import drift, envelope, health, importer, reconcile, simplefin
 from purser.logging import get_logger
-from purser.models import Account, Connection, Posting, RawFetch, Transaction
+from purser.models import Account, AuditLog, Connection, Posting, RawFetch, Transaction
 
 log = get_logger(__name__)
 
-FIRST_SYNC_DAYS = 90  # Bridge range cap
+FIRST_SYNC_DAYS = 88  # the first sync's reach: one 45-day page + a 44-day final window (#490)
 # Re-fetch overlap so pending->posted transitions land. A sync reaches further
 # back while an older pending is still open (#282, _open_pendings_start); the
 # importer checks what only that reach fetched for re-described rows (#331).
@@ -31,14 +31,21 @@ RESYNC_OVERLAP_DAYS = importer.RESYNC_OVERLAP_DAYS
 # Cap on backfill-style gap windows one sync will issue for a long-idle
 # connection (#218) — bounds a pathological multi-year gap to a handful of
 # fetches; anything older is logged as uncovered rather than silently lost.
-SYNC_GAP_WINDOWS_MAX = 4
+SYNC_GAP_WINDOWS_MAX = 8  # 45-day pages (#490): the same reach as four 90-day ones
 
 # Historical backfill (issue #126): page ≤90-day windows backward from the
 # first sync's start, one RawFetch per window (shares the daily fetch budget).
 BACKFILL_RESERVE_FETCHES = 2  # headroom left for the scheduled sync + one manual
-BACKFILL_MAX_WINDOWS_PER_RUN = 6  # cap the work (and the budget bite) per call
-BACKFILL_EMPTY_STREAK_STOP = 2  # this many empty windows in a row => history exhausted
+BACKFILL_MAX_WINDOWS_PER_RUN = 12  # cap the work (and the budget bite) per call
+# This many empty windows in a row => history exhausted. Four 45-day windows
+# (#490) keep the 180 days of silence two 90-day windows required.
+BACKFILL_EMPTY_STREAK_STOP = 4
 BACKFILL_WINDOW_OVERLAP_DAYS = 1  # 1-day overlap between windows; idempotent import eats it
+
+
+# Import stats that describe a fetch's accounts, not rows: a paged sync
+# reports them for its final page only (#490).
+_PER_FETCH_COUNTS = frozenset({"unmapped_accounts", "skipped_ambiguous_accounts"})
 
 
 class FeedError(Exception):
@@ -117,11 +124,12 @@ def _open_pendings_start(session: Session, connection_id: uuid.UUID, today: date
     valued by holdings or valuations, so its pendings move no balance, and some
     feeds list every fund purchase as pending forever. One such account would
     keep every sync at the maximal fetch. Its pendings are still re-checked
-    whenever the window covers them. Bounded by what ONE live fetch can serve:
-    a pending older than ``BRIDGE_MAX_RANGE_DAYS`` is beyond the feed's reach
-    and widens nothing, otherwise every sync would pay for a maximal fetch
-    that could never settle it. ``None`` when no pending is in reach."""
-    floor = today - timedelta(days=simplefin.BRIDGE_MAX_RANGE_DAYS)
+    whenever the window covers them. Bounded by what ONE live fetch can serve
+    within the Bridge's recommended span (#490): a pending older than
+    ``BRIDGE_PAGE_DAYS`` widens nothing, otherwise every sync would pay for a
+    fetch past the recommendation (or an extra page) that a pending which old
+    rarely needs. ``None`` when no pending is in reach."""
+    floor = today - timedelta(days=simplefin.BRIDGE_PAGE_DAYS - 1)
     oldest = session.execute(
         select(func.min(Transaction.date))
         .join(Posting, Posting.transaction_id == Transaction.id)
@@ -162,6 +170,11 @@ def sync_connection(
     if _fetches_today(session, connection.id) >= simplefin.BRIDGE_MAX_FETCHES_PER_DAY:
         raise FeedError("Bridge rate limit reached (24 fetches/day); try later")
 
+    # The fetch window lives in the Bridge's frame, not the ledger day
+    # (decision 105): imported rows are dated by their epoch's UTC date and the
+    # Bridge counts its 90-day reach back from now, so the window, its gap
+    # splitting and the pending floor use the UTC date. Staleness below is a
+    # ledger-day judgment and takes clock.ledger_today().
     today = datetime.now(UTC).date()
     if connection.last_fetch_at is not None:
         start = (connection.last_fetch_at - timedelta(days=RESYNC_OVERLAP_DAYS)).date()
@@ -193,14 +206,16 @@ def sync_connection(
             session.flush()
             raise FeedError(f"sync failed: {exc}") from exc
 
-    # A long-idle connection's range can exceed what a bridge serves in one
-    # fetch (BRIDGE_MAX_RANGE_DAYS). Degrade like backfill (#218): fetch the
-    # older portion as capped gap windows imported with window_start=None —
-    # a partial slice must never reconcile live pendings — then the final
-    # ≤max-range window normally so pending transitions land as usual.
-    span = timedelta(days=simplefin.BRIDGE_MAX_RANGE_DAYS)
+    # A range longer than the Bridge's recommended span (a first sync, a
+    # long-idle connection) is paged (#218, #490): the older portion as capped
+    # gap windows imported with window_start=None — a partial slice must never
+    # reconcile live pendings — then the final ≤45-day window normally so
+    # pending transitions land as usual.
+    # The final window has no end-date, so it runs to "now": keep it to at
+    # most BRIDGE_PAGE_DAYS - 1 whole days so it stays inside the span.
+    span = timedelta(days=simplefin.BRIDGE_PAGE_DAYS)
     gap_windows: list[tuple[date, date]] = []
-    while today - start > span:
+    while (today - start).days > simplefin.BRIDGE_PAGE_DAYS - 1:
         window_end = start + span
         gap_windows.append((start, window_end))
         start = window_end - timedelta(days=BACKFILL_WINDOW_OVERLAP_DAYS)
@@ -214,11 +229,13 @@ def sync_connection(
             uncovered_end=uncovered[-1][1].isoformat(),
         )
     gap_stats: dict[str, int] = {}
+    gap_raw_ids: list[str] = []
     for gap_start, gap_end in gap_windows:
         if _fetches_today(session, connection.id) >= simplefin.BRIDGE_MAX_FETCHES_PER_DAY:
             raise FeedError("Bridge rate limit reached (24 fetches/day); try later")
         gap_payload = _fetch(gap_start, gap_end)
         gap_raw = _archive_payload(session, connection.id, gap_payload)
+        gap_raw_ids.append(str(gap_raw.id))
         # A gap window is overlap territory, never widened: tail_before keeps
         # the importer's re-description check off it (#331).
         for key, value in importer.import_fetch(
@@ -233,14 +250,36 @@ def sync_connection(
 
     stats = importer.import_fetch(session, raw, window_start=start, tail_before=overlap_start)
     redescribed = stats.pop("redescribed")
+    # The sync's counts cover every page it fetched (#490): a first sync is
+    # paged too, so counting only the final page would report its history as
+    # nothing imported. Per-fetch account counts are not summed.
+    for key, value in gap_stats.items():
+        if key in stats and key not in _PER_FETCH_COUNTS:
+            stats[key] += value
     # Post-import, pre-audit: the check compares against the just-imported
     # ledger, and the audit lookup inside it must still see the PREVIOUS
     # sync's row (its observation block is the consecutive-sync gate memory).
     drift_obs = drift.check_after_sync(
         session, connection=connection, payload=payload, raw_fetch=raw
     )
+    # Before the audit row below, like the drift check: the lookup of the
+    # previous syncs' feed_health blocks must not see this sync's (#480).
+    feed_health = health.check_after_sync(
+        session,
+        connection=connection,
+        payload=payload,
+        raw_fetch=raw,
+        today=clock.ledger_today(),
+        stale_days=appsettings.effective().feed_stale_days,
+        window_start=start,
+    )
+    gap_repair = _repair_outages(
+        session, connection, feed_health, access_url=access_url, window_start=start, client=client
+    )
     connection.last_fetch_at = datetime.now(UTC)
-    connection.status = "active" if not payload.get("errors") else "warning"
+    connection.status = "warning" if envelope.needs_attention(payload) else "active"
+    issues = [issue.as_dict() for issue in envelope.issues(payload)]
+    api_messages = envelope.api_messages(payload)
     session.flush()
     audit.record(
         session,
@@ -259,15 +298,277 @@ def sync_connection(
             "overlap_start": overlap_start.isoformat(),
             **stats,
             **({"redescribed": redescribed} if redescribed else {}),
-            **({"gap_windows": len(gap_windows), "gap_stats": gap_stats} if gap_windows else {}),
-            "errors": payload.get("errors", []),
+            **(
+                {
+                    "gap_windows": len(gap_windows),
+                    "gap_stats": gap_stats,
+                    # The sync's older pages (#490): the map re-import needs
+                    # them, or a first sync's history beyond its final page
+                    # never reaches an account mapped afterwards.
+                    "gap_raw_fetch_ids": gap_raw_ids,
+                }
+                if gap_windows
+                else {}
+            ),
+            "errors": envelope.messages(payload),
+            "issues": issues,
+            **({"api_messages": api_messages} if api_messages else {}),
+            "protocol_version": envelope.version(payload),
             "balance_drift": drift_obs,
+            health.BLOCK_KEY: feed_health,
+            **({"gap_repair": gap_repair} if gap_repair else {}),
         },
     )
-    result: dict[str, Any] = {"raw_fetch_id": raw.id, **stats, "errors": payload.get("errors", [])}
+    result: dict[str, Any] = {
+        "raw_fetch_id": raw.id,
+        **stats,
+        "errors": envelope.messages(payload),
+        "issues": issues,
+    }
     if gap_windows:
         result["gap_windows"] = len(gap_windows)
         result["gap_stats"] = gap_stats
+    if gap_repair:
+        result["gap_repair"] = gap_repair
+    return result
+
+
+def pages(start: date, end: date) -> list[tuple[date, date]]:
+    """``start``..``end`` (inclusive) in windows of at most
+    ``BRIDGE_PAGE_DAYS`` days, oldest first, each overlapping the previous by
+    a day (the idempotent import eats it) (#490)."""
+    out: list[tuple[date, date]] = []
+    span = timedelta(days=simplefin.BRIDGE_PAGE_DAYS - 1)
+    cursor = start
+    while True:
+        page_end = min(cursor + span, end)
+        out.append((cursor, page_end))
+        if page_end >= end:
+            return out
+        cursor = page_end  # 1-day overlap: the next page starts on this page's last day
+
+
+def _refetch_window(
+    session: Session,
+    connection: Connection,
+    *,
+    access_url: str,
+    start: date,
+    end: date,
+    external_ids: list[str],
+    client: httpx.Client | None,
+) -> tuple[list[RawFetch], dict[str, Any]]:
+    """Fetch ``start``..``end`` (inclusive) for the given feed accounts in
+    ``BRIDGE_PAGE_DAYS`` pages (#490), archive each page, and import it as a
+    gap window (#481): ``window_start=None`` so no live pending is reconciled
+    against a partial slice, and every posted row in it is checked for
+    re-description (``tail_before`` past the page's end). The Bridge gives
+    requests narrowed by ``account`` their own quota; each archived page
+    still counts toward Purser's daily guard. Returns the archived pages and
+    the summed import counts."""
+    raws: list[RawFetch] = []
+    totals: dict[str, Any] = {}
+    for page_start, page_end in pages(start, end):
+        payload = simplefin.fetch_accounts(
+            access_url,
+            start=page_start,
+            end=page_end + timedelta(days=1),  # end-date is exclusive in the protocol
+            include_pending=False,
+            accounts=external_ids,
+            client=client,
+        )
+        raw = _archive_payload(session, connection.id, payload)
+        stats = importer.import_fetch(
+            session, raw, window_start=None, tail_before=page_end + timedelta(days=1)
+        )
+        raws.append(raw)
+        for key, value in stats.items():
+            if isinstance(value, int):
+                totals[key] = totals.get(key, 0) + value
+    return raws, totals
+
+
+def _repair_outages(
+    session: Session,
+    connection: Connection,
+    feed_health: dict[str, Any],
+    *,
+    access_url: str,
+    window_start: date,
+    client: httpx.Client | None,
+) -> dict[str, Any] | None:
+    """Re-fetch what an outage left behind (#481): the accounts whose balance
+    date moved forward from before this sync's window (``feed_health``'s
+    ``repairs``, carried from earlier syncs until done). One focused fetch
+    from the earliest owed date, a day early for overlap, to a day into this
+    sync's window, never further back than the Bridge serves. On a full
+    budget or a transport error the repairs stay owed in the block, so the
+    next sync tries again."""
+    owed: dict[str, str] = dict(feed_health.get("repairs") or {})
+    if not owed:
+        return None
+    # The Bridge's reach counts back from now: the UTC frame, like the sync
+    # window (decision 105).
+    today = datetime.now(UTC).date()
+    floor = today - timedelta(days=simplefin.BRIDGE_MAX_RANGE_DAYS - 1)
+    wanted = min(date.fromisoformat(d) for d in owed.values()) - timedelta(days=1)
+    start = max(wanted, floor)
+    end = window_start + timedelta(days=1)
+    external_ids = sorted(owed)
+    paths = sorted(
+        session.execute(
+            select(Account.path).where(
+                Account.connection_id == connection.id, Account.external_id.in_(external_ids)
+            )
+        ).scalars()
+    )
+    report: dict[str, Any] = {
+        "accounts": [str(p) for p in paths],
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+    }
+    if wanted < floor:
+        # Older than the Bridge reaches: those rows need a manual import.
+        report["unreachable_before"] = floor.isoformat()
+    needed = len(pages(start, end))
+    if _fetches_today(session, connection.id) + needed > simplefin.BRIDGE_MAX_FETCHES_PER_DAY:
+        report["deferred"] = "rate_budget"
+        return report
+    try:
+        with session.begin_nested():
+            raws, stats = _refetch_window(
+                session,
+                connection,
+                access_url=access_url,
+                start=start,
+                end=end,
+                external_ids=external_ids,
+                client=client,
+            )
+    except simplefin.SimpleFinError as exc:
+        log.warning("gap repair fetch failed", connection_id=str(connection.id), error=str(exc))
+        report["deferred"] = "fetch_error"
+        return report
+    feed_health["repairs"] = {}
+    report["raw_fetch_id"] = str(raws[-1].id)
+    report["pages"] = len(raws)
+    report.update(
+        {
+            key: stats[key]
+            for key in (
+                "imported",
+                "skipped",
+                "skipped_before_feed_start",
+                "skipped_masked_duplicate",
+                "skipped_redescribed",
+                "linked_trade_cash",
+            )
+        }
+    )
+    return report
+
+
+def refetch_connection(
+    session: Session,
+    *,
+    connection_id: uuid.UUID,
+    start: date,
+    end: date | None,
+    accounts: list[str] | None,
+    actor_token_id: uuid.UUID | None,
+    client: httpx.Client | None = None,
+) -> dict[str, Any]:
+    """Re-fetch a date range on demand (#481), for repairs a user or agent
+    starts by hand — a gap the automatic repair could not see, such as one
+    from before it existed. ``accounts`` are ledger account paths or ids
+    mapped to this connection (default: all of them). Same guards as sync:
+    the daily budget, a range of at most ``BRIDGE_MAX_RANGE_DAYS`` fetched in
+    ``BRIDGE_PAGE_DAYS`` pages,
+    archive first, idempotent import. Never touches ``last_fetch_at``, the
+    status or the backfill cursor."""
+    connection = get_connection(session, connection_id)
+    if connection.access_url_enc is None:
+        raise FeedError("connection has no access URL to fetch")
+    # The user's dates are ledger days: "today" is the household's (#471).
+    today = clock.ledger_today()
+    end = end or today
+    if end < start:
+        raise FeedError("end must not be before start")
+    if end > today:
+        raise FeedError("end must not be in the future")
+    if (end - start).days + 1 > simplefin.BRIDGE_MAX_RANGE_DAYS:
+        raise FeedError(
+            f"a refetch covers at most {simplefin.BRIDGE_MAX_RANGE_DAYS} days; split the range"
+        )
+    mapped = list(
+        session.execute(
+            select(Account).where(
+                Account.connection_id == connection.id, Account.external_id.is_not(None)
+            )
+        ).scalars()
+    )
+    if accounts:
+        chosen = []
+        for ref in accounts:
+            match = [a for a in mapped if str(a.id) == ref or a.path == ref]
+            if not match:
+                raise FeedError(f"{ref} is not an account mapped to this connection")
+            chosen.append(match[0])
+    else:
+        chosen = mapped
+    if not chosen:
+        raise FeedError("no accounts are mapped to this connection")
+    needed = len(pages(start, end))
+    if _fetches_today(session, connection.id) + needed > simplefin.BRIDGE_MAX_FETCHES_PER_DAY:
+        raise FeedError(
+            f"Bridge rate limit: this range needs {needed} fetch(es) and the day's "
+            f"{simplefin.BRIDGE_MAX_FETCHES_PER_DAY} would be exceeded; try later"
+        )
+    access_url = crypto.decrypt(connection.access_url_enc)
+    try:
+        raws, stats = _refetch_window(
+            session,
+            connection,
+            access_url=access_url,
+            start=start,
+            end=end,
+            external_ids=sorted(str(a.external_id) for a in chosen),
+            client=client,
+        )
+    except simplefin.SimpleFinError as exc:
+        raise FeedError(f"refetch failed: {exc}") from exc
+    raw = raws[-1]
+    result: dict[str, Any] = {
+        "raw_fetch_id": raw.id,
+        "pages": len(raws),
+        "start": start,
+        "end": end,
+        "accounts": sorted(a.path for a in chosen),
+        **{
+            key: stats[key]
+            for key in (
+                "imported",
+                "skipped",
+                "skipped_before_feed_start",
+                "skipped_masked_duplicate",
+                "skipped_redescribed",
+                "linked_trade_cash",
+            )
+        },
+    }
+    audit.record(
+        session,
+        actor_token_id=actor_token_id,
+        action="connection.refetch",
+        entity_type="connection",
+        entity_id=connection.id,
+        after={
+            **result,
+            "raw_fetch_id": str(raw.id),
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+        },
+    )
     return result
 
 
@@ -359,6 +660,7 @@ def backfill_connection(
             "skipped_before_feed_start": 0,
             "skipped_masked_duplicate": 0,
             "skipped_redescribed": 0,
+            "linked_trade_cash": 0,
             "empty_windows": 0,
             "backfill_complete": True,
             "stopped_because": "complete",
@@ -399,6 +701,7 @@ def backfill_connection(
     skipped_before_feed_start = 0
     skipped_masked_duplicate = 0
     skipped_redescribed = 0
+    linked_trade_cash = 0
     empty_windows = 0
     empty_streak = 0
     coverage_start: date | None = None
@@ -409,7 +712,7 @@ def backfill_connection(
 
     for _ in range(n):
         end = cursor + timedelta(days=BACKFILL_WINDOW_OVERLAP_DAYS)
-        start = max(end - timedelta(days=FIRST_SYNC_DAYS), floor)
+        start = max(end - timedelta(days=simplefin.BRIDGE_PAGE_DAYS), floor)
         try:
             payload = simplefin.fetch_accounts(
                 access_url,
@@ -432,6 +735,7 @@ def backfill_connection(
         skipped_before_feed_start += stats["skipped_before_feed_start"]
         skipped_masked_duplicate += stats["skipped_masked_duplicate"]
         skipped_redescribed += stats["skipped_redescribed"]
+        linked_trade_cash += stats["linked_trade_cash"]
 
         windows_fetched += 1
         if coverage_end is None:
@@ -477,6 +781,7 @@ def backfill_connection(
         "skipped_before_feed_start": skipped_before_feed_start,
         "skipped_masked_duplicate": skipped_masked_duplicate,
         "skipped_redescribed": skipped_redescribed,
+        "linked_trade_cash": linked_trade_cash,
         "empty_windows": empty_windows,
         "backfill_complete": connection.backfill_complete,
         "stopped_because": stopped_because,
@@ -554,10 +859,72 @@ def sync_all_active() -> None:
     networth.consume_watermark()
 
 
+def _latest_sync_after(session: Session, connection_id: uuid.UUID) -> dict[str, Any]:
+    row = session.execute(
+        select(AuditLog)
+        .where(
+            AuditLog.action == "connection.sync",
+            AuditLog.entity_type == "connection",
+            AuditLog.entity_id == connection_id,
+        )
+        .order_by(AuditLog.at.desc(), AuditLog.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    return dict((row.before_after or {}).get("after") or {}) if row else {}
+
+
+def latest_sync_gap_fetches(session: Session, connection_id: uuid.UUID) -> list[RawFetch]:
+    """The older pages the latest completed sync fetched before its final one
+    (#490: a first sync and a long-idle catch-up are paged), oldest first;
+    empty when that sync was one page or its audit row is gone."""
+    ids = _latest_sync_after(session, connection_id).get("gap_raw_fetch_ids") or []
+    found = [session.get(RawFetch, uuid.UUID(str(raw_id))) for raw_id in ids]
+    return [raw for raw in found if raw is not None]
+
+
+def latest_sync_fetch(session: Session, connection_id: uuid.UUID) -> RawFetch | None:
+    """The fetch of the connection's most recent completed sync — the one that
+    lists every account and every bank's errors. The newest archived fetch is
+    not always it: an outage repair (#481), a manual refetch or a focused
+    backfill archives a payload narrowed to a few accounts, which would make
+    discovery, health and the map re-import see only those. Falls back to the
+    newest fetch when no sync audit row names one (a pruned trail)."""
+    raw_id = _latest_sync_after(session, connection_id).get("raw_fetch_id")
+    if raw_id:
+        found = session.get(RawFetch, uuid.UUID(str(raw_id)))
+        if found is not None:
+            return found
+    return session.execute(
+        select(RawFetch)
+        .where(RawFetch.connection_id == connection_id)
+        .order_by(RawFetch.fetched_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+
+
+# Account types whose bank-reported available balance means something
+# (#483): spendable cash, or the credit left on a card. A brokerage or loan
+# often reports 0.00 there, which means nothing.
+AVAILABLE_BALANCE_TYPES = ("checking", "savings", "cash", "credit_card")
+
+
+def _available(sf_account: dict[str, Any], mapped: Account | None) -> str | None:
+    """The bank's available balance when it says something: present,
+    different from the balance, and on a cash or card account (unmapped
+    accounts show it whenever it differs, since their type is unknown)."""
+    available = sf_account.get("available-balance")
+    if available is None or str(available) == str(sf_account.get("balance")):
+        return None
+    if mapped is not None and mapped.type not in AVAILABLE_BALANCE_TYPES:
+        return None
+    return str(available)
+
+
 def discover_accounts(session: Session, connection_id: uuid.UUID) -> list[dict[str, Any]]:
     """SimpleFIN accounts from the latest archived payload, with their current
-    Purser mapping and — for mapped cash/card accounts — the live reported-vs-
-    ledger drift (the wizard and Config → SimpleFIN consume this).
+    Purser mapping and — for mapped cash/card accounts, and a hand-tracked
+    brokerage account whose feed balance is its cash (decision 103) — the live
+    reported-vs-ledger drift (the wizard and Config → SimpleFIN consume this).
 
     The drift here is ungated and recomputed on every read: the UI shows the
     current raw comparison immediately, while the event stream stays behind
@@ -567,18 +934,16 @@ def discover_accounts(session: Session, connection_id: uuid.UUID) -> list[dict[s
     ``drift_basis_pinned`` and the history's own pick in
     ``drift_basis_learned``."""
     connection = get_connection(session, connection_id)
-    latest = session.execute(
-        select(RawFetch)
-        .where(RawFetch.connection_id == connection.id)
-        .order_by(RawFetch.fetched_at.desc())
-        .limit(1)
-    ).scalar_one_or_none()
+    latest = latest_sync_fetch(session, connection.id)
     if latest is None:
         raise FeedError("no fetches yet; sync the connection first")
 
     blocks = drift.recent_blocks(session, connection.id)  # basis history, read once
+    payload = crypto.decrypt_json(latest.payload_enc)
+    ambiguous = envelope.duplicate_account_ids(payload)
     discovered = []
-    for sf_account in crypto.decrypt_json(latest.payload_enc).get("accounts", []):
+    for sf_account in payload.get("accounts", []):
+        institution = envelope.institution_of(payload, sf_account)
         mapped = session.execute(
             select(Account).where(
                 Account.connection_id == connection.id,
@@ -587,16 +952,19 @@ def discover_accounts(session: Session, connection_id: uuid.UUID) -> list[dict[s
         ).scalar_one_or_none()
         comp = (
             drift.live_compare(session, account=mapped, sf_account=sf_account, blocks=blocks)
-            if mapped is not None
+            if mapped is not None and sf_account["id"] not in ambiguous
             else None
         )
         discovered.append(
             {
                 "external_id": sf_account["id"],
                 "name": sf_account.get("name"),
-                "org": (sf_account.get("org") or {}).get("name"),
+                "org": institution.name if institution else None,
+                "conn_id": institution.conn_id if institution else None,
+                "ambiguous": sf_account["id"] in ambiguous,
                 "currency": sf_account.get("currency", "USD"),
                 "balance": sf_account.get("balance"),
+                "available_balance": _available(sf_account, mapped),
                 "balance_date": drift.parse_balance_date(sf_account.get("balance-date")),
                 "mapped_account_id": mapped.id if mapped else None,
                 "mapped_account_path": mapped.path if mapped else None,
@@ -706,12 +1074,11 @@ def map_account(
         after={"external_id": external_id, "connection_id": str(connection.id)},
     )
 
-    latest = session.execute(
-        select(RawFetch)
-        .where(RawFetch.connection_id == connection.id)
-        .order_by(RawFetch.fetched_at.desc())
-        .limit(1)
-    ).scalar_one_or_none()
+    # The latest sync's every page (#490), oldest first: its older pages are
+    # gap windows (no pending reconciliation), its final page as before.
+    for gap_raw in latest_sync_gap_fetches(session, connection.id):
+        importer.import_fetch(session, gap_raw, window_start=None)
+    latest = latest_sync_fetch(session, connection.id)
     if latest is not None:
         importer.import_fetch(session, latest)
     # Mapping a card/loan brings its history in (and lets the auto-linker
@@ -727,12 +1094,8 @@ def connection_health(session: Session) -> list[dict[str, Any]]:
     rows = session.execute(select(Connection).order_by(Connection.created_at)).scalars()
     out = []
     for c in rows:
-        latest = session.execute(
-            select(RawFetch)
-            .where(RawFetch.connection_id == c.id)
-            .order_by(RawFetch.fetched_at.desc())
-            .limit(1)
-        ).scalar_one_or_none()
+        latest = latest_sync_fetch(session, c.id)
+        payload = crypto.decrypt_json(latest.payload_enc) if latest else {}
         out.append(
             {
                 "id": c.id,
@@ -740,9 +1103,9 @@ def connection_health(session: Session) -> list[dict[str, Any]]:
                 "status": c.status,
                 "created_at": c.created_at,
                 "last_fetch_at": c.last_fetch_at,
-                "last_errors": (
-                    crypto.decrypt_json(latest.payload_enc).get("errors", []) if latest else []
-                ),
+                "last_errors": envelope.messages(payload),
+                "last_issues": [issue.as_dict() for issue in envelope.issues(payload)],
+                "protocol_version": envelope.version(payload) if latest else None,
                 "fetches_today": _fetches_today(session, c.id),
                 "backfill_cursor": c.backfill_cursor,
                 "backfill_complete": c.backfill_complete,

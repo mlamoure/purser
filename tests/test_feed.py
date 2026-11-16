@@ -267,6 +267,11 @@ class FeedHarness:
     def __init__(self, client: TestClient, monkeypatch: pytest.MonkeyPatch):
         self.client = client
         self.monkeypatch = monkeypatch
+        # A first sync reaches 88 days in two 45-day pages (#490). The static
+        # mocks here hand every row to every request, so they cannot express
+        # paging: the harness keeps a first sync to one page. Paging has its
+        # own tests (test_feed_paging.py) with a bank that honours windows.
+        monkeypatch.setattr(service, "FIRST_SYNC_DAYS", simplefin.BRIDGE_PAGE_DAYS - 1)
         assert client.post("/auth/setup", json=ADMIN_CREDENTIALS).status_code == 201
 
     def use_payload(self, payload: dict) -> None:
@@ -452,7 +457,7 @@ sf_transactions = st.lists(
 
 
 class TestLongIdleGapSync:
-    """#218: a sync range wider than BRIDGE_MAX_RANGE_DAYS is paged like
+    """#218/#490: a sync range wider than BRIDGE_PAGE_DAYS is paged like
     backfill — older gap windows first (window_start=None), then the final
     bounded window that reconciles pendings as usual."""
 
@@ -467,16 +472,18 @@ class TestLongIdleGapSync:
         with migrated_engine.begin() as conn:
             conn.execute(text("UPDATE connections SET last_fetch_at = now() - interval '200 days'"))
         result = harness.sync(connection_id)
-        # 200d idle + 7d resync overlap = 207d: two 90d gap windows + final.
-        assert result["gap_windows"] == 2
-        assert len(backend.calls) == 3
+        # 200d idle + 7d resync overlap = 207d: four 45d gap windows (#490,
+        # each overlapping the next by a day) + the final window.
+        assert result["gap_windows"] == 4
+        assert len(backend.calls) == 5
         for start, end in backend.calls[:-1]:
             assert start is not None and end is not None
-            assert (end - start).days <= simplefin.BRIDGE_MAX_RANGE_DAYS
+            assert (end - start).days <= simplefin.BRIDGE_PAGE_DAYS
         final_start, final_end = backend.calls[-1]
         assert final_end is None  # the live window stays unbounded at the end
         assert final_start is not None
-        assert (date.today() - final_start).days <= simplefin.BRIDGE_MAX_RANGE_DAYS
+        # Open-ended, it runs to "now": whole days stay under the span.
+        assert (date.today() - final_start).days <= simplefin.BRIDGE_PAGE_DAYS - 1
 
     def test_short_gap_stays_a_single_fetch(self, harness: FeedHarness) -> None:
         backend = RecordingBackend(backfill=False)
@@ -1102,7 +1109,10 @@ class TestMatchedPendingLifecycle:
         first = self._instances(harness, schedule["id"])[0]
         harness.use_payload(payload_of([_bill_pending("-80.00")]))
         harness.sync(connection_id)
-        assert harness.client.post("/matching/run").json()["auto_matched"] == 1
+        assert harness.client.post("/matching/run").json()["proposed"] == 1
+        proposed = self._match_of(migrated_engine, first["transaction_id"])
+        accepted = harness.client.post(f"/matching/{proposed.id}/confirm")
+        assert accepted.status_code == 200, accepted.text
         pending_id = self._match_of(migrated_engine, first["transaction_id"]).posted_id
 
         # Posted amount wins: a match to a still-PENDING row does not move the
@@ -1268,7 +1278,10 @@ class TestMatchedPendingLifecycle:
         first = self._instances(harness, schedule["id"])[0]
         harness.use_payload(payload_of([_bill_pending("-80.00")]))
         harness.sync(connection_id)
-        assert harness.client.post("/matching/run").json()["auto_matched"] == 1
+        assert harness.client.post("/matching/run").json()["proposed"] == 1
+        proposed = self._match_of(migrated_engine, first["transaction_id"])
+        accepted = harness.client.post(f"/matching/{proposed.id}/confirm")
+        assert accepted.status_code == 200, accepted.text
         match = self._match_of(migrated_engine, first["transaction_id"])
         assert match.state == "confirmed"
         harness.client.post("/schedules/materialize")
@@ -2569,10 +2582,10 @@ class TestBackfill:
         assert result["windows_fetched"] == 3
         assert result["stopped_because"] == "windows_exhausted"
         assert len(backend.calls) == 3
-        # Every window is a 90-day range (bridge cap).
+        # Every window is one 45-day page (the Bridge's recommended span, #490).
         for start, end in backend.calls:
             assert start is not None and end is not None
-            assert (end - start).days == 90
+            assert (end - start).days == simplefin.BRIDGE_PAGE_DAYS
         # Consecutive windows overlap by exactly one day...
         for (s0, _e0), (_s1, e1) in zip(backend.calls, backend.calls[1:], strict=False):
             assert e1 == s0 + timedelta(days=1)
@@ -2766,7 +2779,9 @@ class TestBackfill:
         harness.map_new(cid, "Demo Checking", "assets.checking")
         harness.sync(cid)
 
-        overlap_date = datetime.now(UTC).date() - timedelta(days=150)
+        # Inside the first backfill page: [cursor - 45d, cursor + 1d], the
+        # cursor being the first sync's reach behind the earliest fetch.
+        overlap_date = datetime.now(UTC).date() - timedelta(days=service.FIRST_SYNC_DAYS + 20)
         _seed_manual_qif_row("assets.checking", overlap_date, "-33.00")
 
         backend = RecordingBackend()  # empty windows; overlap is about EXISTING rows
@@ -2817,6 +2832,7 @@ class TestBackfill:
             "backfill_complete",
             "stopped_because",
             "qif_overlap",
+            "linked_trade_cash",
         }
         assert body["windows_fetched"] == 2
         assert harness.health_of(cid)["backfill_cursor"] == body["coverage_start"]

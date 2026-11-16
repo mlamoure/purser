@@ -20,13 +20,13 @@ image.
 
 ```bash
 mkdir purser && cd purser
-curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.1/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.2/docker-compose.yml
 PURSER_ENCRYPTION_KEY=keygen docker compose pull
 PURSER_ENCRYPTION_KEY=keygen docker compose run --rm --no-deps purser keygen
 ```
 
-The compose file belongs to the latest release, 2026.11.1, and names its image,
-`ghcr.io/mlamoure/purser:v2026.11.1` (linux/amd64 and linux/arm64). Every
+The compose file belongs to the latest release, 2026.11.2, and names its image,
+`ghcr.io/mlamoure/purser:v2026.11.2` (linux/amd64 and linux/arm64). Every
 release publishes its own at the same address under its tag (`vYYYY.M.PATCH`).
 The temporary `keygen` value satisfies Compose interpolation for these utility
 commands. The last one generates a key without starting the app or connecting
@@ -73,6 +73,10 @@ everything else:
 
 SimpleFIN setup tokens come from your SimpleFIN Bridge account page and are
 one-time secrets — paste them only into the wizard, never into a chat.
+If the first fetch fails or times out after the token is claimed, keep the
+wizard open and select **Connect & fetch** again. It retries the saved
+connection without claiming the token twice. You can also skip the feed and
+finish setup; errors appear as announcements for assistive technology.
 
 ## Build from source
 
@@ -93,4 +97,4 @@ that release's published image until `docker compose pull purser`.
 - [Connect an agent](../../how-to/connect-an-agent/) — client config and operating conventions.
 - [Configuration](../../reference/configuration/) — every `PURSER_*` variable.
 - [Backup and restore](../../how-to/backup-restore/) — set this up before the books matter.
-- [The ledger](../../explanation/ledger/) — why the books cannot be silently wrong.
+- [The ledger](../../explanation/ledger/) — balanced postings, source records and correction history.

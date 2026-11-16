@@ -8,7 +8,7 @@ description: >-
   forecasts) or record bills/transactions. Bootstraps agent access with a
   read + write token — the agent acts with the user's authority, and can
   request its own access but can never mint or widen it.
-version: 1.8.2
+version: 1.10.1
 ---
 
 # Purser — agent operations skill
@@ -35,7 +35,7 @@ expected output of every check. In short:
 
    ```bash
    mkdir purser && cd purser
-   curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.1/docker-compose.yml
+   curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.2/docker-compose.yml
    PURSER_ENCRYPTION_KEY=keygen docker compose pull
    ```
 
@@ -180,5 +180,73 @@ An admin-scoped API token can mint tokens; do not give routine agents that scope
   Pass the total `cost_basis` whenever the page shows it. Omitted, a
   re-count of an unchanged count keeps the basis, a changed count makes it
   unknown, and 0 shares have none.
+- Sales on such an account move cash: `record_sale(account, symbol,
+  quantity, price, trade_date)` (write scope) puts the net proceeds on the
+  account, booked against the system account `equity.securities` (never
+  income). Run it with `dry_run=true` first and tell the human the shares
+  before/after and the cash. An error led by `cash_already_recorded` (or a
+  dry run's `already_recorded`) means the account already shows a row of
+  that amount: if it is the sale's cash, call again with `transaction_id` set
+  to that row's id to link it; if it is a different payment of the same
+  amount, call again with `force_cash=true` (audited). `proceeds_to="none"`
+  is for a sale with no cash (shares withheld for tax). If the broker's row
+  of that cash arrives after you recorded the sale, the import links it in
+  place of Purser's own row by itself; do not reverse or re-record the sale
+  for it. Until a sale's cash lands, `list_holdings` shows it as
+  `in_transit` inside the position's `market_value` (a line with quantity 0
+  after a sale of every share): it is the sale's cash, not a gain.
+  A row marked `securities_trade` (category `equity.securities`; in
+  `review_batch` it also carries `locked: {event_id, position_id}`, the trade
+  holding it) moves only with its trade — never
+  recategorize it or `confirm_transfer` it. If the trade is right, just
+  `mark_reviewed` it; if it is wrong (a sale recorded twice, at the wrong
+  price or date), `reverse_position_event(event_id)` — the `event_id` from
+  `record_sale`'s answer — undoes the shares and the cash, then record it
+  again. A closed position is reopened first with
+  `reopen_position(position_id)` (write scope; the `position_id` is in
+  `record_sale`'s answer and in the "position is closed" refusal), then
+  closed again by a person once corrected.
+- Tax lots and equity awards on a hand-tracked account (write scope for
+  writes). Load a broker's lot list with `upsert_lots(account, as_of,
+  captured_at, completeness, positions=[{symbol, lots: [{external_ref,
+  acquired_on, quantity, basis_per_share | cost_basis, plan, acquisition}]}])`:
+  `quantity` is the shares REMAINING in each lot on as_of; omit the basis when
+  the page does not show it (never send 0); give `external_ref` when the
+  broker shows a lot reference, otherwise a stable `ordinal` for lots of one
+  date and plan. `completeness` is `complete` only when the list is the
+  broker's whole list for that symbol. It is a dry run by default: tell the
+  human the counts and conflicts, then commit with `dry_run=false` and
+  `expect_hash` set to the answer's `plan_hash`, sending the SAME arguments
+  (the same `captured_at`). `preview_stale` means something changed: dry-run
+  again. Conflicts are never applied and never guessed away: a
+  `quantity_decrease` or `missing_from_capture` means a sale or transfer out
+  is not recorded yet — record it naming the lot (`record_sale(...,
+  lots=[{lot: <reference or lot_id>, quantity}])`, or `record_transfer_out`
+  when there was no sale), then capture again; never invent a price.
+  Re-sending an applied capture is a no-op. On a position that tracks lots
+  every `record_sale` names its lots (the broker's own lot choice when shown;
+  else ask the human or use `lot_method`). Awards: `upsert_awards` (grants
+  and the vests still to come; same contract), then `record_vest(account,
+  award=<grant reference or award_id>, vest_date, gross_quantity,
+  withheld_quantity, fmv)` when a vest happens. If the lot list already
+  holds that vest's lot, pass `lot=<its reference or lot_id>` to link it
+  (no shares added); a `possible_duplicate` refusal means exactly that. A
+  vest whose every unit was withheld is recorded with withheld = gross (no
+  shares). A refusal that the units exceed the grant means the figures
+  disagree with the broker's: ask, do not adjust them. `unvested_known:
+  false` / `complete: false` means the broker never gave a vested count:
+  say the unvested total is not known rather than quoting the scheduled
+  units as all of it. `list_awards` pages: follow `next_cursor` (an award's
+  schedule pages the same way). A vest that will never happen is forfeited
+  with `update_award_vest`; it counts once even when the broker also reports
+  it as cancelled.
+  To correct a wrong buy or vest, reverse it (`reverse_position_event`) and
+  record it again; the same lot reference may be reused.
+  `list_lots`, `list_awards` and `realized_gains` read it back: unvested
+  units are never net worth, and `capture` (when the lots were read) is not
+  the price date. References are withheld from your answers unless you pass
+  `include=["external_ids"]`; you can always pass them as input. Fix a
+  wrongly adopted lot with `void_lot` (after reversing any sale that drew on
+  it), a wrong basis with `correct_lot_basis`.
 - Sync respects SimpleFIN Bridge limits (24 fetches/day); `trigger_sync`
   when the user asks for fresh data, not on every question.

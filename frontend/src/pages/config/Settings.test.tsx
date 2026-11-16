@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { apiMock, mockApi, ok } from "../../test/api";
+import { apiMock, fail, mockApi, ok } from "../../test/api";
 import { renderWithProviders } from "../../test/render";
 import Settings from "./Settings";
 
@@ -23,6 +23,8 @@ const CONFIG = {
     oidc_auto_provision: false,
     price_provider: "none",
     price_stale_days: 7,
+    feed_stale_days: 4,
+    timezone: "UTC",
   },
   overridden: [],
   ai_api_key_set: false,
@@ -51,5 +53,37 @@ describe("Config, Settings: privacy with agents (#437)", () => {
         body: { privacy_purchase: true, privacy_amount: true },
       }),
     );
+  });
+});
+
+describe("Config, Settings: household time zone (#471)", () => {
+  it("shows the effective zone and saves a new one", async () => {
+    mockApi({ "GET /config": ok(CONFIG), "PUT /config": ok(CONFIG) });
+    const { user } = renderWithProviders(<Settings />);
+    const input = await screen.findByLabelText("Household time zone");
+    expect(input).toHaveValue("UTC");
+    await user.clear(input);
+    await user.type(input, "America/New_York");
+    const card = screen.getByRole("heading", { name: "Time zone" }).closest("div")!;
+    await user.click(within(card).getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(apiMock.PUT).toHaveBeenCalledWith("/config", {
+        body: { timezone: "America/New_York" },
+      }),
+    );
+  });
+
+  it("shows the server's refusal of an unknown zone", async () => {
+    mockApi({
+      "GET /config": ok(CONFIG),
+      "PUT /config": fail(422, "timezone: must be an IANA time zone name"),
+    });
+    const { user } = renderWithProviders(<Settings />);
+    const input = await screen.findByLabelText("Household time zone");
+    await user.clear(input);
+    await user.type(input, "Mars/Olympus_Mons");
+    const card = screen.getByRole("heading", { name: "Time zone" }).closest("div")!;
+    await user.click(within(card).getByRole("button", { name: "Save" }));
+    expect(await within(card).findByText(/IANA time zone/)).toBeInTheDocument();
   });
 });

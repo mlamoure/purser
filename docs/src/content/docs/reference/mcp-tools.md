@@ -24,7 +24,15 @@ holdings market value on top of the postings basis (method
 balances alone (method 'postings'; register semantics: chain-head
 pending+posted rows). as_of is an ISO date, default today; 0 before the
 account's first activity; closed accounts answer their whole history.
-For a balance over TIME, call balance_history instead of looping this.
+bank_snapshot carries the latest bank-reported and available balances,
+their currency, source timestamp/precision, ingestion time and freshness,
+under the same read scope. Available balance is separate (e.g. remaining
+credit on a card). Its comparison reports live posted and pending-inclusive
+totals over ALL recorded dates, the effective/learned/pinned basis and exact
+bank-minus-ledger difference; matches_either_basis is the separate alert
+policy. Null means unknown/unavailable, never zero. Even with as_of, this
+snapshot is LATEST, not historical bank truth. For a balance over TIME,
+call balance_history instead of looping this.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -72,9 +80,14 @@ Posted cross-account pairs within 3 days that carry a transfer signal
 (a transfer keyword, the counterparty account's name, a transfer_link
 rule, or an instance of an active transfer schedule) auto-link at import
 and in the nightly sweep; pairs WITHOUT a signal stay candidates and need
-this explicit confirm. A row already matched to an expected transfer
-still pairs with that transfer's other side, and the match moves onto
-the merged transfer.
+this explicit confirm (a recent pair of POSTED rows also waits in
+list_suggestions as a kind='transfer_pair' card, which decide_suggestion
+accepts the same way or rejects as not a transfer; confirming the pair
+here accepts its card — a pair with a pending row has no card). A row
+already matched to an expected transfer still pairs with that transfer's
+other side, and the match moves onto the merged transfer. An id of a row
+corrected since you read it (the categorize pass corrects uncategorized
+posted rows) is followed to its replacement, the same bank line.
 
 Split loan payment: when the cash leg pays more than the principal leg
 the loan account shows (the rest is interest or fees), pass
@@ -97,6 +110,20 @@ count when activating the rule; reject it to never see it again.
 | `outgoing_id` | string | yes | — |
 | `incoming_id` | string | yes | — |
 | `remainder_category` | string \| null | no | `null` |
+
+## correct_lot_basis
+
+Set or correct a lot's basis (write scope): per share, total for the
+lot's quantity, or both agreeing; neither sets it back to unknown.
+Refused while a disposition drew on the lot (its basis came from it):
+reverse those, correct, record them again.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `lot_id` | string | yes | — |
+| `basis_per_share` | string \| null | no | `null` |
+| `cost_basis` | string \| null | no | `null` |
+| `note` | string \| null | no | `null` |
 
 ## create_schedule
 
@@ -132,6 +159,7 @@ instance once.
 | `rrule` | string | yes | — |
 | `amount` | string \| null | no | `null` |
 | `amount_type` | string | no | `"fixed"` |
+| `date_mode` | string | no | `"fixed"` |
 | `payee` | string \| null | no | `null` |
 | `category` | string \| null | no | `null` |
 | `dtstart` | string \| null | no | `null` |
@@ -170,11 +198,17 @@ decimal string, window_days 0 to 14, effective_from YYYY-MM-DD). A match
 suggestion: accept confirms the proposal (match{id,state,variance} in
 the result) and reject rejects it for good — the matcher never proposes
 that pair again; it has nothing to edit, and a proposal already gone
-withdraws the suggestion with an error. reject is durable —
-reject_scope=counterparty means never suggest this payee/counterparty on
-this account again (for a transfer_link: this account pair, any payee;
-a match rejects exactly); snooze hides it until snooze_until
-(YYYY-MM-DD, default 30 days). Nothing auto-accepts.
+withdraws the suggestion with an error. A transfer_pair suggestion:
+accept merges the two rows into one transfer, as confirm_transfer does
+(transfer{merged_transaction_id, suggestion_id} — the transfer_link rule
+the confirm proposed, when it proposed one), and reject means "not a
+transfer": nothing ever links that pair automatically; it has nothing to
+edit, and a pair whose rows moved on withdraws it with an error. reject
+is durable — reject_scope=counterparty means never suggest this
+payee/counterparty on this account again (for a transfer_link: this
+account pair, any payee; a match or transfer_pair rejects exactly);
+snooze hides it until snooze_until (YYYY-MM-DD, default 30 days).
+Nothing auto-accepts.
 
 include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
 
@@ -228,6 +262,17 @@ not a schedule: decide it with decide_suggestion.
 | `schedule_id` | string | yes | — |
 | `action` | string | no | `"end"` |
 
+## feed_status
+
+Bank feed health in one look: one line per bank login (status ok,
+needs_login — log in again at the bank through SimpleFIN Bridge — or
+error, with how many accounts it delivers and how many feed a ledger
+account), then only the accounts that need attention: not_connected (a
+feed account no ledger account takes, e.g. a newly opened one), stale Nd
+(the bank balance has not updated for N days), an act.* code (the bank
+failed to deliver it), ambiguous_id. Account numbers are never shown.
+Use it for "did a new account show up?" or "which bank needs me?".
+
 ## forecast_balance
 
 Deterministic balance projection with every move explained. The
@@ -243,7 +288,10 @@ names a bank row that is in the balance (matches_pending_net, their net,
 only when nonzero; list_unmatched names each one's proposed_posted_id
 and match on that pair confirms it). Events flagged projected are rule
 occurrences past the materialized horizon (no instance row yet);
-overdue ones are still due and land today. An event with basis
+overdue ones are still due and land today. Schedule events carry certainty
+status and true-only amount_estimated/date_estimated flags (omitted flags
+mean false); the daily resource carries full evidence and original values.
+An event with basis
 'statement' carries a card statement balance someone recorded
 (record_statement_balance) and one with 'override' an amount the user
 set; without basis the amount is the schedule's own (fixed or an
@@ -272,6 +320,27 @@ include: fields to return although the user's privacy defaults withhold them —
 | `materiality` | string \| null | no | `null` |
 | `include` | array of string \| null | no | `null` |
 
+## get_schedule_occurrence
+
+Read one occurrence's independent amount/date certainty, evidence,
+immutable original estimate and actual link with amount/timing variance.
+Address it by transaction_id (search_transactions), or by schedule_id
+(list_schedules) plus occurrence_date for a projected slot with no
+instance yet (slot.projected). The first evidence write retains its original
+projection; untouched projections have original null. confirmed means an upcoming
+obligation, never posted cash. pending_review means a proposed match,
+not a confirmation. A backfilled original is the first retained snapshot,
+not a reconstructed historical estimate. No bank fetch or writes.
+
+include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `transaction_id` | string \| null | no | `null` |
+| `schedule_id` | string \| null | no | `null` |
+| `occurrence_date` | string \| null | no | `null` |
+| `include` | array of string \| null | no | `null` |
+
 ## get_transaction
 
 Full detail for one transaction: postings and provenance links.
@@ -290,7 +359,8 @@ accounts report their latest valuation instead of the postings sum
 (marked balance_method='valuation'); brokerage accounts add their latest
 holdings market value on top of it (balance_method='postings+holdings').
 Both carry the overlay's balance_as_of date. A reconciled account carries
-`reconciliation`: its latest reconciled date and basis, and whether the
+`reconciliation`: its latest reconciled date, basis and component (cash
+only for brokerage, balance for other accounts), and whether the
 ledger still matches the statement on that date (difference = ledger
 minus statement target, ledger sign; nonzero means a later write moved
 it).
@@ -300,6 +370,33 @@ include: fields to return although the user's privacy defaults withhold them —
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `include_balances` | boolean | no | `true` |
+| `include` | array of string \| null | no | `null` |
+
+## list_awards
+
+Equity awards on a brokerage account (read scope), a page at a time:
+each award (award_id, granted, cancelled, vested, unvested,
+unvested_known, unscheduled — unvested units with no vest date yet — the
+next vest, due_unrecorded: scheduled vests on or before today not yet
+recorded with record_vest), and on the first page the unvested units per
+symbol, valued at the latest close — informational: unvested units are
+never in net worth, balances or holdings. Pass award (an award_id, or
+the grant reference) for that award's vest schedule (vest_id, date,
+units, status), paged the same way — the vest_id is what
+update_award_vest takes. unvested_known false means the broker gave no
+vested count and the schedule does not account for every unit: the
+figure is the scheduled units only, not the whole balance. capture says
+when the broker's awards were last captured. next_cursor continues the
+same listing (same account, symbol and award).
+
+include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `account` | string | yes | — |
+| `symbol` | string \| null | no | `null` |
+| `award` | string \| null | no | `null` |
+| `cursor` | string \| null | no | `null` |
 | `include` | array of string \| null | no | `null` |
 
 ## list_categories
@@ -333,7 +430,11 @@ prices) is valued from a close recorded with record_price under its
 ticker: it shows price, price_as_of and price_source; with no recorded
 close it counts in no_price. One whose feed symbol is no ticker at all
 (a description) counts in unpriceable and is marked unpriceable: no
-close can value it, so never record one for it.
+close can value it, so never record one for it. in_transit on a manual
+line is a trade's cash that has not landed on the account yet (a sale's
+proceeds, or minus a cash-funded buy's cost), already inside its
+market_value until the cash date; a line with quantity 0 is such cash
+after a sale of every share.
 
 Pass account (UUID or path) for that account's positions, in symbol
 order, each with its cost_basis (null when unknown), one page at a time:
@@ -344,12 +445,40 @@ newest set when called: a position added meanwhile with a symbol before
 the cursor is not listed, and the daily price job can move later pages
 to a newer set. With account named, totals.market_value is that account's own
 value; a closed account shows its last set with closed: true and totals
-0.00 (net worth no longer counts it).
+0.00 (net worth no longer counts it). An account with equity awards
+adds unvested: per symbol, the units not yet vested, their value at the
+latest close and the next vest — informational, never inside
+market_value, totals or net worth. Lot detail is list_lots; awards are
+list_awards.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `account` | string \| null | no | `null` |
 | `cursor` | string \| null | no | `null` |
+
+## list_lots
+
+A hand-tracked position's tax lots (read scope), oldest first, a page
+at a time, with its lot summary: shares held, shares in lots,
+unallocated shares (outside every lot), shares whose lot has no basis,
+and cost_basis — the lots' basis, null unless every share has one (never
+an average). capture says when the broker's lots were last captured
+(as_of, captured_at, completeness): capture freshness, distinct from
+price_as_of, the quote's date. Each lot: lot_id (to name it in
+record_sale, record_transfer_out or void_lot), acquired_on, acquisition,
+status, remaining, basis_per_share (null: unknown), and term_if_sold_today
+(long only after the one-year anniversary). status is open (default),
+closed, voided, reversed or all. next_cursor pages.
+
+include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `account` | string | yes | — |
+| `symbol` | string | yes | — |
+| `status` | string | no | `"open"` |
+| `cursor` | string \| null | no | `null` |
+| `include` | array of string \| null | no | `null` |
 
 ## list_memories
 
@@ -428,13 +557,20 @@ confirm_transfer proposed for that account pair, scoped to the payee and
 its aliases (evidence = the confirmed pairs). kind='match': an open match
 proposal — an expected bill paired with a bank row (draft = both rows'
 dates and amounts on `account`, and the variance; confidence = the match
-score). Omit kind for all. Each row carries a one-line headline, the
-typed draft accept would apply unchanged, an evidence summary (count,
-first/last, amount range, cadence, and the proposing agent's note if it
-left one), and a confidence (null for transfer links and agent
-proposals, which nothing scored). Snoozed rows are hidden until their
-date. Decide with decide_suggestion; GET /suggestions/{id} has the full
-evidence.
+score). kind='transfer_pair': two bank rows of exactly opposite amounts
+on two accounts, close in date, that nothing links automatically — is it
+one transfer? (draft = both rows, from_account/to_account, amount, the
+dates and both bank texts). Omit kind for all. Each row carries a
+one-line headline, the typed draft accept would apply unchanged, an
+evidence summary (count, first/last, amount range, latest amount and
+possible price change, cadence, and the
+proposing agent's note if it left one), and a confidence (null for
+transfer links, transfer pairs and agent proposals, which nothing
+scored). Snoozed rows are hidden until their date. `open` counts every
+open row and `open_by_kind` each kind's, so `limit` never hides how
+many wait; `offset` skips the rows of earlier pages to reach the rest.
+Decide with decide_suggestion; GET /suggestions/{id} has the
+full evidence.
 
 include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
 
@@ -444,6 +580,7 @@ include: fields to return although the user's privacy defaults withhold them —
 | `account` | string \| null | no | `null` |
 | `include_snoozed` | boolean | no | `false` |
 | `limit` | integer | no | `10` |
+| `offset` | integer | no | `0` |
 | `include` | array of string \| null | no | `null` |
 
 ## list_unmatched
@@ -650,6 +787,22 @@ include: fields to return although the user's privacy defaults withhold them —
 | `uri` | string | yes | — |
 | `include` | array of string \| null | no | `null` |
 
+## realized_gains
+
+Realized gains of an account's lot dispositions in a calendar year
+(read scope), by term: short, or long (sold after the one-year
+anniversary). Totals sum only dispositions with both a basis and
+proceeds; shares lacking either are counted (unknown_basis_quantity,
+unknown_proceeds_quantity), never valued as 0, and shares sold from
+outside every lot are unallocated_quantity. Informational: Purser
+computes no tax.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `account` | string | yes | — |
+| `year` | integer | yes | — |
+| `symbol` | string \| null | no | `null` |
+
 ## reconcile_account
 
 Reconcile a checking, savings, cash or credit-card account to a
@@ -664,8 +817,11 @@ nothing is posted and the clean reconcile is still recorded. dry_run=true
 answers the same without writing. Retrying the same date and balance
 returns created=false while it still holds; once a backdated change has
 moved the balance on that date it fails with the difference.
-list_accounts shows whether each account's latest reconciliation still
-holds.
+For a manual brokerage account, component="cash" is REQUIRED and
+statement_balance must be cash only, excluding securities and unvested
+awards. Holdings and prices never change. Other accounts use the default
+component="balance". Results and list_accounts identify which component
+was reconciled; list_accounts checks whether it still holds.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -674,6 +830,7 @@ holds.
 | `statement_balance` | string | yes | — |
 | `basis` | string | no | `"posted"` |
 | `dry_run` | boolean | no | `false` |
+| `component` | string | no | `"balance"` |
 
 ## record_position
 
@@ -729,6 +886,58 @@ forward and turns stale after the staleness threshold).
 | `date` | string | yes | — |
 | `close` | string | yes | — |
 
+## record_sale
+
+Record a sale of quantity shares of symbol at price on trade_date
+(YYYY-MM-DD, today or earlier) on a manually tracked brokerage account
+(write scope). The net proceeds (quantity x price - fees, rounded to
+the cent) land on the account's cash on trade_date, the day the shares
+leave the holdings (settle_date posts them on a later settlement date
+instead), booked against the system account equity.securities — never
+income. proceeds_to='none' records the sale without cash (shares
+withheld for tax). If the account already shows a posted row of exactly
+that amount around the settlement date (the broker's own "SOLD" cash),
+the call is refused with cash_already_recorded naming that row: when it
+is the sale's cash, call again with transaction_id set to that row's id
+to link it (a linked row must hold exactly the net proceeds, to the
+cent); when it is a different payment of the same amount, call again
+with force_cash=true to post the sale's cash as well (audited). When the
+broker's own row of exactly that cash arrives AFTER the sale, the import
+links it in place of Purser's row by itself: nothing to repair. A sale
+that would leave the position below zero on
+any date is refused, naming the date. dry_run=true answers with what the
+call would do — shares before and after, the cash and its settlement
+date, and already_recorded when the double-count check finds the cash —
+and writes nothing. quantity, price and fees are decimal strings.
+
+A position that tracks lots (list_lots) needs the lots the sale drew on:
+lots [{lot, quantity}] where lot is a lot_id from list_lots or the
+broker's lot reference, or 'unallocated' for shares outside every lot;
+or lot_method fifo (oldest first), lifo or hifo (highest basis per share
+first). Use the broker's own lot choice when it shows one. A method never
+takes unallocated shares. The answer's lots summarizes the dispositions
+(basis, proceeds and realized gain where known, terms).
+
+include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `account` | string | yes | — |
+| `symbol` | string | yes | — |
+| `quantity` | string | yes | — |
+| `price` | string | yes | — |
+| `trade_date` | string | yes | — |
+| `settle_date` | string \| null | no | `null` |
+| `fees` | string \| null | no | `null` |
+| `proceeds_to` | string | no | `"cash"` |
+| `transaction_id` | string \| null | no | `null` |
+| `note` | string \| null | no | `null` |
+| `dry_run` | boolean | no | `false` |
+| `force_cash` | boolean | no | `false` |
+| `lots` | array of object \| null | no | `null` |
+| `lot_method` | string \| null | no | `null` |
+| `include` | array of string \| null | no | `null` |
+
 ## record_statement_balance
 
 Record a credit card's statement balance against the payment it is
@@ -755,6 +964,25 @@ include: fields to return although the user's privacy defaults withhold them —
 | `statement_date` | string \| null | no | `null` |
 | `include` | array of string \| null | no | `null` |
 
+## record_transfer_out
+
+Record shares that left a hand-tracked position with no price and no
+cash (write scope): a transfer to another broker, or a decrease the
+broker shows that is not a sale you can price. Never use it for a sale
+(record_sale). On a position that tracks lots, name the lots: lots
+[{lot, quantity}] (lot_id, the broker's reference, or 'unallocated') or
+lot_method fifo/lifo/hifo. Undo with reverse_position_event.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `account` | string | yes | — |
+| `symbol` | string | yes | — |
+| `quantity` | string | yes | — |
+| `occurred_on` | string | yes | — |
+| `lots` | array of object \| null | no | `null` |
+| `lot_method` | string \| null | no | `null` |
+| `note` | string \| null | no | `null` |
+
 ## record_valuation
 
 Record a loan or property account's value on a date (write scope).
@@ -777,6 +1005,75 @@ ledger sign.
 | `value` | string | yes | — |
 | `convention` | string | no | `"ledger"` |
 
+## record_vest
+
+Record an award vest (write scope): award is the award_id or the
+broker's grant reference; gross_quantity the units that vested,
+withheld_quantity is REQUIRED: units withheld for tax, explicitly "0"
+only when known (net = gross - withheld). Never infer it from sold/withdrawn
+totals; leave the historical vest unrecorded until evidence is available. fmv
+the fair market value per share at vest (withheld = gross records a
+vest that delivered no shares: no event, no lot). By default a vest event adds
+the net shares to the position and opens their lot (basis = fmv;
+lot_ref = the broker's lot reference, if shown). If the broker's lot
+list was already captured, the vest's lot is already there: pass lot
+(its lot_id or reference) to LINK it instead — no shares are added;
+the lot must be acquired on vest_date with the net shares (fewer if
+some were sold before the capture) and fmv as its basis. With an
+unlinked lot acquired that day and neither lot nor force_new_lot, the
+call is refused (possible_duplicate) so a vest is never counted twice.
+Recording the same vest again with the same figures is a no-op
+(already_recorded); with other figures it is refused — reverse the vest
+event (reverse_position_event) first. dry_run=true writes nothing.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `account` | string | yes | — |
+| `award` | string | yes | — |
+| `vest_date` | string | yes | — |
+| `gross_quantity` | string | yes | — |
+| `withheld_quantity` | string | yes | — |
+| `fmv` | string \| null | no | `null` |
+| `lot` | string \| null | no | `null` |
+| `lot_ref` | string \| null | no | `null` |
+| `force_new_lot` | boolean | no | `false` |
+| `ordinal` | integer \| null | no | `null` |
+| `note` | string \| null | no | `null` |
+| `dry_run` | boolean | no | `false` |
+
+## refetch_feed
+
+Re-fetch a date range from SimpleFIN and import what the ledger is
+missing — for a gap a bank outage left (a bank that stopped updating,
+then came back) that the automatic repair after a sync did not cover.
+start/end are ISO dates (end inclusive, default today; at most 90 days
+apart, and the bank serves about 90 days of history). accounts: ledger
+account paths (default every mapped account). connection_id may be
+omitted when there is one connection. Idempotent: rows already in the
+ledger are skipped. Uses one of the day's 24 fetches.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `start` | string | yes | — |
+| `end` | string \| null | no | `null` |
+| `accounts` | array of string \| null | no | `null` |
+| `connection_id` | string \| null | no | `null` |
+
+## reopen_position
+
+Reopen a closed position (write scope), so a wrong event on it — its
+last sale, say — can be reversed with reverse_position_event and recorded
+again; close it again afterwards (REST PATCH /positions/{id} with
+closed=true). position_id is in record_sale's and record_position's
+answers and in the "position is closed" refusal. Refused while another
+position in the symbol is open on the account (one open per symbol),
+and while a later position in it exists. Audited, like the REST
+PATCH /positions/{id} with closed=false it shares a service path with.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `position_id` | string | yes | — |
+
 ## reset_instance
 
 Undo an override (write scope): the instance is unpinned and gets
@@ -791,6 +1088,25 @@ include: fields to return although the user's privacy defaults withhold them —
 | `transaction_id` | string | yes | — |
 | `include` | array of string \| null | no | `null` |
 
+## reverse_position_event
+
+Reverse a position event (write scope): the way to undo a wrong
+record_sale or record_position (event_id is in their answer). Events
+are never edited; a reversal row makes the event count no more, and a
+trade's cash goes with it (Purser's own cash row is corrected to zero, a
+linked row gets its category back). Then record the right event. Refused
+when the remaining history would leave the position below zero on some
+date, when the event is already reversed or is itself a reversal, and
+when the position is closed: a closed position is reopened first (REST
+PATCH /positions/{id} with closed=false). A trade's cash row in
+review_batch (flag securities_trade) is corrected this way, never with
+update_transaction or confirm_transfer. note says why (optional).
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `event_id` | string | yes | — |
+| `note` | string \| null | no | `null` |
+
 ## review_batch
 
 The review loop: the next unreviewed transactions with everything you
@@ -802,7 +1118,10 @@ Check `context` before clearing rows: it says which surfaces were actually
 available. If one you needed was absent, escalate rather than clear.
 Rows the backend reviewer handed back appear under `escalated` first.
 Fix what is wrong with update_transaction/confirm_transfer, then
-mark_reviewed. Set include_guidance=false on later pages.
+mark_reviewed — except a row flagged securities_trade: its `locked`
+names the trade (event_id, position_id) whose cash it is, and the
+guidance says how such a row is corrected. Set include_guidance=false on
+later pages.
 
 include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
 
@@ -936,6 +1255,49 @@ app too.
 | `hidden` | boolean \| null | no | `null` |
 | `min_balance` | string \| null | no | `null` |
 
+## update_award_vest
+
+Forfeit a scheduled vest (status 'forfeited'), reinstate a forfeited
+one, or set a vest that was LINKED to an existing lot back to
+'scheduled' (write scope). A vest recorded as an event goes back by
+reversing that event (reverse_position_event). vest_id comes from
+list_awards(award=...).
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `vest_id` | string | yes | — |
+| `status` | string | yes | — |
+| `note` | string \| null | no | `null` |
+
+## update_occurrence_certainty
+
+Set evidence on just this occurrence's amount and/or date. Address it
+by transaction_id, or by schedule_id plus occurrence_date (works for a
+projected slot beyond the materialized window: the rule's amount and
+date stay, the evidence moves onto the instance when it materializes).
+Each supplied dimension needs state (estimated/confirmed), source, as_of
+and a note; value is optional (omit to keep the current value; a
+schedule-slot address accepts only its current value). A fixed amount is a
+model, not proof: mark it estimated without changing it. History is an
+estimate, never confirmation evidence. Confirm only what the supplied
+statement, paystub, invoice or user instruction establishes; omit the
+other dimension. clear returns a dimension to the rule's certainty. This
+never posts cash or confirms later occurrences. Link a real posted
+payment with match instead; ambiguous candidates require review. Original
+estimates and superseded confirmations remain available in Purser.
+
+include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `transaction_id` | string \| null | no | `null` |
+| `amount` | object \| null | no | `null` |
+| `date` | object \| null | no | `null` |
+| `schedule_id` | string \| null | no | `null` |
+| `occurrence_date` | string \| null | no | `null` |
+| `clear` | array of string \| null | no | `null` |
+| `include` | array of string \| null | no | `null` |
+
 ## update_schedule
 
 Edit a schedule's rule (write scope); only the fields sent change.
@@ -956,6 +1318,7 @@ transfer.
 | `dtstart` | string \| null | no | `null` |
 | `amount` | string \| null | no | `null` |
 | `amount_type` | string \| null | no | `null` |
+| `date_mode` | string \| null | no | `null` |
 | `estimate_basis` | string \| null | no | `null` |
 | `payee` | string \| null | no | `null` |
 | `category` | string \| null | no | `null` |
@@ -989,6 +1352,94 @@ not.
 | `description` | string \| null | no | `null` |
 | `account` | string \| null | no | `null` |
 
+## upsert_awards
+
+Bulk, idempotent input of equity awards and their vest schedules
+(write scope): awards [{grant_ref (the broker's grant id: the award's
+identity), symbol, granted_on, granted_quantity, cancelled_quantity,
+vested_quantity (as the broker reports it), plan, schedule: [{vest_date,
+quantity, ordinal (only for two vests on one date)}] — the vests not
+yet delivered}]. Same contract as upsert_lots: dry_run=true by default,
+commit with expect_hash, exact retries are no-ops, conflicts are never
+applied. Awards never touch holdings or net worth: a vest becomes shares
+only through record_vest. A re-estimated scheduled quantity, new vests,
+more cancelled units and a new reported vested count are applied; a
+changed grant size, fewer cancelled units, or (complete) a scheduled
+future vest the broker no longer lists is a conflict — forfeit it with
+update_award_vest if it is gone. A scheduled vest on or before as_of
+that the broker no longer lists is counted as due: record it.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `account` | string | yes | — |
+| `as_of` | string | yes | — |
+| `completeness` | string | yes | — |
+| `awards` | array of object | yes | — |
+| `captured_at` | string | yes | — |
+| `source_note` | string \| null | no | `null` |
+| `dry_run` | boolean | no | `true` |
+| `expect_hash` | string \| null | no | `null` |
+| `skip_conflicts` | boolean | no | `false` |
+
+## upsert_lots
+
+Bulk, idempotent input of a broker's tax lots as of a day (write
+scope) on a hand-tracked brokerage account. positions: [{symbol, lots:
+[{acquired_on, quantity (shares REMAINING on as_of), external_ref (the
+broker's lot reference, when shown: the lot's identity), plan,
+ordinal (when lots of one date and plan have no reference: 1, 2, ...
+in a stable order), basis_per_share and/or cost_basis (of the remaining
+shares; omit when unknown — never 0), acquisition (buy, rsu_vest,
+plan_purchase, espp_purchase, transfer_in, drip, gift, unknown)}]}].
+Decimal strings; dates YYYY-MM-DD. completeness: complete (each listed
+symbol's list is the broker's whole list) or partial (only these rows;
+nothing is inferred from what is missing). captured_at: when you read
+the page (ISO instant with zone; send the same value on the commit);
+source_note: where (no personal data).
+
+dry_run=true (the default) returns the plan and plan_hash, writing
+nothing; commit with dry_run=false and expect_hash=plan_hash (refused
+with preview_stale if anything changed). Re-sending the exact same
+request is a no-op (retry); the same holdings read again later only
+record freshness. New lots are adopted; a complete capture recounts
+the position up to the broker's total. Never applied, always
+conflicts: a lot with fewer remaining shares (record the sale or
+transfer out naming that lot first), more shares, a lot missing from a
+complete list, a differing basis (basis_policy='replace' takes the
+broker's when nothing drew on the lot), an ambiguous identity, a
+partial capture whose new lots exceed the unallocated shares, or a
+capture older than one applied. skip_conflicts=true applies the
+symbols without any.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `account` | string | yes | — |
+| `as_of` | string | yes | — |
+| `completeness` | string | yes | — |
+| `positions` | array of object | yes | — |
+| `captured_at` | string | yes | — |
+| `source_note` | string \| null | no | `null` |
+| `basis_policy` | string | no | `"keep"` |
+| `dry_run` | boolean | no | `true` |
+| `expect_hash` | string \| null | no | `null` |
+| `skip_conflicts` | boolean | no | `false` |
+
+## void_lot
+
+Void a lot that a capture adopted wrongly (write scope): it stops
+counting and stays as read-only history. Refused while a sale or
+transfer out draws on it (reverse those first with
+reverse_position_event, then record them again against the right
+lots), while an award vest is linked to it, and for a lot opened by an
+event (reverse that event instead). Then capture again (a new
+captured_at: the exact same request is a no-op) to record the right
+lot.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `lot_id` | string | yes | — |
+| `note` | string \| null | no | `null` |
+
 ## whats_new
 
 The morning brief: everything material since your last call in one
@@ -1008,7 +1459,10 @@ one marked unpriceable: its feed symbol is no ticker, so no close can
 value it), brokerage accounts switched back to the feed whose
 hand-tracked set still counts because no fetch has arrived since
 (open_manual_periods: check the connection or the account mapping),
-the week's expected bills, and sync failures.
+the week's expected bills, sync failures, and bank feed problems open
+now (feed: logins that need the user to log in again at the bank,
+accounts the bank fails to deliver, accounts whose bank balance has
+stopped updating; repeated on every call until fixed).
 Pass the returned cursor on your next call to get only new material; a
 first call without a cursor looks back 7 days. Every line carries its
 entity id so you can drill without a search. Narrate this in your own

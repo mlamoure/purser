@@ -1,44 +1,45 @@
 # Purser
 
-**The engine of Quicken, with your AI as the front end.**
+**The privately hosted finance back-end, designed for use by your personal AI Agent.**
 
-Purser is a headless personal-finance engine. It does the work a desktop
-finance app does: syncing your bank accounts, categorizing transactions,
-tracking bills, reconciling statements, forecasting cash flow and valuing
-investments. But it has no app for you to click through. You talk to your
-own AI agent (Claude, Codex, an OpenClaw agent or any other MCP client), and
-the agent works with Purser through purpose-built tools.
+Purser syncs bank accounts, categorizes transactions, tracks bills, reconciles
+statements, forecasts cash flow and values investments. It is mostly headless:
+you work through your own AI agent over MCP or REST. A web UI provides the
+administrative controls for setup, configuration, access and record inspection.
 
-Your financial data stays on your own hardware, and you decide how little of
-it your AI ever sees.
+Purser is not an AI. It is an AI enablement engine: it stores financial data,
+performs calculations and provides tools for your agent to use. Purser requires
+no AI subscription. Optional integrations can call a model you configure for
+categorization and review; they are off by default.
 
-📖 **Documentation:** https://mlamoure.github.io/purser/
+You choose what to share with your agent. Purser provides access scopes,
+disclosure settings and an audit log; it does not prescribe how much financial
+information you should share.
 
-## Why Purser
+**Documentation:** https://mlamoure.github.io/purser/
 
-- **Headless by design.** There's no front end to learn. Your AI is the
-  interface; Purser is the engine underneath. A small web UI covers setup and
-  administration.
-- **Your data stays local.** Purser runs on your own machine with Docker. Bank
-  data comes straight to your server and is encrypted at rest. There's no
-  Purser cloud and no account to create.
-- **Share as little as possible with AI.** Anything your agent reads goes to
-  its model provider, so Purser keeps that to a minimum:
-  - **Exact answers without the raw rows.** Totals, balances, net worth and
-    forecasts are computed on your server, so your agent can answer "how much
-    did we spend on dining?" without reading every transaction.
-  - **Privacy switches.** Optionally replace payee names with stable references
-    (`py_8k2mq4x7ra`) and withhold individual amounts. Totals stay exact.
-  - **Show it to you, not to the AI.** When you want to see transactions, your
-    agent sends you a link to view them in Purser instead of repeating the
-    details in chat.
-  - **Nothing hidden.** Every response names what was withheld, and every read
-    is logged, so you can see exactly what your agent saw.
-- **Built for an AI to operate safely.** Your agent gets a scoped `read + write`
-  token. It can never create tokens or widen its own access. Every change it
-  makes is attributed to it, audited and reversible.
+## Hosting and access
 
-## What you can ask
+- **Privately hosted.** Purser runs on your own hardware with Docker. Bank
+  data is stored on your server, with sensitive fields encrypted at rest.
+  There is no Purser cloud account.
+- **Scoped access.** Give an agent read access or read and write access.
+  Token creation and configuration require a separate admin scope.
+- **Disclosure controls.** MCP settings can replace payee names with stable
+  references and omit individual amounts. These are defaults: an agent can
+  request those fields per call. REST reads have different disclosure behavior;
+  see [Privacy and agents](https://mlamoure.github.io/purser/explanation/privacy-and-agents/).
+- **Server-side calculations.** Tools return totals, balances, net worth and
+  forecasts without requiring the agent to read every transaction. An agent
+  can also link to records for you to inspect in Purser.
+- **Auditing.** The Data shared view identifies integrations, returned field
+  inventories, coverage, omissions and outcomes, with filters and exports.
+  Older entries and incomplete evidence are labeled explicitly. Integration
+  responses are recorded before release; a capture error withholds the response,
+  although a requested write may already have completed. Posted transactions
+  are corrected through linked reversal and replacement entries.
+
+## What you can ask your agent
 
 - *"How much did we spend on groceries last month, compared with the month before?"*
 - *"What's our net worth, and how has it changed this year?"*
@@ -47,64 +48,75 @@ it your AI ever sees.
 - *"Here's my card statement email. Set the payment to the statement balance."*
 - *"Anything new or unusual since yesterday?"*
 
-## What the engine does
+## Features
 
-### All your finances in one place
-- **Automatic bank sync** through [SimpleFIN Bridge](https://bridge.simplefin.org/): checking, savings, credit cards and brokerage accounts, updated daily.
-- **Bring your history** from Quicken (QIF) or CSV exports, with a preview before anything is saved. Importing the same file twice never creates duplicates.
+### Accounts and imports
+
+- **Bank sync** through [SimpleFIN Bridge](https://bridge.simplefin.org/) for checking, savings, credit cards and brokerage accounts.
+- **QIF and CSV imports** with a preview and duplicate detection.
 - **Investments:** holdings from your brokerage feed or tracked by hand, priced daily and included in net worth.
+- **Tax lots and equity awards** for holdings you track by hand: load a broker's lot list and vest schedule in one previewed step. Sales name the lots they draw on. Home includes potential value inside the Net worth and Assets cards when unvested awards exist; users without them see only current owned totals. Unvested awards remain outside owned net worth until vesting.
 
-### Finances you can trust
-- **Every dollar accounted for.** Each transaction records where money came from and where it went, so your balances and totals always add up. Past entries are never quietly changed: a correction is recorded as a new entry that undoes the old one.
-- **The original bank data is kept** exactly as it arrived, so everything can be traced back to its source.
-- **Reconciliation** against your statements.
-- **Transfers** between your own accounts are recognized and linked, so they never count as spending.
+### Ledger and reconciliation
 
-### Bills and what's coming
-- **Recurring bills and income** are detected for you or added as schedules, and each expected payment is matched to what actually arrives.
+- **Balanced entries.** Transaction postings sum to zero per currency. Corrections to posted transactions preserve the original entry and its history.
+- **Source records.** Original bank payloads are retained for tracing imported transactions.
+- **Reconciliation** against account statements, including explicit cash-only reconciliation for manually tracked brokerage accounts.
+- **Transfers** between your own accounts are linked and excluded from spending totals.
+
+### Bills and forecasts
+
+- **Recurring bills and income** are detected or entered as schedules, then matched to incoming transactions.
+- **Occurrence estimates:** amount and date uncertainty are tracked separately, with evidence, original estimates and linked actuals. Fixed planning values can remain estimates, including projected slots without transaction IDs, without changing forecast amounts or dates. Confirm one payment without confirming later ones; ambiguous matches wait for review.
 - **Late bills and price changes** are flagged.
-- **Cash-flow forecasting** projects each account forward from your schedules, with no guesswork models, and warns you before an account drops below the floor you set.
+- **Cash-flow forecasts** use schedules to project account balances and flag balances below your chosen floor.
 
-### Organized without the busywork
-- **100 ready-made categories** in a hierarchy you can reshape.
-- **Rules** categorize transactions and rename payees automatically. A new rule stays a draft until you activate it.
-- **A review inbox** for new transactions, and a **suggestions inbox** for the bills, transfer links and matches Purser proposes.
-- **Memories:** short notes about your finances ("the HOA bill is annual") that your agent gets as context.
-- **Optional server-side AI categorization**, off by default. It can use a local model (Ollama, LM Studio) as well as a hosted provider. Everything else works without it.
+### Categories, rules and notes
+
+- **Categories** come with a default hierarchy you can edit.
+- **Rules** categorize transactions and rename payees. Draft rules take effect when activated.
+- **Review and suggestions inboxes** collect new transactions, proposed schedules, transfer links and matches.
+- **[Financial notes](https://mlamoure.github.io/purser/explanation/memories/)** keep context about your finances in one place, such as "the HOA bill is annual," for your agent to use.
 
 ## The admin interface
 
-Day to day you work through your AI. A small web UI covers setup and
-administration and lets you see everything yourself. These screenshots use
-Purser's built-in demo data.
+Day-to-day work happens through your AI agent. The web UI provides the
+administrative controls for setup, connections, settings, tokens and auditing.
+It also lets you inspect accounts and records directly. These screenshots use
+synthetic demonstration data.
+
+![Needs attention with grouped suggestions, account filters and review links](docs/public/screenshots/dashboard.png)
+
+**Needs attention:** review missing expected payments first, expand suggestions
+by type, and open the exact account register for posted or pending review.
 
 | | |
 |---|---|
-| ![Dashboard: net worth, items needing attention and account balances](docs/public/screenshots/dashboard.png) **Dashboard:** net worth, what needs your attention, every account | ![Account register with categories and transfer links](docs/public/screenshots/register.png) **Account register:** transactions, running balance, categories, transfer links |
-| ![Schedules and the account forecast chart](docs/public/screenshots/schedules.png) **Schedules and forecast:** recurring bills and income, with each account projected forward | ![API and MCP access: scoped tokens for agents](docs/public/screenshots/tokens.png) **API & MCP access:** mint a scoped token for your agent |
-| ![Privacy with agents settings](docs/public/screenshots/privacy.png) **Privacy with agents:** keep payees and amounts out of what your AI receives | ![Audit log grouped by session](docs/public/screenshots/audit.png) **Audit log:** every read and write, by person or agent |
+| ![API and MCP access settings](docs/public/screenshots/tokens.png) **Access:** create scoped agent tokens | ![Privacy with agents settings](docs/public/screenshots/privacy.png) **Disclosure:** set defaults for MCP responses |
+| ![Audit log](docs/public/screenshots/audit.png) **Audit log:** review sharing and changes | ![Account register with categories and transfer links](docs/public/screenshots/register.png) **Record inspection:** view transactions, balances and transfer links |
 
 ## Get started
 
 Purser runs with Docker on Linux (amd64 or arm64) and on Macs with Apple
-Silicon. Your AI agent can install it for you. Give it this one sentence:
+Silicon. To have your agent install it, give it this instruction:
 
 ```text
 Set up Purser for me by following https://mlamoure.github.io/purser/tutorials/ai-setup/
 ```
 
-Your agent installs Purser and stops at the few steps only you should take:
-storing your encryption key, creating the admin account and approving its
-access token. Then it connects itself.
+The setup guide asks you to store your encryption key, create the admin
+account and approve the agent's access token.
 
-Prefer to do it yourself? Follow the [Quickstart](https://mlamoure.github.io/purser/tutorials/quickstart/).
+For manual installation, follow the [Quickstart](https://mlamoure.github.io/purser/tutorials/quickstart/).
 Agents that load skills can also use [`skills/purser/SKILL.md`](skills/purser/SKILL.md).
 
-## Learn more
+## Reference
 
+- [REST API](https://mlamoure.github.io/purser/reference/rest-api/)
+- [MCP tools](https://mlamoure.github.io/purser/reference/mcp-tools/)
+- [Connect an agent](https://mlamoure.github.io/purser/how-to/connect-an-agent/)
 - [Privacy and agents](https://mlamoure.github.io/purser/explanation/privacy-and-agents/)
-- [How Purser keeps your records accurate](https://mlamoure.github.io/purser/explanation/ledger/)
-- [Connect an agent](https://mlamoure.github.io/purser/how-to/connect-an-agent/) and the [MCP tool catalog](https://mlamoure.github.io/purser/reference/mcp-tools/)
+- [Ledger](https://mlamoure.github.io/purser/explanation/ledger/)
 - [Security model](https://mlamoure.github.io/purser/explanation/security/)
 - [Backup and restore](https://mlamoure.github.io/purser/how-to/backup-restore/)
 
@@ -120,4 +132,14 @@ welcome; the maintainer applies accepted changes upstream.
 [AGPL-3.0-only](LICENSE). Third-party components and their licences are
 listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-Purser is an independent project and is not affiliated with Quicken.
+## Release security checks
+
+Release qualification audits the locked Python runtime dependencies and scans
+native amd64 and arm64 container images. The publication job scans the exact
+digest again before creating the release tag. High and critical findings block
+publication unless an unfixed finding has a reviewed, package-version-specific
+exception in `.trivyignore.yaml`; exceptions expire and never hide an available
+fix. Full scan reports remain available as workflow artifacts.
+
+To reproduce locally on Linux, run `bash scripts/audit_python.sh` and
+`bash scripts/scan_image.sh <image>`. Both write to `security-reports/`.

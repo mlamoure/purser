@@ -10,6 +10,7 @@ import argparse
 import http.cookiejar
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -75,6 +76,11 @@ def snapshot(db: str) -> dict[str, str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True)
+    parser.add_argument(
+        "--feed-failures",
+        action="store_true",
+        help="Exercise HTTPS provider errors and real timeouts",
+    )
     parser.add_argument("--url-host", help="Reachable host/tunnel when Docker runs remotely")
     parser.add_argument("--postgres-image", default="postgres:16")
     parser.add_argument(
@@ -96,6 +102,35 @@ def main() -> int:
     url = f"http://{args.url_host or args.bind}:{port}"
     label = "purser.hardening.disposable=true"
     with tempfile.TemporaryDirectory(prefix="purser-e2e-") as temp:
+        fixture = Path(temp) / "provider"
+        provider = prefix + "-provider"
+        if args.feed_failures:
+            if not shutil.which("openssl"):
+                raise RuntimeError("openssl is required for the synthetic provider certificate")
+            fixture.mkdir()
+            shutil.copyfile(Path(__file__).with_name("simplefin_double.py"), fixture / "server.py")
+            subprocess.run(
+                [
+                    "openssl",
+                    "req",
+                    "-x509",
+                    "-newkey",
+                    "rsa:2048",
+                    "-nodes",
+                    "-keyout",
+                    str(fixture / "key.pem"),
+                    "-out",
+                    str(fixture / "ca.pem"),
+                    "-days",
+                    "1",
+                    "-subj",
+                    "/CN=feed.example.test",
+                    "-addext",
+                    "subjectAltName=DNS:feed.example.test",
+                ],
+                check=True,
+                capture_output=True,
+            )
         key = docker("run", "--rm", args.image, "keygen").decode().strip()
         db_password = uuid.uuid4().hex
         db_env = Path(temp) / "database.env"
@@ -112,6 +147,9 @@ def main() -> int:
                 "PURSER_DISABLE_SCHEDULER=true\n"
             )
             app_env.chmod(0o600)
+            if args.feed_failures:
+                with app_env.open("a") as stream:
+                    stream.write("SSL_CERT_FILE=/tmp/provider-ca.pem\n")
 
         def start_database(name: str) -> None:
             containers.append(name)
@@ -133,8 +171,7 @@ def main() -> int:
         def start_app() -> None:
             containers.append(app)
             docker(
-                "run",
-                "-d",
+                "create",
                 "--name",
                 app,
                 "--label",
@@ -145,16 +182,56 @@ def main() -> int:
                 str(app_env),
                 "-p",
                 f"{args.bind}:{port}:8000",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges:true",
                 args.image,
             )
+            if args.feed_failures:
+                docker("cp", str(fixture / "ca.pem"), app + ":/tmp/provider-ca.pem")
+            docker("start", app)
             wait_app(url)
 
         docker("network", "create", "--label", label, network)
         try:
+            if args.feed_failures:
+                containers.append(provider)
+                docker(
+                    "create",
+                    "--name",
+                    provider,
+                    "--label",
+                    label,
+                    "--network",
+                    network,
+                    "--network-alias",
+                    "feed.example.test",
+                    "--user",
+                    f"{os.getuid()}:{os.getgid()}",
+                    "--cap-drop",
+                    "ALL",
+                    "--security-opt",
+                    "no-new-privileges:true",
+                    "--entrypoint",
+                    "python",
+                    args.image,
+                    "/fixture/server.py",
+                )
+                docker("cp", str(fixture), provider + ":/fixture")
+                docker("start", provider)
             start_database(db)
             configure_app(db)
             start_app()
+            if (
+                args.feed_failures
+                and docker("inspect", "-f", "{{.State.Running}}", provider).strip() != b"true"
+            ):
+                logs = subprocess.run(["docker", "logs", provider], capture_output=True)
+                raise RuntimeError((logs.stdout + logs.stderr).decode())
             env = {**os.environ, "PURSER_E2E_URL": url}
+            if args.feed_failures:
+                env["PURSER_E2E_FEED_DOUBLE"] = provider
             result = subprocess.run(
                 [
                     sys.executable,

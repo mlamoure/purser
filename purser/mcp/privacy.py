@@ -593,6 +593,32 @@ def _select(value: Any, path: list[str]) -> list[Any]:
     return []
 
 
+def present_declared_fields(value: Any, emits: Emits) -> set[str]:
+    """Fields with actual values in a final response, using the scrubber's paths.
+
+    This supplements the general audit inventory for nonstandard names such as
+    remainder, schedule name and running balance. Declarations alone are not evidence.
+    """
+    paths = {
+        DESCRIPTION: emits.description,
+        AMOUNT: (*emits.amount, *emits.balance),
+        EXTERNAL_IDS: emits.external_ids,
+    }
+    return {
+        field
+        for field, selectors in paths.items()
+        if any(
+            found is not None
+            and found != WITHHELD_TEXT
+            and found != ""
+            and found != []
+            and found != {}
+            for path in selectors
+            for found in _select(value, path.split("."))
+        )
+    }
+
+
 def _drop(value: Any, path: list[str]) -> bool:
     """Drop the key at ``path`` everywhere it occurs; True if any was."""
     head, rest = path[0], path[1:]

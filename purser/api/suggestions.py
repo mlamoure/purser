@@ -3,8 +3,10 @@
 Read with `read`, decide with `write`. There is no create route: suggestions
 are made by detection, by the liability-added hook, by `create_schedule`
 with `propose=true`, by a manual transfer confirm (a `transfer_link`
-suggestion), and by the matcher (a `match` card mirroring each open match
-proposal, decision 86) — never by hand.
+suggestion), by the matcher (a `match` card mirroring each open match
+proposal, decision 86) and by the matching pass after an import (a
+`transfer_pair` card for each recent transfer candidate, decision 102) —
+never by hand.
 """
 
 import uuid
@@ -29,7 +31,7 @@ DbSession = Annotated[Session, Depends(get_session)]
 
 router = APIRouter(prefix="/suggestions", tags=["suggestions"])
 
-SuggestionKind = Literal["schedule", "transfer_link", "match"]
+SuggestionKind = Literal["schedule", "transfer_link", "match", "transfer_pair"]
 SuggestionStatus = Literal["open", "accepted", "rejected", "withdrawn"]
 
 
@@ -41,12 +43,17 @@ class SuggestionOut(BaseModel):
             "transfer_link: proposed by a manual transfer confirm (draft = a transfer_link "
             "rule for that account pair, scoped to the payee and its aliases). "
             "match: an open match proposal pairing an expected row with a bank row "
-            "(draft = the pair; accept confirms it, reject rejects it for good)."
+            "(draft = the pair; accept confirms it, reject rejects it for good). "
+            "transfer_pair: a transfer candidate, two bank rows of exactly opposite amounts on "
+            "two accounts that nothing links automatically (draft = the pair; accept confirms "
+            "the transfer, reject remembers it is not one)."
         )
     )
     status: str = Field(
         description="open | accepted | rejected | withdrawn (closed by the system: the "
-        "match proposal it mirrored was rescinded, carried or purged)"
+        "match proposal it mirrored was rescinded, carried or purged; the transfer pair "
+        "stopped being a candidate or was linked automatically; a detected schedule "
+        "pattern is no longer supported by current history)"
     )
     source: str = Field(description="detected | agent | account_added | confirm")
     confidence: str | None
@@ -58,7 +65,9 @@ class SuggestionOut(BaseModel):
             "category, autopost_policy. transfer_link: from_account, to_account, payee, "
             "payee_id, amount_exact, window_days, effective_from. match: expected_id, "
             "posted_id, account, label, expected_date, expected_amount, posted_date, "
-            "posted_amount, variance (posted - expected)."
+            "posted_amount, variance (posted - expected). transfer_pair: outgoing_id, "
+            "incoming_id, from_account, to_account, amount (moved, positive), outgoing_date, "
+            "incoming_date, date_gap_days, outgoing_description, incoming_description."
         )
     )
     evidence_summary: dict[str, Any]
@@ -91,10 +100,24 @@ class DecisionRequest(BaseModel):
         description=(
             "exact = just this suggestion. counterparty = never suggest this (account, "
             "counterparty/payee) again — for a transfer_link, this account pair with any payee. "
-            "A match rejects exactly."
+            "A match and a transfer_pair reject exactly."
         ),
     )
     snooze_until: date_type | None = Field(default=None, description="default today + 30d")
+
+
+class TransferPairDecisionOut(BaseModel):
+    merged_transaction_id: uuid.UUID = Field(
+        description="the ONE transfer transaction the two bank rows became"
+    )
+    suggestion_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "the payee-scoped transfer_link suggestion the confirm proposed (or refreshed) in "
+            "the inbox, as POST /matching/confirm-transfer does (decision 67); null when it "
+            "proposed none (no payee on either row, or a rule or rejection already covers it)"
+        ),
+    )
 
 
 class DecisionOut(BaseModel):
@@ -121,6 +144,13 @@ class DecisionOut(BaseModel):
         default=None,
         description="match decisions: the match the decision produced (confirmed or rejected)",
     )
+    transfer: TransferPairDecisionOut | None = Field(
+        default=None,
+        description=(
+            "transfer_pair accepts: the transfer the pair merged into and the transfer_link "
+            "suggestion the confirm proposed"
+        ),
+    )
 
 
 def _handle(exc: LedgerError) -> HTTPException:
@@ -145,12 +175,18 @@ def list_suggestions(
     kind: SuggestionKind | None = None,
     account: Annotated[str | None, Query(description="account id or path (either side)")] = None,
     include_snoozed: bool = False,
+    sort: Literal["confidence", "oldest"] = "confidence",
     limit: Annotated[int, Query(ge=1, le=service.LIST_MAX_ROWS)] = service.LIST_MAX_ROWS,
+    offset: Annotated[
+        int, Query(ge=0, description="rows of earlier pages to skip, for the next page")
+    ] = 0,
 ) -> list[SuggestionOut]:
     """The inbox: open suggestions by confidence (snoozed ones hidden until
     their date unless include_snoozed). `kind` narrows it to schedules, to
-    the transfer-link rules manual confirms proposed, or to the matcher's
-    open match proposals."""
+    the transfer-link rules manual confirms proposed, to the matcher's open
+    match proposals, or to the recent transfer candidates (transfer_pair).
+    At most `limit` rows a page; GET /suggestions/counts says how many of
+    each kind there are, and `offset` reaches the next page."""
     try:
         rows = service.list_suggestions(
             session,
@@ -159,10 +195,37 @@ def list_suggestions(
             account_ref=account,
             include_snoozed=include_snoozed,
             limit=limit,
+            offset=offset,
+            sort=sort,
         )
     except LedgerError as exc:
         raise _handle(exc) from exc
     return [suggestion_out(session, r) for r in rows]
+
+
+class SuggestionCountsOut(BaseModel):
+    """Open suggestions the inbox shows, snoozed ones left out: the total
+    and each kind's count."""
+
+    total: int
+    schedule: int
+    transfer_link: int
+    match: int
+    transfer_pair: int
+
+
+@router.get("/counts")
+def suggestion_counts(
+    token: ReadToken, session: DbSession, account: str | None = None
+) -> SuggestionCountsOut:
+    """How many open suggestions of each kind wait (snoozed ones hidden
+    until their date, as in the inbox): the totals beside the pages GET
+    /suggestions lists, so a page never hides a kind (#386 review)."""
+    try:
+        counts = service.open_counts(session, account_ref=account)
+    except LedgerError as exc:
+        raise _handle(exc) from exc
+    return SuggestionCountsOut(total=sum(counts.values()), **counts)
 
 
 @router.get("/{suggestion_id}")
@@ -188,7 +251,12 @@ def decide(
     auto-accepts, and nothing here activates a rule. A match suggestion's
     accept confirms the proposal (marking its bank row reviewed) and reject
     rejects it for good; it has nothing to edit. If its proposal is already
-    gone the suggestion is withdrawn and the call answers 422."""
+    gone the suggestion is withdrawn and the call answers 422. A
+    transfer_pair suggestion's accept confirms the transfer (as POST
+    /matching/confirm-transfer does: `transfer` names the merged row and the
+    transfer_link suggestion it proposed) and reject remembers that the pair
+    is not a transfer — the automatic link paths leave it alone too; nothing
+    to edit, and a pair whose rows moved on withdraws it with a 422."""
     try:
         row, created = service.decide(
             session,
@@ -214,4 +282,9 @@ def decide(
         out.projected_links = rules_service.project_links(session, created)
     elif isinstance(created, Match):
         out.match = MatchOut.from_model(created)
+    elif isinstance(created, service.TransferPairConfirmed):
+        out.transfer = TransferPairDecisionOut(
+            merged_transaction_id=created.merged.id,
+            suggestion_id=created.proposed.id if created.proposed is not None else None,
+        )
     return out

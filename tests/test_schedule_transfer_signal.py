@@ -550,6 +550,8 @@ class TestScheduleSignal:
         harness.use_payload(two_account_payload([OUT_ROW], [IN_ROW]))
         harness.sync(connection_id)
         assert len(_auto_links(migrated_engine)) == 1
+        proposal = client.get("/matching/proposed").json()[0]
+        assert client.post(f"/matching/{proposal['id']}/confirm").status_code == 200
 
         with get_sessionmaker()() as session:
             schedule = session.get(Schedule, uuid.UUID(schedule_id))
@@ -664,7 +666,96 @@ def test_an_override_to_the_bank_amount_makes_the_instance_vouch(
     (link,) = _auto_links(migrated_engine)
     assert link["signal"] == f"schedule:{schedule_id}"
     merged = _transfer_row(client)
+    assert _row(migrated_engine, instance_id).superseded_by is None
+    proposal = client.get("/matching/proposed").json()[0]
+    assert client.post(f"/matching/{proposal['id']}/confirm").status_code == 200
     assert _row(migrated_engine, instance_id).superseded_by == merged["id"]
     assert [(s, p) for _, s, p in _matches(migrated_engine, instance_id)] == [
         ("confirmed", merged["id"])
+    ]
+
+
+@pytest.mark.parametrize(
+    ("schedule_name", "day1_state"),
+    [("FID BKG SVC LLC MONEYLINE", "confirmed"), ("College fund", "proposed")],
+)
+def test_a_held_leg_the_categorize_pass_corrected_still_links(
+    harness: Harness,
+    client: TestClient,
+    migrated_engine: Engine,
+    schedule_name: str,
+    day1_state: str,
+) -> None:
+    """#386 review round 2, item 1: the post-sync categorize pass corrects
+    the held first leg (a reversal + an origin=rule replacement) before its
+    counterpart arrives. The match stays on the corrected original, but the
+    bank line lives on in the replacement: that head is still held for the
+    instance, links with the late leg on the schedule's signal, and the match
+    follows it into the merge — the instance settled once, each balance once."""
+    from purser import categorize
+    from purser.db import get_sessionmaker
+
+    harness.use_payload(two_account_payload([], []))
+    connection_id = harness.connect_and_map_both()
+    schedule_id = _transfer_schedule(client, name=schedule_name)
+    instance_id = _june_instance(schedule_id)
+
+    # Day 1: the first leg lands uncategorized; the nightly job holds it.
+    harness.use_payload(two_account_payload([OUT_ROW], []))
+    harness.sync(connection_id)
+    _nightly()
+    ((first_match, state, held_row),) = _matches(migrated_engine, instance_id)
+    assert state == day1_state
+
+    # The post-sync categorize pass (a rule made since) corrects the held leg.
+    category = client.post(
+        "/categories",
+        json={"name": "Utilities", "type": "category_expense", "path": "expenses.utilities"},
+    )
+    assert category.status_code == 201, category.text
+    rule = client.post(
+        "/rules",
+        json={
+            "type": "categorize",
+            "match_field": "payee",
+            "match_mode": "contains",
+            "match_text": "moneyline",
+            "category_id": category.json()["id"],
+        },
+    )
+    assert rule.status_code == 201, rule.text
+    activated = client.post(f"/rules/{rule.json()['id']}/state", json={"state": "active"})
+    assert activated.status_code == 200, activated.text
+    with get_sessionmaker()() as session:
+        assert categorize.run(session, token=None)["rule"] == 1
+        session.commit()
+
+    # Day 2: the other leg posts a day later.
+    harness.use_payload(two_account_payload([OUT_ROW], [IN_ROW]))
+    harness.sync(connection_id)
+
+    (link,) = _auto_links(migrated_engine)
+    assert link["signal"] == f"schedule:{schedule_id}"
+    merged = _transfer_row(client)
+    assert _row(migrated_engine, held_row).status == "posted"  # corrected, never merged
+    assert _row(migrated_engine, instance_id).superseded_by == merged["id"]
+    settled = [(m, p) for m, s, p in _matches(migrated_engine, instance_id) if s == "confirmed"]
+    assert [p for _, p in settled] == [merged["id"]]
+    if day1_state == "confirmed":
+        # The settlement moved with its bank line: the same match row.
+        assert settled[0][0] == first_match
+    else:
+        # The proposal named the corrected original: rescinded, and the
+        # instance matched again at once — on the merge.
+        assert ("rejected", held_row) in [
+            (s, p) for _, s, p in _matches(migrated_engine, instance_id)
+        ]
+    assert _balances(client) == {
+        "assets.checking": Decimal("-275.00"),
+        "assets.savings": Decimal("275.00"),
+    }
+    _nightly()
+    assert len(_auto_links(migrated_engine)) == 1
+    assert [p for _, s, p in _matches(migrated_engine, instance_id) if s == "confirmed"] == [
+        merged["id"]
     ]

@@ -1,5 +1,6 @@
 """Setup wizard support + SPA serving (issue #12)."""
 
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -72,6 +73,12 @@ class TestSpaTraversal:
         (static / "assets").mkdir(parents=True)  # StaticFiles mount needs it to exist
         (static / "index.html").write_text(self.SHELL)
         (static / "robots.txt").write_text("User-agent: *")
+        for icon in (
+            "favicon.ico",
+            "assets/favicon-abc123.svg",
+            "assets/apple-touch-icon-abc123.png",
+        ):
+            (static / icon).write_bytes(b"icon")
         (tmp_path / "secret.txt").write_text(self.SENTINEL)
 
         monkeypatch.setenv("PURSER_STATIC_DIR", str(static))
@@ -107,6 +114,24 @@ class TestSpaTraversal:
         assert resp.status_code == 200
         assert "Purser app shell" in resp.text
 
+    @pytest.mark.parametrize(
+        ("path", "media_type"),
+        [
+            ("/favicon.ico", "image/vnd.microsoft.icon"),
+            ("/assets/favicon-abc123.svg", "image/svg+xml"),
+            ("/assets/apple-touch-icon-abc123.png", "image/png"),
+        ],
+    )
+    def test_icons_served_as_images(
+        self, spa_client: TestClient, path: str, media_type: str
+    ) -> None:
+        # Icons must never get the HTML shell (#506): the stable /favicon.ico
+        # through the catch-all, the hashed ones through the /assets mount.
+        resp = spa_client.get(path)
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith(media_type)
+        assert resp.content == b"icon"
+
     def test_symlink_escape_refused(self, tmp_path: Path, spa_client: TestClient) -> None:
         link = tmp_path / "static" / "leak"
         try:
@@ -116,3 +141,31 @@ class TestSpaTraversal:
         resp = spa_client.get("/leak")
         assert resp.status_code == 200
         assert self.SENTINEL not in resp.text
+
+
+class TestFavicon:
+    """The SPA shell declares its icons (#506). Purser is served at the root
+    of its host, so every href is root-absolute: a direct load of a nested
+    path such as /accounts/123 still resolves them to the bundle."""
+
+    FRONTEND = Path(__file__).resolve().parent.parent / "frontend"
+
+    def _icon_links(self) -> dict[str, str]:
+        html = (self.FRONTEND / "index.html").read_text()
+        links = re.findall(r'<link rel="([^"]+)" href="([^"]+)"', html)
+        return {href: rel for rel, href in links if "icon" in rel}
+
+    def test_declares_ico_svg_and_apple_touch_icon(self) -> None:
+        assert self._icon_links() == {
+            "/favicon.ico": "icon",
+            "/src/assets/favicon.svg": "icon",
+            "/src/assets/apple-touch-icon.png": "apple-touch-icon",
+        }
+
+    def test_declared_icons_exist(self) -> None:
+        # /src/... is a source path Vite rewrites to a hashed /assets/ URL;
+        # /favicon.ico ships unhashed from public/ for browsers that ask for it.
+        for href in self._icon_links():
+            source = self.FRONTEND / href.lstrip("/")
+            public = self.FRONTEND / "public" / href.lstrip("/")
+            assert source.is_file() or public.is_file(), href

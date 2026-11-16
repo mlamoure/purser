@@ -473,9 +473,9 @@ def test_a_refused_history_names_its_first_negative_date(events: list[core.Event
     for event in core.effective_events(events):
         if event.kind == core.SET_QUANTITY:
             running = event.quantity
-        elif event.kind == core.BUY:
+        elif event.kind in core.ADDS:  # buy, vest (#393)
             running += event.quantity
-        else:
+        else:  # sell, transfer_out
             running -= event.quantity
         if running < 0:
             first_negative = event.occurred_on

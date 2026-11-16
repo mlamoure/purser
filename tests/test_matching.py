@@ -229,8 +229,12 @@ def _imported(
     on: date,
     payee: str = "CITY UTILITIES PMT",
     status: str = "posted",
+    currency: str = "USD",
+    content_hash: str | None = None,
 ) -> str:
-    """Insert an import-origin row the way the importer would."""
+    """Insert an import-origin row the way the importer would, both legs in
+    ``currency`` (a foreign-currency account's bank line), with the bank
+    identity ``content_hash`` when a test needs one."""
     with migrated_engine.begin() as conn:
         account_id = conn.execute(
             text("SELECT id FROM accounts WHERE path = :p"), {"p": account_path}
@@ -252,15 +256,22 @@ def _imported(
         ).scalar_one()
         tx_id = conn.execute(
             text(
-                "INSERT INTO transactions (date, payee_id, description_enc, status, origin) "
-                "VALUES (:d, :p, :desc, :status, 'import') RETURNING id"
+                "INSERT INTO transactions"
+                " (date, payee_id, description_enc, status, origin, content_hash) "
+                "VALUES (:d, :p, :desc, :status, 'import', :h) RETURNING id"
             ),
-            {"d": on, "p": payee_id, "desc": crypto.encrypt(payee), "status": status},
+            {
+                "d": on,
+                "p": payee_id,
+                "desc": crypto.encrypt(payee),
+                "status": status,
+                "h": content_hash,
+            },
         ).scalar_one()
         conn.execute(
             text(
-                "INSERT INTO postings (transaction_id, account_id, amount) VALUES "
-                "(:tx, :acct, :amt), (:tx, :cat, :neg)"
+                "INSERT INTO postings (transaction_id, account_id, amount, currency) VALUES "
+                "(:tx, :acct, :amt, :cur), (:tx, :cat, :neg, :cur)"
             ),
             {
                 "tx": tx_id,
@@ -268,6 +279,7 @@ def _imported(
                 "amt": amount,
                 "cat": cat,
                 "neg": str(-Decimal(amount)),
+                "cur": currency,
             },
         )
     return str(tx_id)
@@ -375,12 +387,12 @@ class TestMatchingFlow:
         # Original stays void (void is terminal); lineage preserved.
         assert client.get(f"/transactions/{expected_id}").json()["status"] == "void"
 
-    def test_confirm_stale_proposal_rejected(
+    def test_void_expected_rescinds_proposal_before_confirm(
         self, seeded: dict[str, str], client: TestClient, migrated_engine: Engine
     ) -> None:
-        # A proposal decided against rows that have since moved on is stale.
+        # Skipping an expectation releases its bank row before another decision.
         expected_id = _expected(client, "-180.00", TODAY, payee="City Utilities")
-        _imported(
+        posted_id = _imported(
             client,
             migrated_engine,
             "assets.checking",
@@ -393,14 +405,16 @@ class TestMatchingFlow:
         # The expected is voided out from under the open proposal.
         assert client.post(f"/transactions/{expected_id}/void").status_code == 200
 
+        assert client.get("/matching/proposed").json() == []
         resp = client.post(f"/matching/{proposed['id']}/confirm")
         assert resp.status_code == 422
-        assert "stale" in resp.json()["detail"]
+        assert resp.json()["detail"] == "match is rejected, not proposed"
         with migrated_engine.connect() as conn:
             state = conn.execute(
                 text("SELECT state FROM matches WHERE id = :m"), {"m": proposed["id"]}
             ).scalar_one()
-        assert state == "proposed"  # not silently confirmed
+        assert state == "rejected"  # rescinded immediately, never confirmed
+        assert client.get(f"/transactions/{posted_id}").json()["status"] == "posted"
 
     def test_second_manual_match_on_same_posted_rejected(
         self, seeded: dict[str, str], client: TestClient, migrated_engine: Engine
@@ -567,19 +581,14 @@ class TestTransfers:
         # Nothing merged, nothing voided — candidates only.
         assert client.get(f"/transactions/{out_id}").json()["status"] == "posted"
         assert client.get(f"/transactions/{in_id}").json()["status"] == "posted"
-        with migrated_engine.connect() as conn:
-            event_count = conn.execute(
-                text("SELECT COUNT(*) FROM events WHERE type = 'transfer.candidate'")
-            ).scalar_one()
-        assert event_count == 1
-
-        # Candidate events are emitted once, not per listing.
+        # Listing is a pure read (#386): transfer.candidate comes from the
+        # matching pass after an import, never from a GET.
         client.get("/matching/transfer-candidates")
         with migrated_engine.connect() as conn:
             event_count = conn.execute(
                 text("SELECT COUNT(*) FROM events WHERE type = 'transfer.candidate'")
             ).scalar_one()
-        assert event_count == 1
+        assert event_count == 0
 
     def test_confirm_transfer_merges_and_voids_with_links(
         self, seeded: dict[str, str], client: TestClient, migrated_engine: Engine

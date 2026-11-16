@@ -21,7 +21,7 @@ Infrastructure identity — never runtime-editable.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PURSER_DATABASE_URL` | `postgresql+psycopg://purser:purser@localhost:5432/purser` | PostgreSQL DSN (psycopg v3 driver). |
-| `PURSER_PUBLIC_URL` | `http://localhost:8000` | External base URL of the instance. Drives cookie security (`https://` = secure cookies), the OIDC redirect URI, and the MCP endpoint's Host/Origin allowlist (requests for any other host get HTTP 421). The [Helm chart](../../how-to/kubernetes-helm/) derives it from the ingress host. |
+| `PURSER_PUBLIC_URL` | `http://localhost:8000` | External base URL of the instance. Drives cookie security (`https://` = secure cookies), the OIDC redirect URI, and the MCP endpoint's Host/Origin allowlist (requests for any other host get HTTP 421). The [Helm chart](../../how-to/kubernetes-helm/) derives it from the ingress host. Serve Purser at the root of its host (`https://purser.example.com`): a path prefix (`https://example.com/purser`) is not supported, because the web UI, its icons, the API and `/mcp/` all use root-absolute paths. |
 | `PURSER_HOST` | `0.0.0.0` | Bind address. |
 | `PURSER_PORT` | `8000` | Bind port. |
 | `PURSER_LOG_LEVEL` | `INFO` | Log level. |
@@ -84,6 +84,8 @@ write-only and encrypted at rest.
 | `PURSER_GRAFANA_URL` | unset | Grafana base URL for deep links on tool responses; links omitted when unset. |
 | `PURSER_PRICE_PROVIDER` | `none` | Daily closes for hand-tracked positions: `none` (record closes by hand) or `tiingo`. The provider sees ticker symbols only. See [Track holdings by hand](../../how-to/manual-holdings/). |
 | `PURSER_PRICE_STALE_DAYS` | `7` | A hand-tracked position whose newest close is older than this many days is flagged `stale` (and `price.stale` fires once). 1 to 365. |
+| `PURSER_FEED_STALE_DAYS` | `4` | A mapped SimpleFIN account whose bank balance date is more than this many days old is stale: `feed.stale` fires once per frozen date and `whats_new` lists it until the bank updates. 1 to 90. Runtime-editable through `PUT /config` (`feed_stale_days`). See [Connect a bank with SimpleFIN](../../how-to/simplefin/). |
+| `PURSER_TIMEZONE` | `UTC` | The household time zone, an IANA name such as `America/New_York`. Its calendar date is "today" everywhere Purser reasons about days: due and overdue bills, matching's late bills, snoozes, the digest's week ahead, net worth and balance defaults, review age, reconciliation's "no future dates", price and feed staleness, and the Grafana forecast view. Timestamps (audit log, fetches, sessions) stay UTC, and so do the scheduled job times (06:30 sync, 06:45 matching and the rest). The default keeps an existing install on the day it already had. Runtime-editable through **Config -> Settings** or `PUT /config` (`timezone`); an unknown zone is refused with 422, and an unknown `PURSER_TIMEZONE` stops startup. Any token with read scope gets the current ledger day and zone from `GET /clock`, for a client that dates its own writes. |
 
 The price provider's **API key** has no environment variable on purpose: Purser
 is the party that sends it, so it lives only in Purser's encrypted settings

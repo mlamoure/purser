@@ -29,14 +29,14 @@ What makes the marker trustworthy:
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime
+from datetime import date
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from purser import audit, events, ledger, locks
+from purser import audit, clock, events, ledger, locks
 from purser.admin import security
 from purser.core import ledger as core
 from purser.feed.drift import ELIGIBLE_TYPES as _DRIFT_TYPES
@@ -46,10 +46,9 @@ BASIS_POSTED = "posted"
 BASIS_PENDING_INCLUSIVE = "pending_inclusive"
 BASES = (BASIS_POSTED, BASIS_PENDING_INCLUSIVE)
 
-# Postings-balance accounts: the set the drift check compares (§7.3). A
-# loan/property balance is its latest valuation and a brokerage balance adds
-# market value (§8), so their postings sum is not the figure a statement
-# shows — record a valuation for those instead.
+# Ordinary postings-balance accounts. Manual brokerage requires explicit
+# cash-only intent: its overall balance also includes holdings (§8).
+# Loan/property accounts use valuations instead.
 ELIGIBLE_TYPES = _DRIFT_TYPES
 
 # A liability's statement shows the amount OWED as a positive number, while
@@ -120,6 +119,7 @@ class Check:
     """A recorded reconciliation, re-checked against the ledger now."""
 
     reconciliation: AccountReconciliation
+    component: Literal["balance", "cash"]
     statement_balance: Decimal
     ledger_balance: Decimal  # on as_of, in the recorded basis, now
     difference: Decimal  # ledger_balance - target; 0 = it still holds
@@ -134,6 +134,7 @@ class Outcome:
     """What a reconcile did — or, on a dry run, would do."""
 
     account_id: uuid.UUID
+    component: Literal["balance", "cash"]
     as_of: date
     basis: str
     statement_balance: Decimal  # as the statement shows it
@@ -210,6 +211,7 @@ def check(session: Session, rows: Sequence[AccountReconciliation]) -> dict[uuid.
         now = sums[(row.account_id, row.as_of)][row.basis]
         out[row.id] = Check(
             reconciliation=row,
+            component="cash" if account_types[row.account_id] == "brokerage" else "balance",
             statement_balance=to_statement_sign(account_types[row.account_id], target),
             ledger_balance=now,
             difference=_q(now - target),
@@ -261,7 +263,7 @@ def _validated_amount(value: Decimal) -> Decimal:
     return value
 
 
-def _lock_account(session: Session, account_id: uuid.UUID) -> Account:
+def _lock_account(session: Session, account_id: uuid.UUID, component: str) -> Account:
     """Serialize every reconcile of one account on its row lock. Read fresh:
     a waiter must see the marker the previous holder committed.
 
@@ -275,7 +277,17 @@ def _lock_account(session: Session, account_id: uuid.UUID) -> Account:
         raise ledger.NotFoundError(f"account {account_id} not found")
     if account.is_virtual:
         raise ledger.LedgerError(f"{account.path} is a category; only real accounts reconcile")
-    if account.type not in ELIGIBLE_TYPES:
+    if account.type == "brokerage":
+        if component != "cash":
+            raise ledger.LedgerError(
+                "brokerage reconciliation requires component='cash' and the statement's "
+                "cash balance, never its total account value"
+            )
+        if account.holdings_source != "manual":
+            raise ledger.LedgerError("brokerage cash reconciliation requires manual holdings")
+    elif component != "balance":
+        raise ledger.LedgerError("component='cash' is only for manual brokerage accounts")
+    elif account.type not in ELIGIBLE_TYPES:
         raise ledger.LedgerError(
             f"{account.path} is a {account.type} account; reconciliation compares a "
             f"postings balance ({', '.join(sorted(ELIGIBLE_TYPES))}). Record a "
@@ -293,6 +305,7 @@ def reconcile(
     statement_balance: Decimal,
     token: ApiToken,
     basis: str = BASIS_POSTED,
+    component: Literal["balance", "cash"] = "balance",
     dry_run: bool = False,
     today: date | None = None,
 ) -> Outcome:
@@ -310,13 +323,13 @@ def reconcile(
     if basis not in BASES:
         raise ledger.LedgerError(f"basis must be one of: {', '.join(BASES)}")
     statement_balance = _validated_amount(statement_balance)
-    today = today or datetime.now(UTC).date()
+    today = today or clock.ledger_today()
     if as_of > today:
         raise ledger.LedgerError(
             f"as_of {as_of} is in the future; reconcile a statement date on or before {today}"
         )
 
-    account = _lock_account(session, account_id)
+    account = _lock_account(session, account_id, component)
     target = to_ledger_sign(account.type, statement_balance)
     statement = to_statement_sign(account.type, target)
 
@@ -346,6 +359,7 @@ def reconcile(
     adjustment = _q(target - observed)
     outcome = Outcome(
         account_id=account.id,
+        component=component,
         as_of=as_of,
         basis=basis,
         statement_balance=statement,
@@ -415,6 +429,7 @@ def _repeat(
     adjustment = _q(Decimal(existing.adjustment))
     return Outcome(
         account_id=account.id,
+        component="cash" if account.type == "brokerage" else "balance",
         as_of=existing.as_of,
         basis=existing.basis,
         statement_balance=to_statement_sign(account.type, recorded_target),
@@ -464,7 +479,8 @@ def _record(session: Session, account: Account, outcome: Outcome, *, token: ApiT
             date=outcome.as_of,
             payee_name=PAYEE,
             description=(
-                f"Reconciliation adjustment: {outcome.basis} balance on {outcome.as_of} "
+                f"Reconciliation adjustment: {outcome.basis} {outcome.component} "
+                f"on {outcome.as_of} "
                 f"was {outcome.ledger_balance}, statement target {outcome.target_balance}"
             ),
             requested_status=core.Status.POSTED,
@@ -496,6 +512,7 @@ def _record(session: Session, account: Account, outcome: Outcome, *, token: ApiT
         "reconciliation_id": str(row.id),
         "as_of": outcome.as_of.isoformat(),
         "basis": outcome.basis,
+        "component": outcome.component,
         "statement_balance": str(outcome.statement_balance),
         "target_balance": str(outcome.target_balance),
         "ledger_balance": str(outcome.ledger_balance),

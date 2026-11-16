@@ -14,8 +14,17 @@ silently.
 Checking, savings, cash and credit-card accounts. These are the accounts whose
 balance is the sum of their transactions.
 
-Loan and property balances are valuations, and a brokerage balance includes
-market value, so their statements are not reconciled this way. Record a
+Manual brokerage accounts can reconcile **cash only** with explicit
+`component: "cash"`. Enter the broker's cash balance, excluding securities
+and unvested awards; never enter total account value. Feed brokerage accounts
+must first be switched to manual holdings by an administrator. Other eligible
+accounts use `component: "balance"` (the default).
+
+For example, cash of -100.00 in the ledger and a reported cash balance of
+25.00 produce a 125.00 adjustment. Holdings worth 1000.00 remain unchanged,
+so total owned value becomes 1025.00. Unvested awards remain outside net worth.
+
+Loan and property balances are valuations. Record a
 valuation for a loan or property instead, with `POST /accounts/{id}/valuations`
 or the MCP tool `record_valuation` (see
 [Recording a valuation](../../explanation/balances/#recording-a-valuation)).
@@ -53,6 +62,14 @@ and not in `posted`.
 
 ## Preview, then reconcile
 
+For a read-only check first, use MCP `account_balance` or
+`GET /accounts/{id}/balance`. Their `bank_snapshot` exposes the bank-reported
+and available balances with ordinary read access. It is the **latest** feed
+snapshot, not a statement balance at your requested `as_of` date, and its
+comparison uses all live posting dates. Do not reconcile an old statement from
+that live difference. Available balance is a separate bank quantity, not the
+reconciliation target. See [Bank balance reads](../simplefin/#read-bank-balances-without-administration).
+
 `POST /accounts/{id}/reconcile` needs write scope. Start with a dry run. It
 runs the same computation, conflicts included, and writes nothing:
 
@@ -71,6 +88,7 @@ runs the same computation, conflicts included, and writes nothing:
   "account_id": "3f6c1e52-1b1e-4c55-9a7e-0b8f5d2a7c41",
   "as_of": "2026-09-30",
   "basis": "posted",
+  "component": "balance",
   "statement_balance": "1250.0000",
   "target_balance": "1250.0000",
   "ledger_balance": "1225.0000",
@@ -89,7 +107,7 @@ look for a missing or duplicated transaction before you commit. Then send the
 same body without `dry_run`. The answer is the same, with `created: true` and
 the new ids.
 
-`as_of` is the statement date, today (UTC) or earlier. A future date is
+`as_of` is the statement date, today (in the household time zone, UTC by default) or earlier. A future date is
 rejected.
 
 ## What Purser records
@@ -118,7 +136,9 @@ It re-checks the claim every time you read it:
 
 - `GET /accounts/{id}` (and the accounts list) carries `reconciliation`, the
   latest reconciliation with `ledger_balance` (the balance on that date now),
-  `difference` (ledger balance minus target) and `in_balance`.
+  `difference` (ledger balance minus target) and `in_balance`. The `component`
+  identifies cash-only brokerage claims. A changing share price cannot move a
+  cash reconciliation; a backdated cash transaction can.
 - `GET /accounts/{id}/reconciliations` lists every reconciliation, newest
   first, each re-checked the same way.
 - The agent tool `list_accounts` carries the same check for each reconciled

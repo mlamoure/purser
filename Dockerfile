@@ -32,6 +32,12 @@ RUN uv sync --frozen --no-dev
 
 FROM python:3.15-slim
 
+# Refresh distribution security fixes even when the upstream image predates
+# them. Scan the resulting image, not just the Python lockfile.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 # Dependencies arrive in the builder's virtualenv. Runtime pip/ensurepip are
 # unused and carry a separate set of vendored libraries outside our lockfile.
 RUN python -m pip uninstall --yes pip \

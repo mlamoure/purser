@@ -7,6 +7,8 @@
 #      Settings fields in purser/config.py (env_prefix PURSER_) plus literal
 #      PURSER_* references in code — must be documented in
 #      docs/src/content/docs/reference/configuration.md.
+#   3. relative links: no root-absolute "](/…)" links (they break under the
+#      GitHub Pages base path).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 fail=0
@@ -36,7 +38,17 @@ if [ -n "$missing" ]; then
   fail=1
 fi
 
+# 3) No root-absolute internal links. "](/how-to/x/)" resolves on the lab
+#    site but breaks under the GitHub Pages subpath (DOCS_BASE=/purser), and
+#    only the second, subpath build in ci.yml would catch it. Link relative
+#    to the page instead: "](../../how-to/x/)".
+if hits=$(grep -rnE '\]\(/[^/)]' docs/src/content/docs); then
+  echo "Root-absolute links in docs — make them relative (../../section/page/):"
+  echo "$hits"
+  fail=1
+fi
+
 if [ "$fail" -eq 0 ]; then
-  echo "docs content check OK — no retired terms, env-var coverage complete"
+  echo "docs content check OK — no retired terms, env-var coverage complete, links relative"
 fi
 exit "$fail"

@@ -204,6 +204,245 @@ class TestPurge:
             assert (kept.via, kept.carried_from) == ("explicit", None)
             assert session.get(Transaction, uuid.UUID(pending["id"])) is None
 
+    @staticmethod
+    def _linked_sale(harness: FeedHarness, *, quantity: str = "10") -> dict[str, str]:
+        """A brokerage account tracked by hand whose feed sent a SOLD row of
+        500.00, and a sale that linked it as its cash."""
+        sold_on = (datetime.now(UTC) - timedelta(days=6)).date()
+        while sold_on.weekday() >= 4:
+            sold_on -= timedelta(days=1)
+        sold_epoch = int(
+            datetime(sold_on.year, sold_on.month, sold_on.day, 15, tzinfo=UTC).timestamp()
+        )
+        harness.use_payload(
+            payload_of(
+                [{"id": "s1", "posted": sold_epoch, "amount": "500.00", "description": "SOLD"}]
+            )
+        )
+        cid = harness.connect()
+        resp = harness.client.post(
+            f"/connections/{cid}/map",
+            json={
+                "external_id": "Demo Checking",
+                "create": {"name": "Plan", "type": "brokerage", "path": "assets.plan"},
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        plan = _account_id_by_path(harness.client, "assets.plan")
+        assert (
+            harness.client.patch(
+                f"/accounts/{plan}", json={"holdings_source": "manual"}
+            ).status_code
+            == 200
+        )
+        assert harness.sync(cid)["imported"] == 1
+        (sold,) = _tx_rows(harness.client, "assets.plan")
+        position = harness.client.post(
+            f"/accounts/{plan}/positions",
+            json={
+                "symbol": "ACME",
+                "quantity": quantity,
+                "as_of": (sold_on - timedelta(days=30)).isoformat(),
+            },
+        ).json()["id"]
+        price = str(Decimal("500") / Decimal(quantity))
+        sale = harness.client.post(
+            f"/positions/{position}/events",
+            json={
+                "kind": "sell",
+                "occurred_on": sold_on.isoformat(),
+                "quantity": quantity,
+                "price": price,
+                "transaction_id": sold["id"],
+            },
+        )
+        assert sale.status_code == 201, sale.text
+        return {
+            "cid": cid,
+            "plan": plan,
+            "position": position,
+            "event": sale.json()["event"]["id"],
+            "sold": sold["id"],
+            "sold_on": sold_on.isoformat(),
+            "quantity": quantity,
+            "price": price,
+        }
+
+    def test_purge_refuses_a_feed_row_linked_to_a_trade(self, harness: FeedHarness) -> None:
+        """A sale that linked a feed row as its cash (decision 103) is undone
+        through that row's correction chain. Deleting the row and NULLing the
+        chain's lineage would leave the trade impossible to reverse, so the
+        purge refuses, naming the trade and the steps that work."""
+        sale = self._linked_sale(harness)
+        with get_sessionmaker()() as session:
+            account = session.get(Account, uuid.UUID(sale["plan"]))
+            assert account is not None
+            assert feed_repair.purge_preflight(session, account, None)["trade_links"] == 1
+            for include in (False, True):
+                with pytest.raises(RepairRefused, match="reverse the trade") as refused:
+                    feed_repair.execute_purge(
+                        session,
+                        account,
+                        since=None,
+                        actor_token_id=None,
+                        include_corrections=include,
+                    )
+                message = str(refused.value)
+                assert sale["event"] in message and "ACME" in message
+                for step in ("reopen", "manual", "--include-corrections", "replay", "again"):
+                    assert step in message, step
+                session.rollback()
+            # Nothing was deleted: the bank row is still the trade's cash.
+            assert session.get(Transaction, uuid.UUID(sale["sold"])) is not None
+
+    def test_the_trade_link_recipe_counts_the_cash_once(
+        self, harness: FeedHarness, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The refusal's steps, end to end, on a closed position: reopen,
+        reverse, purge with --include-corrections, replay, record the trade
+        again linking the re-imported row. The cash counts once, the
+        register's heads equal the sums, and the nightly parity check finds
+        nothing to rebuild."""
+        from purser import balances
+        from purser.models import Posting
+
+        sale = self._linked_sale(harness, quantity="40")  # every share: then closed
+        position, plan = sale["position"], uuid.UUID(sale["plan"])
+        assert (
+            harness.client.patch(f"/positions/{position}", json={"closed": True}).status_code == 200
+        )
+        # 1. reopen (2. the account is already tracked by hand)
+        assert (
+            harness.client.patch(f"/positions/{position}", json={"closed": False}).status_code
+            == 200
+        )
+        # 3. reverse the trade: the row gets its category back
+        assert harness.client.post(f"/position-events/{sale['event']}/reverse").status_code == 200
+        with get_sessionmaker()() as session:
+            account = session.get(Account, plan)
+            assert account is not None
+            plan_report = feed_repair.purge_preflight(session, account, None)
+            assert (plan_report["trade_links"], plan_report["corrected"]) == (0, 1)
+            assert plan_report["correction_rows"] == 4  # link pair + undo pair
+            # Without the flag the corrected row is refused, listing it.
+            with pytest.raises(RepairRefused, match="--include-corrections") as refused:
+                feed_repair.execute_purge(session, account, since=None, actor_token_id=None)
+            assert sale["sold"] in str(refused.value)
+            session.rollback()
+            # 4. purge with --include-corrections
+            summary = feed_repair.execute_purge(
+                session, account, since=None, actor_token_id=None, include_corrections=True
+            )
+            session.commit()
+        assert summary["transactions_deleted"] == 5
+        assert summary["corrected_purged"] == 1 and summary["correction_rows_purged"] == 4
+        assert summary["position_events_unlinked"] == 2  # the sell and its reversal
+        assert _tx_rows(harness.client, "assets.plan") == []
+        # 5. replay
+        with get_sessionmaker()() as session:
+            _c, fetch_ids = feed_repair.replay_plan(session, sale["cid"], None)
+            assert (
+                feed_repair.execute_replay(session, fetch_ids, actor_token_id=None)["imported"] == 1
+            )
+        (reimported,) = _tx_rows(harness.client, "assets.plan")
+        # 6. record the trade again, linking the re-imported row
+        again = harness.client.post(
+            f"/positions/{position}/events",
+            json={
+                "kind": "sell",
+                "occurred_on": sale["sold_on"],
+                "quantity": sale["quantity"],
+                "price": sale["price"],
+                "transaction_id": reimported["id"],
+            },
+        )
+        assert again.status_code == 201, again.text
+
+        with get_sessionmaker()() as session:
+            later = select(Transaction.reverses_id).where(Transaction.reverses_id.is_not(None))
+            heads = list(
+                session.execute(
+                    select(Posting.amount)
+                    .join(Transaction, Transaction.id == Posting.transaction_id)
+                    .where(
+                        Posting.account_id == plan,
+                        Transaction.status.in_(["pending", "posted"]),
+                        Transaction.id.not_in(later),
+                    )
+                ).scalars()
+            )
+            assert [Decimal(a) for a in heads] == [Decimal("500")]  # counted once
+            from purser import ledger
+
+            assert ledger.account_balances(session, [plan])[plan] == Decimal("500")
+            rebuilt: list[bool] = []
+            real_rebuild = balances.rebuild_running
+
+            def spy(session_: object) -> None:
+                rebuilt.append(True)
+                real_rebuild(session_)  # type: ignore[arg-type]
+
+            monkeypatch.setattr(balances, "rebuild_running", spy)
+            balances.heal_and_probe(session)
+            session.commit()
+            assert rebuilt == []
+        listed = _tx_rows(harness.client, "assets.plan")
+        assert [Decimal(r["amount"]) for r in listed] == [Decimal("500")]
+        assert listed[0]["securities_trade"] is True
+
+    def test_a_person_corrected_feed_row_is_refused_then_purged_whole(
+        self, harness: FeedHarness
+    ) -> None:
+        """A posted feed row a person recategorized (original, reversal,
+        replacement). Purging the original alone used to leave the
+        replacement beside the replayed row, counted twice: it is refused,
+        the preflight names it as a person's correction, and
+        --include-corrections purges the chain so the replay counts it once."""
+        from purser import ledger
+
+        harness.use_payload(
+            payload_of(
+                [
+                    {
+                        "id": "p1",
+                        "posted": _recent_epoch(3),
+                        "amount": "500.00",
+                        "description": "PAYROLL",
+                    }
+                ]
+            )
+        )
+        cid = harness.connect()
+        harness.map_new(cid, "Demo Checking", "assets.checking")
+        assert harness.sync(cid)["imported"] == 1
+        (row,) = _tx_rows(harness.client, "assets.checking")
+        with get_sessionmaker()() as session:
+            ledger.ensure_category_path(session, "income.bonus", actor_token_id=None)
+            session.commit()
+        resp = harness.client.patch(f"/transactions/{row['id']}", json={"category": "income.bonus"})
+        assert resp.status_code == 200, resp.text
+        account_id = uuid.UUID(_account_id_by_path(harness.client, "assets.checking"))
+        with get_sessionmaker()() as session:
+            account = session.get(Account, account_id)
+            assert account is not None
+            report = feed_repair.purge_preflight(session, account, None)
+            assert report["corrected"] == 1 and report["person_corrected"] == [row["id"]]
+            with pytest.raises(RepairRefused, match="corrected after import"):
+                feed_repair.execute_purge(session, account, since=None, actor_token_id=None)
+            session.rollback()
+            summary = feed_repair.execute_purge(
+                session, account, since=None, actor_token_id=None, include_corrections=True
+            )
+            session.commit()
+        assert summary["transactions_deleted"] == 3 and summary["lineage_nulled"] == 0
+        with get_sessionmaker()() as session:
+            _c, fetch_ids = feed_repair.replay_plan(session, cid, None)
+            feed_repair.execute_replay(session, fetch_ids, actor_token_id=None)
+        listed = _tx_rows(harness.client, "assets.checking")
+        assert [Decimal(r["amount"]) for r in listed] == [Decimal("500")]
+        with get_sessionmaker()() as session:
+            assert ledger.account_balances(session, [account_id])[account_id] == Decimal("500")
+
 
 class TestReplay:
     def test_replay_plan_refuses_unknown_connection(self, harness: FeedHarness) -> None:

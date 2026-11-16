@@ -45,6 +45,7 @@ class Principal:
     user_id: uuid.UUID
     name: str
     scopes: tuple[str, ...]
+    identity: dict[str, Any] | None = None
 
 
 current_principal: ContextVar[Principal | None] = ContextVar("current_principal", default=None)
@@ -349,9 +350,12 @@ def audited_tool(
             reset = audit.current_request_id.set(request_id)
             started = time.monotonic()
             result: Any = None
+            shown: Any = None
             ok = True
+            denied = False
             error: str | None = None
             disclosed: list[str] | None = None
+            requested_extra: list[str] | None = None
             withheld: set[str] = set()
             dictionary: privacy.Dictionary | None = None
             include = kwargs.pop("include", None) if takes_include else None
@@ -361,7 +365,7 @@ def audited_tool(
                 purchase, amount = await anyio.to_thread.run_sync(_privacy_settings)
                 default = privacy.defaults(purchase=purchase, amount=amount)
                 withheld = default - chosen
-                disclosed = sorted(chosen & default & emits.fields()) or None
+                requested_extra = sorted(chosen & default & emits.fields()) or None
                 dictionary = (
                     await anyio.to_thread.run_sync(_dictionary)
                     if privacy.has_ref(kwargs) or privacy.needs_dictionary(withheld, emits)
@@ -397,9 +401,11 @@ def audited_tool(
                     if takes_include and not emits.passthrough
                     else result
                 )
-                return _ensure_text_block(shown)
+                shown = _ensure_text_block(shown)
+                return shown
             except BaseException as exc:
                 ok = False
+                denied = isinstance(exc, McpAuthError)
                 error = str(exc)[:300]
                 if withheld and isinstance(exc, Exception) and not isinstance(exc, McpAuthError):
                     if dictionary is None and withheld & {privacy.PAYEE, privacy.DESCRIPTION}:
@@ -436,7 +442,31 @@ def audited_tool(
                         detail["error"] = error
                     if ok and isinstance(result, list):
                         detail["rows"] = len(result)
-                    await anyio.to_thread.run_sync(
+                    from purser import sharing
+
+                    summary = sharing.summarize(shown if ok else None, requested=kwargs)
+                    observed = set(summary["sensitive_fields"])
+                    if ok:
+                        observed |= privacy.present_declared_fields(
+                            sharing.payload(shown)[0], emits
+                        )
+                    disclosed = sorted(set(requested_extra or []) & observed) or None
+                    detail.update(
+                        identity=principal.identity,
+                        sharing=summary,
+                        requested_extra=requested_extra or [],
+                        completion_point="tool_return",
+                    )
+                    outcome = (
+                        "denied"
+                        if denied
+                        else "failed"
+                        if not ok
+                        else "empty"
+                        if summary["empty"]
+                        else "shared"
+                    )
+                    event = await anyio.to_thread.run_sync(
                         functools.partial(
                             audit.record_call,
                             actor_token_id=principal.token_id,
@@ -447,8 +477,12 @@ def audited_tool(
                             request_id=request_id,
                             detail=detail,
                             disclosed=disclosed,
+                            channel="mcp",
+                            outcome=outcome,
+                            strict=True,
                         )
                     )
+                    await anyio.to_thread.run_sync(audit.record_receipt, event)
 
         EMITS[fn.__name__] = emits
         if takes_include:
@@ -463,3 +497,65 @@ def audited_tool(
         return mcp.tool(**register_kwargs)(wrapper)
 
     return decorate
+
+
+def audited_resource(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Direct financial resource reads use the same evidence as tools.
+
+    read_series already owns a call record; avoid counting its nested read twice.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if audit.current_request_id.get() is not None:
+            return await fn(*args, **kwargs)
+        principal = current_principal.get()
+        request_id = uuid.uuid4()
+        reset = audit.current_request_id.set(request_id)
+        result: Any = None
+        ok = False
+        denied = False
+        try:
+            result = await fn(*args, **kwargs)
+            ok = True
+            return result
+        except McpAuthError:
+            denied = True
+            raise
+        finally:
+            audit.current_request_id.reset(reset)
+            if principal is not None:
+                from purser import sharing
+
+                summary = sharing.summarize(result if ok else None, requested=kwargs)
+                event = await anyio.to_thread.run_sync(
+                    functools.partial(
+                        audit.record_call,
+                        actor_token_id=principal.token_id,
+                        kind="read",
+                        action=f"resource.{fn.__name__}",
+                        entity_type="series",
+                        entity_id=None,
+                        request_id=request_id,
+                        channel="resource",
+                        strict=True,
+                        outcome="denied"
+                        if denied
+                        else "failed"
+                        if not ok
+                        else "empty"
+                        if summary["empty"]
+                        else "shared",
+                        detail={
+                            "resource": fn.__name__,
+                            "ok": ok,
+                            "identity": principal.identity,
+                            "args": audit.clip_values(kwargs),
+                            "sharing": summary,
+                            "completion_point": "resource_return",
+                        },
+                    )
+                )
+                await anyio.to_thread.run_sync(audit.record_receipt, event)
+
+    return wrapper

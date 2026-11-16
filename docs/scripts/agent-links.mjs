@@ -24,10 +24,10 @@ function absolute(text, page) {
 }
 
 // dist/tutorials/quickstart.md.txt -> <canonical>tutorials/quickstart/; the
-// home page's file is dist/.md.txt -> <canonical>.
+// home page is dist/.md.txt (older plugin) or dist/index.md.txt -> <canonical>.
 function pageUrl(file) {
   const rel = relative(root, file).slice(0, -'.md.txt'.length);
-  return new URL(rel ? `${rel}/` : '', canonical).href;
+  return new URL(rel && rel !== 'index' ? `${rel}/` : '', canonical).href;
 }
 
 function frontmatterTitle(text) {

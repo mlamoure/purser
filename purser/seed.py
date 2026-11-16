@@ -2,13 +2,13 @@
 two months of transactions, one transfer pair, one recurring bill) so
 matching, forecasting, and the Grafana views have something to show."""
 
-from datetime import date, timedelta
+from datetime import timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from purser import audit, matching, schedules
+from purser import audit, clock, matching, schedules
 from purser import ledger as ledger_service
 from purser.core import ledger as core
 from purser.models import Account, Transaction
@@ -27,13 +27,15 @@ DEMO_SPEND = [
 
 
 def _has_user_data(session: Session) -> bool:
-    """Anything beyond the migration-seeded category tree counts as user data:
-    a real (non-category) account, or any transaction. (Checking a specific
-    demo path is not enough — a live install whose accounts happen to use
-    other paths must never be seeded over, #217. Connections are deliberately
-    not consulted: an unmapped connection carries no ledger state.)"""
+    """Anything beyond what the migrations seed — the category tree and the
+    system account equity.securities (0043, decision 103) — counts as user
+    data: a real account, or any transaction. (Checking a specific demo path
+    is not enough — a live install whose accounts happen to use other paths
+    must never be seeded over, #217. Connections are deliberately not
+    consulted: an unmapped connection carries no ledger state.)"""
+    seeded_types = ledger_service.CATEGORY_TYPES | ledger_service.SYSTEM_TYPES
     real_account = session.execute(
-        select(Account.id).where(Account.type.not_in(ledger_service.CATEGORY_TYPES)).limit(1)
+        select(Account.id).where(Account.type.not_in(seeded_types)).limit(1)
     ).scalar_one_or_none()
     if real_account is not None:
         return True
@@ -78,7 +80,7 @@ def seed_demo(session: Session, *, force: bool = False) -> dict[str, int]:
     acct("Income", "category_income", "income")
     acct("Salary", "category_income", "income.salary")
 
-    today = date.today()
+    today = clock.ledger_today()
     created = 0
     for month_offset in (2, 1):
         month_start = (today.replace(day=1) - timedelta(days=1)).replace(day=1)

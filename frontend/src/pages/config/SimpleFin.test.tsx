@@ -14,6 +14,8 @@ const CONNECTION = {
   created_at: "2026-06-01T12:00:00Z",
   last_fetch_at: "2026-06-02T12:00:00Z",
   last_errors: [],
+  last_issues: [],
+  protocol_version: 2,
   fetches_today: 1,
   backfill_cursor: null,
   backfill_complete: true,
@@ -34,15 +36,17 @@ function row(over: Partial<DiscoveredOut>): DiscoveredOut {
     drift_basis: "pending_inclusive",
     drift_basis_pinned: false,
     drift_basis_learned: "pending_inclusive",
+    ambiguous: false,
     ...over,
   };
 }
 
-function setup(rows: DiscoveredOut[]) {
+function setup(rows: DiscoveredOut[], connection: object = CONNECTION) {
   mockApi({
-    "GET /connections": ok([CONNECTION]),
+    "GET /connections": ok([connection]),
     "GET /config": ok(undefined),
     "GET /connections/{connection_id}/discovered": ok(rows),
+    "GET /connections/inventory": ok([]),
     "PATCH /accounts/{account_id}": ok({}),
   });
   return renderWithProviders(<SimpleFin />);
@@ -108,5 +112,42 @@ describe("SimpleFin feed accounts: drift-basis pin (issue #307)", () => {
       params: { path: { account_id: "acct-card" } },
       body: { drift_basis_override: null },
     });
+  });
+});
+
+describe("SimpleFin connection errors (issue #479)", () => {
+  it("shows each v2 error with its code", async () => {
+    setup([], {
+      ...CONNECTION,
+      status: "warning",
+      last_errors: ["Log in again", "Requested range too long"],
+      last_issues: [
+        { code: "con.auth", msg: "Log in again", conn_id: "CON-1", account_id: null },
+        { code: "gen.api", msg: "Requested range too long", conn_id: null, account_id: null },
+      ],
+    });
+    expect(
+      await screen.findByText("con.auth: Log in again; gen.api: Requested range too long"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a v1 message without a code", async () => {
+    setup([], {
+      ...CONNECTION,
+      status: "warning",
+      last_errors: ["Connection to Example Bank may need attention"],
+      last_issues: [
+        {
+          code: "gen.",
+          msg: "Connection to Example Bank may need attention",
+          conn_id: null,
+          account_id: null,
+        },
+      ],
+      protocol_version: 1,
+    });
+    expect(
+      await screen.findByText("Connection to Example Bank may need attention"),
+    ).toBeInTheDocument();
   });
 });

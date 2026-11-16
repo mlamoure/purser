@@ -270,8 +270,10 @@ class TestSchedulesApi:
         assert denied.status_code == 403
         # The one-release /activate wrapper is retired (#347): deciding the
         # suggestion is the only path.
-        assert client.post(f"/schedules/{resp.json()['id']}/activate").status_code == 404
-        assert client.post(f"/schedules/{resp.json()['id']}/reject").status_code == 404
+        # With the SPA installed its GET catch-all makes an unknown POST
+        # return 405; API-only builds return 404. Neither exposes this action.
+        assert client.post(f"/schedules/{resp.json()['id']}/activate").status_code in (404, 405)
+        assert client.post(f"/schedules/{resp.json()['id']}/reject").status_code in (404, 405)
         # Human accept creates the schedule active and materializes.
         confirmed = client.post(decide, json={"decision": "accept"})
         assert confirmed.status_code == 200, confirmed.text
@@ -643,7 +645,10 @@ class TestSchedulesApi:
                 {"tx": tx_id, "acct": account_id, "cat": cat_id},
             )
         stats = client.post("/matching/run").json()
-        assert stats["auto_matched"] == 1
+        assert stats["auto_matched"] == 0
+        assert stats["proposed"] == 1
+        proposal = client.get("/matching/proposed").json()[0]
+        assert client.post(f"/matching/{proposal['id']}/confirm").status_code == 200
 
         # The remaining live instances follow the matched actual (-214) on the
         # next materialization — no deletion needed (#231 estimate refresh) —

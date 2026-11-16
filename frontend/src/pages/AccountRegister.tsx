@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, errorDetail } from "../lib/api";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
@@ -25,13 +25,20 @@ const selectClass = "h-9 rounded-md border border-border bg-card px-2 text-sm";
  * review actions that used to live on /review inline on each row. */
 export default function AccountRegister() {
   const { accountId } = useParams<{ accountId: string }>();
+  const [params] = useSearchParams();
+  const [reviewOnly, setReviewOnly] = useState(params.get("reviewed") === "false");
+  const [selected, setSelected] = useState<string[]>([]);
+  const [preview, setPreview] = useState(false);
+  const qc = useQueryClient();
   const [q, setQ] = useState("");
   const searchQ = useDebouncedValue(q, SEARCH_DEBOUNCE_MS);
   const [statusFilter, setStatusFilter] = useState<"live" | "posted" | "pending" | "expected">(
-    "live",
+    ["posted", "pending", "expected"].includes(params.get("status") ?? "")
+      ? (params.get("status") as "posted" | "pending" | "expected")
+      : "live",
   );
-  const [start, setStart] = useState("");
-  const [end, setEnd] = useState("");
+  const [start, setStart] = useState(params.get("start") ?? "");
+  const [end, setEnd] = useState(params.get("end") ?? "");
   const [offset, setOffset] = useState(0);
   // A brokerage account tracked by hand (#390) adds a Positions tab.
   const [tab, setTab] = useState<"register" | "positions">("register");
@@ -48,10 +55,9 @@ export default function AccountRegister() {
     enabled: !!accountId,
   });
 
-  const statuses =
-    statusFilter === "live" ? ["pending", "posted"] : [statusFilter];
+  const statuses = statusFilter === "live" ? ["pending", "posted"] : [statusFilter];
   const page = useQuery({
-    queryKey: ["register", accountId, searchQ, statusFilter, start, end, offset],
+    queryKey: ["register", accountId, searchQ, statusFilter, start, end, offset, reviewOnly],
     queryFn: async () => {
       const { data, error } = await api.GET("/transactions", {
         params: {
@@ -61,6 +67,7 @@ export default function AccountRegister() {
             with_category_provenance: true,
             limit: PAGE_SIZE,
             offset,
+            ...(reviewOnly ? { reviewed: false } : {}),
             ...(searchQ ? { q: searchQ } : {}),
             ...(start ? { start } : {}),
             ...(end ? { end } : {}),
@@ -80,6 +87,33 @@ export default function AccountRegister() {
   const proposed = useQuery({
     queryKey: ["proposed-matches"],
     queryFn: async () => (await api.GET("/matching/proposed")).data ?? [],
+  });
+
+  useEffect(() => {
+    setSelected([]);
+    setPreview(false);
+  }, [accountId, searchQ, statusFilter, start, end, offset, reviewOnly, page.data]);
+  useEffect(() => {
+    const id = params.get("transaction");
+    if (id && page.data)
+      document.getElementById(`transaction-${id}`)?.scrollIntoView?.({ block: "center" });
+  }, [params, page.data]);
+  const reviewableRows = (page.data?.items ?? []).filter(
+    (t) => t.needs_review && t.status === "posted",
+  );
+  const selectedRows = reviewableRows.filter((t) => selected.includes(t.id));
+  const mark = useMutation({
+    mutationFn: async () => {
+      const { error } = await api.POST("/transactions/mark-reviewed", {
+        body: { transaction_ids: selectedRows.map((t) => t.id), escalate: false },
+      });
+      if (error) throw new Error(errorDetail(error));
+    },
+    onSuccess: () => {
+      setSelected([]);
+      setPreview(false);
+      qc.invalidateQueries();
+    },
   });
 
   if (!accountId) return null;
@@ -119,103 +153,197 @@ export default function AccountRegister() {
         <PositionsPanel accountId={accountId} />
       ) : (
         <>
-      <div className="flex flex-wrap items-end gap-3">
-        <div className="grow">
-          <Input
-            placeholder="Search description…"
-            value={q}
-            onChange={(e) => {
-              setQ(e.target.value);
-              setOffset(0);
-            }}
-          />
-        </div>
-        <select
-          className={selectClass}
-          value={statusFilter}
-          onChange={(e) => {
-            setStatusFilter(e.target.value as typeof statusFilter);
-            setOffset(0);
-          }}
-        >
-          <option value="live">Pending + posted</option>
-          <option value="posted">Posted only</option>
-          <option value="pending">Pending only</option>
-          <option value="expected">Expected (upcoming)</option>
-        </select>
-        <Input
-          type="date"
-          className="w-40"
-          value={start}
-          onChange={(e) => {
-            setStart(e.target.value);
-            setOffset(0);
-          }}
-        />
-        <Input
-          type="date"
-          className="w-40"
-          value={end}
-          onChange={(e) => {
-            setEnd(e.target.value);
-            setOffset(0);
-          }}
-        />
-      </div>
-
-      <Card>
-        <Table>
-          <thead>
-            <tr>
-              <Th>Date</Th>
-              <Th>Payee</Th>
-              <Th>Description</Th>
-              <Th className="text-right">Amount</Th>
-              <Th className="text-right">Balance</Th>
-              <Th>Category</Th>
-              <Th>Status</Th>
-              <Th>Actions</Th>
-            </tr>
-          </thead>
-          <tbody>
-            {(page.data?.items ?? []).map((t) => (
-              <RegisterRow
-                key={t.id}
-                t={t}
-                accountPath={account.data?.path ?? ""}
-                candidates={candidates.data ?? []}
-                proposed={proposed.data ?? []}
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="grow">
+              <Input
+                aria-label="Search description"
+                placeholder="Search description…"
+                value={q}
+                onChange={(e) => {
+                  setQ(e.target.value);
+                  setOffset(0);
+                }}
               />
-            ))}
-          </tbody>
-        </Table>
-        {page.data && page.data.items.length === 0 && (
-          <p className="text-sm text-muted-foreground">No transactions match.</p>
-        )}
-        <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground">
-          <span>
-            {total} transaction{total === 1 ? "" : "s"}
-          </span>
-          <span className="flex gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={offset === 0}
-              onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+            </div>
+            <select
+              className={selectClass}
+              aria-label="Transaction status"
+              value={statusFilter}
+              onChange={(e) => {
+                setStatusFilter(e.target.value as typeof statusFilter);
+                setOffset(0);
+              }}
             >
-              Prev
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              disabled={offset + PAGE_SIZE >= total}
-              onClick={() => setOffset(offset + PAGE_SIZE)}
-            >
-              Next
-            </Button>
-          </span>
-        </div>
-      </Card>
+              <option value="live">Pending + posted</option>
+              <option value="posted">Posted only</option>
+              <option value="pending">Pending only</option>
+              <option value="expected">Expected (upcoming)</option>
+            </select>
+            <Input
+              type="date"
+              className="w-40"
+              aria-label="Start date"
+              value={start}
+              onChange={(e) => {
+                setStart(e.target.value);
+                setOffset(0);
+              }}
+            />
+            <Input
+              type="date"
+              className="w-40"
+              aria-label="End date"
+              value={end}
+              onChange={(e) => {
+                setEnd(e.target.value);
+                setOffset(0);
+              }}
+            />
+          </div>
+
+          <Card>
+            <div className="mb-3 flex flex-wrap items-center gap-3 text-sm">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={reviewOnly}
+                  onChange={(e) => {
+                    setReviewOnly(e.target.checked);
+                    setOffset(0);
+                  }}
+                />
+                Awaiting review only
+              </label>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={!selectedRows.length}
+                onClick={() => setPreview(true)}
+              >
+                Review selected ({selectedRows.length})
+              </Button>
+            </div>
+            {account.error && <ErrorText>{account.error.message}</ErrorText>}
+            {page.error && <ErrorText>{page.error.message}</ErrorText>}
+            {preview && (
+              <section
+                role="region"
+                aria-label="Confirm transaction review"
+                className="mb-4 rounded-lg border border-border p-3"
+              >
+                <h3 className="font-medium">
+                  Mark these {selectedRows.length} posted transactions reviewed?
+                </h3>
+                <p className="text-sm text-muted-foreground">
+                  This records your review. It does not change amounts or categories. Pending
+                  transactions and other pages are excluded.
+                </p>
+                <ul className="my-3 space-y-1 text-sm">
+                  {selectedRows.map((t) => (
+                    <li key={t.id}>
+                      {t.date} · {t.payee || t.description || "Transaction"} · {fmtAmount(t.amount)}{" "}
+                      · {t.category_path || "Transfer / split"}
+                    </li>
+                  ))}
+                </ul>
+                <div className="flex gap-2">
+                  <Button
+                    disabled={mark.isPending || !selectedRows.length}
+                    onClick={() => mark.mutate()}
+                  >
+                    Confirm review
+                  </Button>
+                  <Button variant="ghost" onClick={() => setPreview(false)}>
+                    Cancel
+                  </Button>
+                </div>
+                {mark.error && <ErrorText>{mark.error.message}</ErrorText>}
+              </section>
+            )}
+            <Table>
+              <thead>
+                <tr>
+                  <Th>
+                    <input
+                      type="checkbox"
+                      aria-label="Select all posted transactions awaiting review on this page"
+                      checked={
+                        reviewableRows.length > 0 && selectedRows.length === reviewableRows.length
+                      }
+                      disabled={!reviewableRows.length || mark.isPending}
+                      onChange={(e) =>
+                        setSelected(e.target.checked ? reviewableRows.map((t) => t.id) : [])
+                      }
+                    />
+                  </Th>
+                  <Th>Date</Th>
+                  <Th>Payee</Th>
+                  <Th>Description</Th>
+                  <Th className="text-right">Amount</Th>
+                  <Th className="text-right">Balance</Th>
+                  <Th>Category</Th>
+                  <Th>Status</Th>
+                  <Th>Actions</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {(page.data?.items ?? []).map((t) => (
+                  <RegisterRow
+                    key={t.id}
+                    t={t}
+                    accountPath={account.data?.path ?? ""}
+                    candidates={candidates.data ?? []}
+                    proposed={proposed.data ?? []}
+                    selection={
+                      t.needs_review && t.status === "posted" ? (
+                        <input
+                          type="checkbox"
+                          disabled={mark.isPending}
+                          aria-label={`Select ${t.payee || t.description || "transaction"} on ${t.date}`}
+                          checked={selected.includes(t.id)}
+                          onChange={(e) =>
+                            setSelected(
+                              e.target.checked
+                                ? [...selected, t.id]
+                                : selected.filter((id) => id !== t.id),
+                            )
+                          }
+                        />
+                      ) : (
+                        <span />
+                      )
+                    }
+                  />
+                ))}
+              </tbody>
+            </Table>
+            {page.data && page.data.items.length === 0 && (
+              <p className="text-sm text-muted-foreground">No transactions match.</p>
+            )}
+            <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground">
+              <span>
+                {total} transaction{total === 1 ? "" : "s"}
+              </span>
+              <span className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={offset === 0}
+                  onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}
+                >
+                  Prev
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={offset + PAGE_SIZE >= total}
+                  onClick={() => setOffset(offset + PAGE_SIZE)}
+                >
+                  Next
+                </Button>
+              </span>
+            </div>
+          </Card>
         </>
       )}
     </div>
@@ -280,7 +408,9 @@ export function RegisterRow({
   accountPath,
   candidates,
   proposed,
+  selection,
 }: {
+  selection?: React.ReactNode;
   t: TransactionOut;
   accountPath: string;
   candidates: TransferCandidateOut[];
@@ -340,6 +470,28 @@ export function RegisterRow({
   const confirmTransfer = useMutation({
     mutationFn: async (pair: { outgoing_id: string; incoming_id: string }) => {
       const { error: err } = await api.POST("/matching/confirm-transfer", { body: pair });
+      if (err) throw new Error(errorDetail(err));
+    },
+    onSuccess: refresh,
+    onError: (e) => setError(e.message),
+  });
+  // "Not a transfer" (#386): a pair with an inbox card is rejected through
+  // the card, so the inbox and the register agree; an older pair, which has
+  // no card, through the candidate endpoint. Either way it is remembered and
+  // nothing links the pair automatically again.
+  const notATransfer = useMutation({
+    mutationFn: async (pair: TransferCandidateOut) => {
+      if (pair.suggestion_id) {
+        const { error: err } = await api.POST("/suggestions/{suggestion_id}/decide", {
+          params: { path: { suggestion_id: pair.suggestion_id } },
+          body: { decision: "reject", reject_scope: "exact" },
+        });
+        if (err) throw new Error(errorDetail(err));
+        return;
+      }
+      const { error: err } = await api.POST("/matching/transfer-candidates/reject", {
+        body: { outgoing_id: pair.outgoing_id, incoming_id: pair.incoming_id },
+      });
       if (err) throw new Error(errorDetail(err));
     },
     onSuccess: refresh,
@@ -415,7 +567,8 @@ export function RegisterRow({
 
   return (
     <>
-      <tr className={t.status === "void" ? "opacity-50" : undefined}>
+      <tr id={`transaction-${t.id}`} className={t.status === "void" ? "opacity-50" : undefined}>
+        {selection !== undefined && <Td>{selection}</Td>}
         <Td className="whitespace-nowrap">{t.date}</Td>
         <Td className="max-w-40 truncate">{t.payee}</Td>
         <Td className="max-w-56 truncate text-muted-foreground">{t.description}</Td>
@@ -431,7 +584,17 @@ export function RegisterRow({
         </Td>
         <Td>
           <span className="flex items-center gap-1">
-            {t.split_lines > 0 ? (
+            {t.securities_trade ? (
+              // A securities trade's cash (#390, decision 103): booked to the
+              // system account equity.securities, it moves only with its
+              // trade, so it has no category to pick.
+              <span
+                className="text-sm text-muted-foreground"
+                title="The cash of a securities trade. It moves with the trade: to correct it, reverse the trade's position event (an agent's reverse_position_event, or the REST API) instead of editing this row."
+              >
+                Securities trade
+              </span>
+            ) : t.split_lines > 0 ? (
               <SplitLines txId={t.id} count={t.split_lines} realPath={t.account_path} />
             ) : (
               <CategorySelect
@@ -489,19 +652,31 @@ export function RegisterRow({
         <Td>
           <span className="flex flex-wrap gap-1">
             {candidate && (
-              <Button
-                size="sm"
-                variant="outline"
-                title={`Looks like a transfer (${fmtAmount(candidate.amount)} pair)`}
-                onClick={() =>
-                  confirmTransfer.mutate({
-                    outgoing_id: candidate.outgoing_id,
-                    incoming_id: candidate.incoming_id,
-                  })
-                }
-              >
-                Link ⇄
-              </Button>
+              <>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  title={`Looks like a transfer (${fmtAmount(candidate.amount)} pair)`}
+                  onClick={() =>
+                    confirmTransfer.mutate({
+                      outgoing_id: candidate.outgoing_id,
+                      incoming_id: candidate.incoming_id,
+                    })
+                  }
+                >
+                  Link ⇄
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-label="Not a transfer"
+                  title="Not a transfer — these two rows are never linked automatically"
+                  disabled={notATransfer.isPending}
+                  onClick={() => notATransfer.mutate(candidate)}
+                >
+                  ✗
+                </Button>
+              </>
             )}
             {match && (
               <>
@@ -563,7 +738,8 @@ export function RegisterRow({
                   variant="ghost"
                   title="Skip this occurrence — it will not come back"
                   onClick={() => {
-                    if (window.confirm("Skip this occurrence? It will not come back.")) voidTx.mutate();
+                    if (window.confirm("Skip this occurrence? It will not come back."))
+                      voidTx.mutate();
                   }}
                 >
                   Skip
@@ -596,7 +772,7 @@ export function RegisterRow({
       </tr>
       {isInstance && picking && (
         <tr>
-          <Td colSpan={8}>
+          <Td colSpan={selection ? 9 : 8}>
             <PaidPicker
               accountPath={accountPath}
               around={t.date}
@@ -608,7 +784,7 @@ export function RegisterRow({
       )}
       {error && (
         <tr>
-          <Td colSpan={8}>
+          <Td colSpan={selection ? 9 : 8}>
             <ErrorText>{error}</ErrorText>
           </Td>
         </tr>
@@ -652,7 +828,9 @@ function PaidPicker({
         })
       ).data?.items ?? [],
   });
-  const rows = (candidates.data ?? []).filter((c) => !c.schedule_id);
+  // A trade's cash moves only with its trade (#390, decision 103): it never
+  // settles a bill, so it is never offered here.
+  const rows = (candidates.data ?? []).filter((c) => !c.schedule_id && !c.securities_trade);
   return (
     <div className="rounded-md border border-border p-2 text-sm">
       <p className="mb-1 text-muted-foreground">Which bank row paid this? (±10 days)</p>
@@ -851,6 +1029,20 @@ function AccountHeader({ account }: { account: AccountOut | undefined }) {
     onError: (e) => setError(e.message),
   });
 
+  // The feed balance of a hand-tracked brokerage account is its cash (#390,
+  // decision 103): admin opt-in that puts the account in the drift check.
+  const setFeedBalanceIsCash = useMutation({
+    mutationFn: async (feed_balance_is_cash: boolean) => {
+      const { error: err } = await api.PATCH("/accounts/{account_id}", {
+        params: { path: { account_id: account!.id } },
+        body: { feed_balance_is_cash },
+      });
+      if (err) throw new Error(errorDetail(err));
+    },
+    onSuccess: invalidate,
+    onError: (e) => setError(e.message),
+  });
+
   const reopen = useMutation({
     mutationFn: async () => {
       const { error: err } = await api.POST("/accounts/{account_id}/reopen", {
@@ -973,6 +1165,20 @@ function AccountHeader({ account }: { account: AccountOut | undefined }) {
                   <option value="feed">from the feed</option>
                   <option value="manual">tracked by hand</option>
                 </select>
+              </label>
+            )}
+            {account.type === "brokerage" && isAdmin && account.holdings_source === "manual" && (
+              <label
+                className="flex items-center gap-2 text-sm text-muted-foreground"
+                title="The feed's balance for this account is its cash (a cash sweep), not the account's total value. When on, each sync compares that balance with the account's transactions and reports drift, like a checking account's."
+              >
+                <input
+                  type="checkbox"
+                  checked={account.feed_balance_is_cash}
+                  disabled={setFeedBalanceIsCash.isPending}
+                  onChange={(e) => setFeedBalanceIsCash.mutate(e.target.checked)}
+                />
+                Feed balance is cash
               </label>
             )}
           </>

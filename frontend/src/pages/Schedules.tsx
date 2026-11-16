@@ -13,6 +13,7 @@ import { api, errorDetail } from "../lib/api";
 import { fmtAmount, overrideBody } from "../lib/utils";
 import type { components } from "../api/schema";
 import CategorySelect from "../components/CategorySelect";
+import { OccurrenceCertainty, OccurrenceEvidence } from "../components/OccurrenceCertainty";
 import { Badge, Button, Card, CardTitle, ErrorText, Input, Label, Table, Td, Th } from "../components/ui";
 
 type ScheduleOut = components["schemas"]["ScheduleOut"];
@@ -120,6 +121,7 @@ type FormState = {
   month: number;
   custom: string;
   dtstart: string;
+  date_type: "fixed" | "estimated";
   amount_type: "fixed" | "estimated";
   estimate_basis: "last" | "rolling_avg_3" | "rolling_avg_12" | "counterparty_balance";
   amount: string;
@@ -153,6 +155,7 @@ function initialForm(accounts: AccountOut[], existing?: ScheduleOut, accountPath
     month: Number(p.BYMONTH ?? today().slice(5, 7)),
     custom: existing?.rrule ?? "",
     dtstart: existing?.dtstart ?? today(),
+    date_type: existing?.date_type ?? "fixed",
     amount_type: (existing?.amount_type as "fixed" | "estimated") ?? "fixed",
     estimate_basis: (existing?.estimate_basis as FormState["estimate_basis"]) ?? "rolling_avg_3",
     amount: existing?.amount ?? "",
@@ -189,6 +192,7 @@ function ScheduleForm({
         account: form.account,
         rrule,
         dtstart: form.dtstart || null,
+        date_type: form.date_type,
         amount_type: form.amount_type,
         amount: form.amount === "" ? null : form.amount,
         payee: form.payee || null,
@@ -205,6 +209,7 @@ function ScheduleForm({
             name: body.name,
             rrule: body.rrule,
             dtstart: body.dtstart,
+            date_type: body.date_type,
             amount_type: body.amount_type,
             amount: body.amount,
             payee: body.payee,
@@ -314,6 +319,10 @@ function ScheduleForm({
           </div>
         )}
         <div>
+          <Label>Date certainty</Label>
+          <select className={`${selectClass} w-full`} aria-label="Schedule date certainty" value={form.date_type} onChange={e => set("date_type", e.target.value as FormState["date_type"])}>
+            <option value="fixed">Known recurring date</option><option value="estimated">Estimated arrival date</option>
+          </select>
           <Label>Anchor date (dtstart)</Label>
           <Input type="date" value={form.dtstart} onChange={(e) => set("dtstart", e.target.value)} />
           <p className="mt-1 text-xs text-muted-foreground">Every-2-weeks counts from here; pass the last real occurrence.</p>
@@ -491,7 +500,8 @@ export function InstancesPanel({
 
   if (detail.isLoading) return <p className="text-sm text-muted-foreground">Loading instances…</p>;
   const instances = detail.data?.instances ?? [];
-  if (instances.length === 0) return <p className="text-sm text-muted-foreground">No live instances.</p>;
+  const matched = detail.data?.matched_instances ?? [];
+  if (instances.length === 0 && matched.length === 0) return <p className="text-sm text-muted-foreground">No live instances.</p>;
   return (
     <div className="mt-2">
       <Table>
@@ -514,9 +524,11 @@ export function InstancesPanel({
                 <span className="flex gap-1">
                   {i.overdue && <Badge variant="red">overdue</Badge>}
                   <BasisBadge instance={i} />
+                  <OccurrenceCertainty value={i.certainty} />
                 </span>
               </Td>
               <Td>
+                <OccurrenceEvidence transactionId={i.transaction_id} onSaved={refresh} />
                 {stating === i.transaction_id ? (
                   <span className="flex flex-wrap items-center gap-1">
                     <Input
@@ -613,6 +625,13 @@ export function InstancesPanel({
           ))}
         </tbody>
       </Table>
+      {matched.length > 0 && <details className="mt-3">
+        <summary>Recently matched occurrences ({matched.length}, up to 50)</summary>
+        {matched.map(i => <div key={i.transaction_id} className="mt-2">
+          <span>{i.date} · {fmtAmount(i.amount)}</span>
+          <OccurrenceCertainty value={i.certainty} />
+        </div>)}
+      </details>}
       {error && <ErrorText>{error}</ErrorText>}
     </div>
   );
@@ -750,6 +769,17 @@ export function ForecastChart({ accountPath }: { accountPath: string }) {
               {data.days[data.days.length - 1]?.date}
             </text>
           </svg>
+          <details className="mt-2 text-sm">
+            <summary>Upcoming occurrences and estimate details</summary>
+            <div className="max-h-80 space-y-2 overflow-auto">
+              {data.days.flatMap(day => day.events.map((event, index) => <div key={`${day.date}-${index}`}>
+                <span>{day.date} · {event.label} · {fmtAmount(event.amount)}</span>
+                <span className="text-xs text-muted-foreground"> · Amount calculation: {BASIS_LABEL[event.basis ?? ""] ?? event.basis ?? "not recorded"}</span>
+                <OccurrenceCertainty value={event.certainty} />
+                {event.certainty?.slot && <OccurrenceEvidence slot={event.certainty.slot} onSaved={() => { void forecast.refetch(); }} />}
+              </div>))}
+            </div>
+          </details>
           <p className="mt-1 text-xs text-muted-foreground">
             {data.coverage.schedules_active === 0
               ? "No schedules are modeled on this account — the line is flat by construction."
@@ -810,10 +840,12 @@ export default function Schedules() {
         })
       ).data ?? [],
   });
-  const suggestionsOpen = useQuery({
-    queryKey: ["suggestions"],
-    queryFn: async () => (await api.GET("/suggestions", { params: { query: {} } })).data ?? [],
+  // The open total, not the length of one capped inbox page (#386 review).
+  const suggestionCounts = useQuery({
+    queryKey: ["suggestions", "counts"],
+    queryFn: async () => (await api.GET("/suggestions/counts")).data,
   });
+  const suggestionsOpen = suggestionCounts.data?.total ?? 0;
 
   const accountById = new Map((accounts.data ?? []).map((a) => [a.id, a]));
   const realAccounts = (accounts.data ?? []).filter((a) => !a.is_virtual);
@@ -875,9 +907,9 @@ export default function Schedules() {
         </Button>
         <Button onClick={() => setCreating(true)}>New schedule</Button>
       </div>
-      {(suggestionsOpen.data?.length ?? 0) > 0 && (
+      {suggestionsOpen > 0 && (
         <p className="text-sm text-muted-foreground">
-          {suggestionsOpen.data!.length} suggestion{suggestionsOpen.data!.length === 1 ? " awaits" : "s await"} a decision on the{" "}
+          {suggestionsOpen} suggestion{suggestionsOpen === 1 ? " awaits" : "s await"} a decision on the{" "}
           <Link to="/" className="underline">
             Dashboard
           </Link>

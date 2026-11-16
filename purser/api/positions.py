@@ -9,8 +9,8 @@ watermark, kicked after the response.
 """
 
 import uuid
-from datetime import UTC, datetime
 from datetime import date as date_type
+from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 
@@ -18,12 +18,12 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, s
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from purser import appsettings, ledger, networth
+from purser import appsettings, clock, ledger, networth
 from purser.admin.auth import AdminToken, ReadToken, WriteToken
 from purser.db import get_session
+from purser.holdings import cash as trade_cash
 from purser.holdings import prices as price_service
 from purser.holdings import service
-from purser.holdings.projection import utc_today
 from purser.models import Position, PositionEvent, SecurityPrice
 
 DbSession = Annotated[Session, Depends(get_session)]
@@ -31,7 +31,11 @@ DbSession = Annotated[Session, Depends(get_session)]
 router = APIRouter(tags=["positions"])
 prices_router = APIRouter(prefix="/prices", tags=["prices"])
 
-EventKind = Literal["set_quantity", "buy", "sell"]
+EventKind = Literal["set_quantity", "buy", "sell", "vest", "transfer_out"]
+LotMethod = Literal["fifo", "lifo", "hifo"]
+Acquisition = Literal[
+    "buy", "rsu_vest", "plan_purchase", "espp_purchase", "transfer_in", "drip", "gift", "unknown"
+]
 
 
 def _handle(exc: ledger.LedgerError) -> HTTPException:
@@ -39,7 +43,31 @@ def _handle(exc: ledger.LedgerError) -> HTTPException:
         return HTTPException(status.HTTP_404_NOT_FOUND, str(exc))
     if isinstance(exc, service.PositionConflict):
         return HTTPException(status.HTTP_409_CONFLICT, str(exc))
+    if isinstance(exc, service.LotRuleError):
+        return HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, detail={"code": exc.code, "message": str(exc)}
+        )
+    if isinstance(exc, trade_cash.CashAlreadyRecorded):
+        return HTTPException(
+            status.HTTP_409_CONFLICT,
+            detail={
+                "code": "cash_already_recorded",
+                "message": str(exc),
+                "transaction_id": str(exc.transaction_id),
+                "date": exc.date.isoformat(),
+                "amount": str(exc.amount),
+            },
+        )
     return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
+
+
+_CASH_CONFLICT = {
+    "description": "Either an open position in that symbol exists (`detail` is a message), "
+    "or the account already shows this trade's cash: `detail.code` is "
+    "`cash_already_recorded` with the row's `transaction_id`, `date` and `amount`. Link it "
+    "with `transaction_id` when it is this trade's cash, or pass `force_cash` when it is a "
+    "different payment of the same amount."
+}
 
 
 class PositionOut(BaseModel):
@@ -65,6 +93,13 @@ class PositionOut(BaseModel):
     unrealized_gain: Decimal | None
     stale_price: bool  # the close is older than the configured staleness threshold
     events: int  # effective events (reversed ones and reversals excluded)
+    # Lots (#393, decision 107). A position that tracks lots reports its
+    # lots' basis as cost_basis (null while any share has none or sits
+    # outside every lot), never an average.
+    tracks_lots: bool = False
+    open_lots: int = 0
+    unallocated_quantity: Decimal | None = None  # shares outside every lot
+    basis_unknown_quantity: Decimal | None = None  # shares in lots with no basis
 
     @classmethod
     def from_state(cls, state: service.PositionState) -> "PositionOut":
@@ -86,6 +121,12 @@ class PositionOut(BaseModel):
             unrealized_gain=state.unrealized_gain,
             stale_price=state.stale_price,
             events=state.events,
+            tracks_lots=state.lots is not None,
+            open_lots=state.open_lots,
+            unallocated_quantity=state.lots.unallocated if state.lots is not None else None,
+            basis_unknown_quantity=(
+                state.lots.unknown_quantity if state.lots is not None else None
+            ),
         )
 
 
@@ -125,17 +166,61 @@ class PositionCreate(BaseModel):
 
 class PositionUpdate(BaseModel):
     name: str | None = Field(default=None, max_length=200)
-    closed: Literal[True] | None = Field(
+    closed: bool | None = Field(
         default=None,
-        description="Close the position (it must hold nothing today); a closed position "
-        "is read-only history. There is no reopen: open a new position instead.",
+        description="`true` closes the position (it must hold nothing today); a closed "
+        "position is read-only history. `false` reopens a closed one so an event can be "
+        "corrected (reverse it, record it again, close again); refused (409) while another "
+        "position in the symbol is open on the account, or a later one exists.",
     )
+
+
+class LotAllocationIn(BaseModel):
+    """One lot a sell or transfer_out draws on: `lot_id`, or the broker's
+    `external_ref` (matched by blind index), or `unallocated: true` for
+    shares outside every lot."""
+
+    lot_id: uuid.UUID | None = None
+    external_ref: str | None = Field(default=None, max_length=200)
+    unallocated: bool = False
+    quantity: Decimal = Field(gt=0, decimal_places=6, max_digits=20)
+
+    def item(self) -> tuple[str | None, bool, Decimal]:
+        ref = str(self.lot_id) if self.lot_id is not None else self.external_ref
+        return ref, self.unallocated, self.quantity
+
+
+class LotOpenIn(BaseModel):
+    """The lot a buy or vest opens. Basis defaults to the event's own (a
+    priced buy's cost with fees; a vest's fair market value); otherwise the
+    given per-share and/or total basis; otherwise unknown."""
+
+    acquisition: Acquisition | None = None
+    external_ref: str | None = Field(default=None, max_length=200)
+    plan: str | None = Field(default=None, max_length=200)
+    acquired_on: date_type | None = Field(
+        default=None, description="Defaults to the event date; never after it."
+    )
+    basis_per_share: Decimal | None = Field(default=None, ge=0, decimal_places=6, max_digits=20)
+    cost_basis: Decimal | None = Field(default=None, ge=0, decimal_places=4, max_digits=20)
+
+    def spec(self) -> service.LotSpec:
+        return service.LotSpec(
+            acquisition=self.acquisition,
+            external_ref=self.external_ref,
+            plan=self.plan,
+            acquired_on=self.acquired_on,
+            basis_per_share=self.basis_per_share,
+            cost_basis=self.cost_basis,
+        )
 
 
 class PositionEventCreate(BaseModel):
     kind: EventKind = Field(
         description="`set_quantity` (the absolute share count on that date), `buy` or "
-        "`sell` (a change by `quantity`)."
+        "`sell` (a change by `quantity`), `vest` (the NET shares an award vest delivered; "
+        "`price` is the fair market value per share) or `transfer_out` (shares that left "
+        "with no price and no cash)."
     )
     occurred_on: date_type = Field(description="Today or earlier; a future date is refused.")
     quantity: Decimal = Field(ge=0, decimal_places=6, max_digits=20)
@@ -167,6 +252,84 @@ class PositionEventCreate(BaseModel):
         "corrects. The correction takes that event's place in the day's order; without "
         "`replaces` a new event goes after every event already recorded that day.",
     )
+    proceeds_to: Literal["cash", "none"] | None = Field(
+        default=None,
+        description="`sell` only. `cash` (the default): the net proceeds (quantity x price - "
+        "fees, rounded half up to the cent) land on the account, balanced against the system "
+        "account `equity.securities`, on the trade date (or `settle_on`). `none`: no cash "
+        "moves, e.g. shares withheld for tax. Refused with 409 when the account already shows "
+        "that cash.",
+    )
+    funded_from: Literal["cash", "none"] | None = Field(
+        default=None,
+        description="`buy` only. `cash`: the cost (quantity x price + fees, rounded half up "
+        "to the cent) leaves the account's cash on the trade date (or `settle_on`). `none` "
+        "(the default): the money came from outside the account, e.g. a payroll plan "
+        "purchase.",
+    )
+    settle_on: date_type | None = Field(
+        default=None,
+        description="When the cash posts: by default the trade date, the day the shares "
+        "leave the holdings (so net worth does not dip); a later date posts it at "
+        "settlement instead. The double-count check looks from the trade to five days "
+        "after `settle_on`, or after the next business day (T+1) when it is not given. A "
+        "trade that links its cash (`transaction_id`) settles on that row's date, and its "
+        "window comes from the trade alone (next business day + 5 days).",
+    )
+    transaction_id: uuid.UUID | None = Field(
+        default=None,
+        description="Link the trade's cash to this posted row on the account (one real leg, "
+        "one category leg) instead of posting new cash: the row is re-booked to "
+        "`equity.securities` through the reversal-pair correction. It must hold exactly the "
+        "trade's cash (its net, to the cent, so the trade needs its `price`), dated from the "
+        "trade to five days after the next business day (`settle_on` does not widen it), "
+        "and no row of its correction chain may settle a bill; any other row is a 422.",
+    )
+    force_cash: bool | None = Field(
+        default=None,
+        description="Post the trade's cash even though the account already shows a row of "
+        "exactly that amount around the settlement date (the 409 `cash_already_recorded` "
+        "names it): for a true coincidence, a different payment that is not this trade's "
+        "cash. The trade's audit row records the override and the row it posted over. Not "
+        "with `transaction_id`, nor on a trade that moves no cash.",
+    )
+    gross_quantity: Decimal | None = Field(
+        default=None,
+        ge=0,
+        decimal_places=6,
+        max_digits=20,
+        description="`vest` only: the gross units that vested (net `quantity` + withheld).",
+    )
+    withheld_quantity: Decimal | None = Field(
+        default=None,
+        ge=0,
+        decimal_places=6,
+        max_digits=20,
+        description="`vest` only: units withheld for tax (default 0).",
+    )
+    lot_method: LotMethod | None = Field(
+        default=None,
+        description="`sell`/`transfer_out` on a position that tracks lots: draw on its lots "
+        "first in, first out (`fifo`, by acquisition date), last in (`lifo`) or highest "
+        "basis per share first (`hifo`; refused while a candidate lot has no basis). A method "
+        "never takes unallocated shares. Give this or `lots`.",
+    )
+    lots: list[LotAllocationIn] | None = Field(
+        default=None,
+        max_length=500,
+        description="`sell`/`transfer_out`: specific identification. The quantities add up "
+        "to `quantity`; each lot gives at most what it has left after every disposal "
+        "recorded so far.",
+    )
+    lot: LotOpenIn | None = Field(
+        default=None,
+        description="`buy`/`vest`: the lot it opens. A vest always opens one; a buy opens "
+        "one when this is given or the position already tracks lots.",
+    )
+    unallocated: bool | None = Field(
+        default=None,
+        description="`buy` only: keep its shares outside every lot on a position that tracks lots.",
+    )
 
 
 class PositionEventOut(BaseModel):
@@ -184,6 +347,14 @@ class PositionEventOut(BaseModel):
     origin: Literal["manual", "agent", "import"]
     note: str | None
     source_note: str | None
+    proceeds_to: Literal["cash", "none"] | None = None
+    funded_from: Literal["cash", "none"] | None = None
+    settle_on: date_type | None = None
+    # The trade's cash row (posted by Purser or linked); on a reversal, the
+    # row that undid it.
+    transaction_id: uuid.UUID | None = None
+    gross_quantity: Decimal | None = None  # vest only
+    withheld_quantity: Decimal | None = None  # vest only
     created_at: datetime
 
     @classmethod
@@ -205,6 +376,12 @@ class PositionEventOut(BaseModel):
             origin=e.origin,
             note=e.note,
             source_note=e.source_note,
+            proceeds_to=e.proceeds_to,
+            funded_from=e.funded_from,
+            settle_on=e.settle_on,
+            transaction_id=e.transaction_id,
+            gross_quantity=e.gross_quantity,
+            withheld_quantity=e.withheld_quantity,
             created_at=e.created_at,
         )
 
@@ -278,7 +455,7 @@ def create_position(
                 account_ref=str(account_id),
                 symbol=body.symbol,
                 quantity=body.quantity,
-                as_of=body.as_of or utc_today(),
+                as_of=body.as_of or clock.ledger_today(),
                 cost_basis=body.cost_basis,
                 name=body.name,
                 note=body.note,
@@ -306,17 +483,26 @@ def create_position(
     return out
 
 
-@router.patch("/positions/{position_id}")
+_REOPEN_CONFLICT = {
+    "description": "Reopen refused: another position in the symbol is open on the account, "
+    "or a later position in it exists (a symbol's positions never overlap in time)."
+}
+
+
+@router.patch("/positions/{position_id}", responses={409: _REOPEN_CONFLICT})
 def update_position(
     position_id: uuid.UUID, body: PositionUpdate, token: WriteToken, session: DbSession
 ) -> PositionOut:
-    """Rename a position, or close one that holds nothing today."""
+    """Rename a position, close one that holds nothing today, or reopen a
+    closed one (`closed: false`) to correct its events: reverse the wrong
+    event, record the right one, close it again."""
     try:
         position = service.update_position(
             session,
             position_id=position_id,
             name=body.name,
-            close=bool(body.closed),
+            close=body.closed is True,
+            reopen=body.closed is False,
             token=token,
         )
         out = PositionOut.from_state(_state(session, position))
@@ -339,7 +525,11 @@ def list_position_events(
     return [PositionEventOut.from_model(r, reversed_by.get(r.id)) for r in rows]
 
 
-@router.post("/positions/{position_id}/events", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/positions/{position_id}/events",
+    status_code=status.HTTP_201_CREATED,
+    responses={409: _CASH_CONFLICT},
+)
 def record_position_event(
     position_id: uuid.UUID,
     body: PositionEventCreate,
@@ -347,13 +537,34 @@ def record_position_event(
     session: DbSession,
     background_tasks: BackgroundTasks,
 ) -> PositionEventResult:
-    """Record a `set_quantity`, `buy` or `sell`. The whole history is checked
+    """Record a `set_quantity`, `buy`, `sell`, `vest` or `transfer_out`.
+
+    On a position that tracks lots, a `sell` or `transfer_out` names the
+    lots it draws on (`lot_method` or `lots`; 422 `allocation_required`
+    otherwise), a `buy` opens a lot unless `unallocated`, and every write is
+    refused (422 with `detail.code`) that would leave a lot below zero or
+    the lots holding more than the position on any day. The whole history is checked
     after it: an event that would leave the position below zero on ANY date
     (a backdated sell, say) is refused with 422 naming that date. Any event,
     a backdate or not, that would leave this position holding shares on a
     day a CLOSED position in the same symbol held them or sold out is
-    refused with 409 (positions never overlap)."""
+    refused with 409 (positions never overlap).
+
+    A sale moves its net proceeds to the account's cash unless `proceeds_to`
+    is `none`; a buy takes its cost from the cash only with `funded_from`
+    `cash`. That cash is one posted system row against `equity.securities`
+    (it joins the unreviewed set), or an existing row linked with
+    `transaction_id`. When the account already shows a posted one-sided row
+    of exactly that amount around the settlement date, the call is refused
+    with 409 naming it, so the cash is never counted twice: link that row,
+    or pass `force_cash` when it is a different payment."""
     try:
+        allocation = service.resolve_allocation(
+            session,
+            position_id,
+            method=body.lot_method,
+            items=[a.item() for a in body.lots] if body.lots else None,
+        )
         event = service.record_event(
             session,
             position_id=position_id,
@@ -367,6 +578,16 @@ def record_position_event(
             source_note=body.source_note,
             replaces=body.replaces,
             token=token,
+            proceeds_to=body.proceeds_to,
+            funded_from=body.funded_from,
+            settle_on=body.settle_on,
+            transaction_id=body.transaction_id,
+            force_cash=bool(body.force_cash),
+            allocation=allocation,
+            lot=body.lot.spec() if body.lot is not None else None,
+            unallocated=bool(body.unallocated),
+            gross_quantity=body.gross_quantity,
+            withheld_quantity=body.withheld_quantity,
         )
         position = service.get_position(session, position_id)
         out = PositionEventResult(
@@ -389,8 +610,10 @@ def reverse_position_event(
     body: PositionReverseRequest | None = None,
 ) -> PositionEventResult:
     """Reverse an event (corrections are reversals, never edits). Refused when
-    the remaining history would go below zero on some date. The body (a
-    `note`) is optional."""
+    the remaining history would go below zero on some date. A trade's cash
+    goes with it, through the reversal pair every posted correction uses:
+    Purser's own cash row is corrected to zero, and a linked row gets its
+    category back. The body (a `note`) is optional."""
     try:
         reversal = service.reverse_event(
             session, event_id=event_id, note=body.note if body else None, token=token
@@ -545,7 +768,7 @@ def record_price(
 def price_status(token: ReadToken, session: DbSession) -> PriceStatusOut:
     """The configured provider, the newest provider fetch, each open
     position's close in effect today, and the last fetch failure."""
-    report = price_service.status(session, today=datetime.now(UTC).date())
+    report = price_service.status(session, today=clock.ledger_today())
     failure = report["last_failure"]
     return PriceStatusOut(
         provider=report["provider"],

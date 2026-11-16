@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
+import type { components } from "../api/schema";
 import { api, errorDetail } from "../lib/api";
 import { fmtAmount } from "../lib/utils";
-import { Badge, Card, CardTitle, Table, Td, Th } from "../components/ui";
-import { SuggestionCard } from "../components/SuggestionCard";
+import { Badge, Card, CardTitle, ErrorText, Table, Td, Th } from "../components/ui";
+import NeedsAttention from "../components/NeedsAttention";
 
 export default function Dashboard() {
   const [showHidden, setShowHidden] = useState(false);
@@ -26,25 +27,43 @@ export default function Dashboard() {
   });
   const networth = useQuery({
     queryKey: ["networth"],
-    queryFn: async () => (await api.GET("/networth", { params: { query: {} } })).data,
+    queryFn: async () => {
+      const { data, error } = await api.GET("/networth", { params: { query: {} } });
+      if (error) throw new Error(errorDetail(error));
+      return data;
+    },
+  });
+
+  const future = useQuery({
+    queryKey: ["networth", "potential"],
+    queryFn: async () => {
+      const { data, error } = await api.GET("/networth/potential");
+      if (error) throw new Error(errorDetail(error));
+      return data;
+    },
   });
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-3 gap-4">
-        <Card>
+      {networth.error && <ErrorText>{networth.error.message}</ErrorText>}
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+        <Card role="region" aria-label="Net worth">
           <p className="text-sm text-muted-foreground">Net worth</p>
           <p className="text-2xl font-bold">{fmtAmount(networth.data?.net_worth)}</p>
+          <UnvestedValue value={future.data} total={future.data?.potential_net_worth} />
         </Card>
-        <Card>
+        <Card role="region" aria-label="Assets">
           <p className="text-sm text-muted-foreground">Assets</p>
           <p className="text-2xl font-bold text-emerald-700">{fmtAmount(networth.data?.assets)}</p>
+          <UnvestedValue value={future.data} total={future.data?.potential_assets} details />
         </Card>
         <Card>
           <p className="text-sm text-muted-foreground">Liabilities</p>
           <p className="text-2xl font-bold text-red-700">{fmtAmount(networth.data?.liabilities)}</p>
         </Card>
       </div>
+
+      {future.error && <ErrorText>{`Unvested values unavailable: ${future.error.message}`}</ErrorText>}
 
       <NeedsAttention />
 
@@ -117,125 +136,49 @@ export default function Dashboard() {
   );
 }
 
-/** The review-queue leftovers that are not per-transaction (issue #112):
- * the suggestions inbox and the late-bills report — plus counts that point
- * into the registers. Everything else lives on the rows themselves. */
-function NeedsAttention() {
-  // The suggestions inbox (#233/#236): detected recurring bills and
-  // transfers, agent-proposed schedules, payments for a newly added card,
-  // transfer-link rules your manual transfer confirms proposed (#271), and
-  // the matcher's proposed matches (#246).
-  const suggestions = useQuery({
-    queryKey: ["suggestions"],
-    queryFn: async () => (await api.GET("/suggestions", { params: { query: {} } })).data ?? [],
-  });
-  const lateBills = useQuery({
-    queryKey: ["late-bills"],
-    queryFn: async () =>
-      // The report lists every live expectation with its aging; only the
-      // ones past their date are late — upcoming instances live on the
-      // Schedules page and in the forecast, not here (#236). A late bill
-      // with a proposed match is a match card in the inbox above (#246).
-      (
-        (await api.GET("/matching/unmatched", { params: { query: { direction: "expected" } } }))
-          .data ?? []
-      ).filter((b) => b.aging_days > 0 && !b.has_proposed_match),
-  });
-  const candidates = useQuery({
-    queryKey: ["transfer-candidates"],
-    queryFn: async () => (await api.GET("/matching/transfer-candidates")).data ?? [],
-  });
-  // The unreviewed set (#175). limit=1 because only the total is wanted —
-  // this is a count, not a second row source.
-  const unreviewed = useQuery({
-    queryKey: ["unreviewed"],
-    queryFn: async () => {
-      const { data, error } = await api.GET("/transactions", {
-        params: { query: { reviewed: false, limit: 1 } },
-      });
-      if (error) throw new Error(errorDetail(error));
-      return data;
-    },
-  });
-
-  const agentPending = useQuery({
-    queryKey: ["agent-pending"],
-    queryFn: async () => {
-      const { data } = await api.GET("/transactions", {
-        params: { query: { status: ["pending"], limit: 200 } },
-      });
-      return (data?.items ?? []).filter((t) => t.origin === "agent");
-    },
-  });
-
-
-  const unreviewedTotal = unreviewed.data?.total ?? 0;
-
-  const nothing =
-    (suggestions.data?.length ?? 0) === 0 &&
-    (lateBills.data?.length ?? 0) === 0 &&
-    (candidates.data?.length ?? 0) === 0 &&
-    (agentPending.data?.length ?? 0) === 0 &&
-    unreviewedTotal === 0;
-
+/** Keep the optional scenario inside the owned totals, without an empty card. */
+function UnvestedValue({ value, total, details = false }: {
+  value: components["schemas"]["PotentialNetWorthOut"] | undefined;
+  total: string | null | undefined;
+  details?: boolean;
+}) {
+  if (!value || (value.complete && value.unvested_awards === 0)) return null;
   return (
-    <Card>
-      <CardTitle>Needs attention</CardTitle>
-      {nothing && <p className="text-sm text-muted-foreground">All clear.</p>}
-      {(suggestions.data?.length ?? 0) > 0 && (
-        <div className="mt-2 space-y-2">
-          <p className="text-sm font-medium">
-            Suggestions — schedules, transfer links and bill matches Purser thinks you have{" "}
-            <Link to="/schedules" className="font-normal text-muted-foreground underline">
-              manage schedules
-            </Link>{" "}
-            <Link to="/config/rules" className="font-normal text-muted-foreground underline">
-              rules
-            </Link>
+    <div className="mt-3 border-t border-border pt-3 text-sm">
+      <p className="flex flex-wrap items-baseline justify-between gap-x-2">
+        <span className="text-muted-foreground">Including unvested</span>
+        <span className="font-semibold">{fmtAmount(total)}</span>
+      </p>
+      {!value.complete && (
+        <p className="mt-1 text-xs text-amber-700">Valuation incomplete</p>
+      )}
+      {value.stale_price_symbols.length > 0 && (
+        <p className="mt-1 text-xs text-amber-700">
+          Stale prices: {value.stale_price_symbols.join(", ")}.
+        </p>
+      )}
+      {details && (
+        <details className="mt-2 text-xs text-muted-foreground">
+          <summary className="cursor-pointer">
+            Unvested stock: {fmtAmount(value.unvested_value)}
+          </summary>
+          <p className="mt-2">
+            If all captured awards vest, at recorded stock prices and before tax withholding.
           </p>
-          {suggestions.data!.map((s) => (
-            <SuggestionCard key={s.id} suggestion={s} />
-          ))}
-        </div>
-      )}
-      {(lateBills.data?.length ?? 0) > 0 && (
-        <div className="mt-4 space-y-1">
-          <p className="text-sm font-medium">Late bills (expected, not seen)</p>
-          {lateBills.data!.map((b) => (
-            <p key={b.transaction_id} className="text-sm text-muted-foreground">
-              {b.payee ?? b.description ?? "(unknown)"} ·{" "}
-              <span className="font-mono">{fmtAmount(b.amount)}</span> · due {b.date} ·{" "}
-              <Badge variant={b.aging_days > 7 ? "red" : "amber"}>{b.aging_days}d late</Badge>
+          {!value.complete && (
+            <p className="mt-2">
+              Known priced awards: {fmtAmount(value.known_unvested_value)}.
+              {value.unknown_quantity_awards > 0 && ` ${value.unknown_quantity_awards} award(s) have unknown remaining units.`}
+              {value.unpriced_symbols.length > 0 && ` No usable price for ${value.unpriced_symbols.join(", ")}.`}
+              {value.unsupported_currency_awards > 0 && " Some awards need currency conversion."}
             </p>
-          ))}
-        </div>
-      )}
-      {unreviewedTotal > 0 && (
-        <p className="mt-4 text-sm">
-          <Badge variant="amber">{unreviewedTotal}</Badge>{" "}
-          <span className="text-muted-foreground">
-            transaction{unreviewedTotal === 1 ? "" : "s"} awaiting review — they arrived
-            without human eyes.
-          </span>
-        </p>
-      )}
-      {((candidates.data?.length ?? 0) > 0 || (agentPending.data?.length ?? 0) > 0) && (
-        <p className="mt-4 text-sm text-muted-foreground">
-          {(candidates.data?.length ?? 0) > 0 && (
-            <>
-              {candidates.data!.length} possible transfer pair
-              {candidates.data!.length === 1 ? "" : "s"} —{" "}
-            </>
           )}
-          {(agentPending.data?.length ?? 0) > 0 && (
-            <>
-              {agentPending.data!.length} agent proposal
-              {agentPending.data!.length === 1 ? "" : "s"} awaiting review —{" "}
-            </>
-          )}
-          open the account registers below to act on them.
-        </p>
+          <p className="mt-2">
+            {value.oldest_price_as_of && `Oldest price: ${value.oldest_price_as_of}`}
+            {value.next_vest_date && ` · Next scheduled vest: ${value.next_vest_date}`}
+          </p>
+        </details>
       )}
-    </Card>
+    </div>
   );
 }

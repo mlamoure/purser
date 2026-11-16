@@ -10,7 +10,7 @@ AI guess must not launder into "deterministic" for the next transaction.
 
 import uuid
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from sqlalchemy import func, select
@@ -21,8 +21,12 @@ from purser import memories as memories_service
 from purser import rules as rules_service
 from purser.core import rules as core_rules
 from purser.feed.importer import UNCATEGORIZED_EXPENSE, UNCATEGORIZED_INCOME
+from purser.ledger import CATEGORY_TYPES
 from purser.logging import get_logger
 from purser.models import Account, ApiToken, Posting, Transaction
+
+if TYPE_CHECKING:
+    from purser.transfers import SuppressedPairs
 
 log = get_logger(__name__)
 
@@ -55,6 +59,9 @@ def payee_memory(session: Session, payee_id: uuid.UUID) -> uuid.UUID | None:
             Transaction.payee_id.in_(rules_service.alias_group(session, payee_id)),
             Transaction.status == "posted",
             Account.is_virtual.is_(True),
+            # Categories only: a trade's cash leg on a system account
+            # (equity.securities, decision 103) is not what a payee is spent on.
+            Account.type.in_(CATEGORY_TYPES),
             Account.path.not_in(UNCATEGORIZED_PATHS),
         )
         .group_by(Posting.account_id)
@@ -106,6 +113,25 @@ def _uncategorized_rows(session: Session) -> list[Transaction]:
     ]
 
 
+def fits(
+    session: Session,
+    tx: Transaction,
+    category_id: uuid.UUID,
+    *,
+    pairs: "SuppressedPairs | None" = None,
+) -> bool:
+    """Whether an automatic answer of this category (or ``[account]``
+    target) is an answer for this row: it fits the row's currency, and a
+    real account would not make a transfer of a pair a person said is not a
+    transfer (``transfers.machine_answer_refused``, #386 review). Either way
+    the answer counts as none, and the next tier tries."""
+    from purser import transfers  # function-local, as in _apply_category
+
+    return fits_currency(session, tx, category_id) and not transfers.machine_answer_refused(
+        session, tx, category_id, pairs=pairs
+    )
+
+
 def fits_currency(session: Session, tx: Transaction, category_id: uuid.UUID) -> bool:
     """Whether this row can take this category (or ``[account]`` target).
 
@@ -128,9 +154,14 @@ def _apply_category(
     provenance: dict[str, Any],
     actor_token_id: uuid.UUID | None,
     token: ApiToken | None,
+    pairs: "SuppressedPairs | None" = None,
 ) -> None:
     category = session.get(Account, category_id)
     assert category is not None
+    from purser import ledger as ledger_service
+
+    # The classifier and rules never book to a system account (decision 103).
+    ledger_service.refuse_system_account(category)
     if not category.is_virtual:
         # A REAL account is the `[account]` transfer sugar (DESIGN §3.3): the
         # row becomes a one-sided transfer, not a differently-categorized flat.
@@ -147,7 +178,10 @@ def _apply_category(
             target_ref=category.path,
             token=token,
             auto_pairing=True,
+            pairs=pairs,
         )
+        if pairs is not None:
+            pairs.forget(tx.id)  # a posted row converts into a new one (#497 review)
         audit.record(
             session,
             actor_token_id=actor_token_id,
@@ -157,12 +191,14 @@ def _apply_category(
             after={"category": f"[{category.path}]", **provenance},
         )
         return
-    from purser import ledger as ledger_service
-
     if tx.status == "posted":
         ledger_service.recategorize_posted(
             session, tx=tx, category_id=category_id, token=token, provenance=provenance
         )
+        if pairs is not None:
+            # The correction is a new row the memory has not mapped to its
+            # lineage: read it again before the next check (#497 review).
+            pairs.forget(tx.id)
         return
     real_leg = next(p for p in tx.postings if not p.account.is_virtual)
     ledger_service.check_category_currency(real_leg.currency, category)
@@ -179,6 +215,47 @@ def _apply_category(
         before={"category": before_path},
         after={"category": category.path, **provenance},
     )
+
+
+def _try_apply(
+    session: Session,
+    tx: Transaction,
+    category_id: uuid.UUID,
+    *,
+    provenance: dict[str, Any],
+    actor_token_id: uuid.UUID | None,
+    token: ApiToken | None,
+    pairs: "SuppressedPairs | None" = None,
+) -> bool:
+    """``_apply_category`` for the pass, which goes on past a row that
+    changed under it (#386 review): a concurrent merge or correction took it
+    (``ledger.RowChanged``, seen under the row lock before anything is
+    written), or an '[account]' answer turned into one that would undo "not
+    a transfer" after the pre-check (``transfers.MachineAnswerRefused``), or
+    the '[account]' conversion met a row another writer holds — a sale
+    linking it, say (``ledger.RowBusy``, decision 103): the row stays as it is
+    for the next pass."""
+    from purser import ledger as ledger_service
+    from purser import transfers as transfers_service
+
+    try:
+        _apply_category(
+            session,
+            tx,
+            category_id,
+            provenance=provenance,
+            actor_token_id=actor_token_id,
+            token=token,
+            pairs=pairs,
+        )
+    except (
+        ledger_service.RowChanged,
+        ledger_service.RowBusy,
+        transfers_service.MachineAnswerRefused,
+    ) as exc:
+        log.info("categorize.row_skipped", transaction_id=str(tx.id), reason=str(exc))
+        return False
+    return True
 
 
 def run(
@@ -211,6 +288,10 @@ def run(
     category_paths: list[str] | None = None
     category_descriptions: dict[str, str] = {}
     provider_down = False
+    # The "not a transfer" memory, read once for the whole pass (#386 review).
+    from purser import transfers as transfers_service
+
+    pairs = transfers_service.SuppressedPairs()
     for tx in _uncategorized_rows(session):
         real_leg = next((p for p in tx.postings if not p.account.is_virtual), None)
         if active_rules and real_leg is not None:
@@ -228,36 +309,41 @@ def run(
             if (
                 rule is not None
                 and rule.category_id is not None
-                and fits_currency(session, tx, rule.category_id)
+                and fits(session, tx, rule.category_id, pairs=pairs)
             ):
                 # Precedence: rule > payee memory > AI (DESIGN §11). A rule
                 # must be able to beat a WRONG memory — that is the "I keep
                 # correcting this, graduate it into a rule" path. A target of
-                # another currency is no answer here, so the next tier tries.
-                _apply_category(
+                # another currency, or an '[account]' that would link a pair a
+                # person rejected, is no answer here, so the next tier tries.
+                if _try_apply(
                     session,
                     tx,
                     rule.category_id,
                     provenance={"source": "rule", "rule_id": str(rule.id)},
                     actor_token_id=actor_token_id,
                     token=token,
-                )
-                rules_service.mark_applied(session, [rule.id])
-                stats["rule"] += 1
+                    pairs=pairs,
+                ):
+                    rules_service.mark_applied(session, [rule.id])
+                    stats["rule"] += 1
+                else:
+                    stats["unresolved"] += 1
                 continue
 
         if tx.payee_id is not None:
             remembered = payee_memory(session, tx.payee_id)
-            if remembered is not None and fits_currency(session, tx, remembered):
-                _apply_category(
+            if remembered is not None and fits(session, tx, remembered, pairs=pairs):
+                applied = _try_apply(
                     session,
                     tx,
                     remembered,
                     provenance={"source": "deterministic"},
                     actor_token_id=actor_token_id,
                     token=token,
+                    pairs=pairs,
                 )
-                stats["deterministic"] += 1
+                stats["deterministic" if applied else "unresolved"] += 1
                 continue
         if settings.ai_provider == "none" or provider_down:
             stats["unresolved"] += 1
@@ -266,7 +352,9 @@ def run(
             options = list(
                 session.execute(
                     select(Account).where(
-                        Account.is_virtual.is_(True), Account.path.not_in(UNCATEGORIZED_PATHS)
+                        Account.is_virtual.is_(True),
+                        Account.type.in_(CATEGORY_TYPES),
+                        Account.path.not_in(UNCATEGORIZED_PATHS),
                     )
                 ).scalars()
             )
@@ -351,7 +439,15 @@ def run(
                 target=suggestion.category_path,
             )
             continue
-        _apply_category(
+        if transfers_service.machine_answer_refused(session, tx, category.id, pairs=pairs):
+            stats["unresolved"] += 1
+            log.info(
+                "categorize.not_a_transfer",
+                transaction_id=str(tx.id),
+                target=suggestion.category_path,
+            )
+            continue
+        applied = _try_apply(
             session,
             tx,
             category.id,
@@ -364,6 +460,7 @@ def run(
             },
             actor_token_id=actor_token_id,
             token=token,
+            pairs=pairs,
         )
-        stats["ai"] += 1
+        stats["ai" if applied else "unresolved"] += 1
     return stats

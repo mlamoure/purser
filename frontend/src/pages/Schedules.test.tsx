@@ -4,7 +4,7 @@ import type { components } from "../api/schema";
 import { overrideBody } from "../lib/utils";
 import { apiMock, mockApi, ok } from "../test/api";
 import { renderWithProviders } from "../test/render";
-import { ForecastChart, InstancesPanel } from "./Schedules";
+import Schedules, { ForecastChart, InstancesPanel } from "./Schedules";
 
 type ScheduleDetail = components["schemas"]["ScheduleDetail"];
 type InstanceOut = components["schemas"]["InstanceOut"];
@@ -30,6 +30,7 @@ const schedule = (instances: InstanceOut[]): ScheduleDetail => ({
   category_path: null,
   rrule: "FREQ=MONTHLY;BYMONTHDAY=5",
   dtstart: "2026-10-05",
+  date_type: "fixed",
   amount_type: "estimated",
   amount: null,
   estimate_basis: "counterparty_balance",
@@ -230,5 +231,27 @@ describe("ForecastChart range band (#247)", () => {
     await screen.findByText(/Low /);
     expect(container.querySelector('[data-testid="forecast-band"]')).toBeNull();
     expect(screen.queryByText(/Could dip to/)).not.toBeInTheDocument();
+  });
+});
+
+describe("Schedules page — suggestions awaiting a decision (#386)", () => {
+  it("counts every open suggestion, not one capped inbox page", async () => {
+    mockApi({
+      "GET /accounts": ok([]),
+      "GET /schedules": ok([]),
+      "GET /suggestions/counts": ok({
+        total: 31,
+        match: 0,
+        schedule: 30,
+        transfer_link: 0,
+        transfer_pair: 1,
+      }),
+    });
+
+    renderWithProviders(<Schedules />);
+
+    expect(await screen.findByText(/31 suggestions await a decision/)).toBeInTheDocument();
+    const paths = apiMock.GET.mock.calls.map(([path]) => path);
+    expect(paths).not.toContain("/suggestions");
   });
 });

@@ -18,6 +18,20 @@ class PathConflictError(LedgerError):
     """An account move's destination is taken -> 409 at the API layer."""
 
 
+class RowChanged(LedgerError):
+    """The row a write is about to change was corrected, merged or voided
+    since the caller read it (#386 review): 422 at the API layer; an
+    automatic pass skips the row and goes on."""
+
+
+class RowBusy(LedgerError):
+    """An automatic pass met a row another writer holds locked, or one a
+    securities trade claimed after the pass read the trade-cash lineage
+    (decision 103): it skips the row and takes it up on its next pass rather
+    than wait while it may hold the balance watermark. Not ``RowChanged``:
+    the row may be unchanged, only busy, so nothing is refused for it."""
+
+
 # ---------------------------------------------------------------------------
 # Path input (issue #214)
 # ---------------------------------------------------------------------------

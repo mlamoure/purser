@@ -11,9 +11,12 @@
  * same confirm the Rules page asks for. A `match` suggestion mirrors an
  * open match proposal (decision 86): the expected row against the bank row
  * and the variance; accept confirms it, reject rejects that pair for good,
- * and there is nothing to edit. */
+ * and there is nothing to edit. A `transfer_pair` suggestion is a transfer
+ * candidate (#386, decision 102): two bank rows of exactly opposite amounts
+ * that nothing links on its own; accept links them as one transfer, reject
+ * remembers they are not one, and there is nothing to edit. */
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api, errorDetail } from "../lib/api";
@@ -46,6 +49,7 @@ type Occurrence = {
   transaction_id: string | null;
   /** transfer_link evidence: the confirmed pair's incoming side. */
   incoming_date?: string;
+  description?: string;
 };
 
 function EvidenceTable({ id }: { id: string }) {
@@ -67,6 +71,7 @@ function EvidenceTable({ id }: { id: string }) {
       }
     | null
     | undefined;
+  if (detail.error) return <ErrorText>{detail.error.message}</ErrorText>;
   if (detail.isLoading) return <p className="text-xs text-muted-foreground">Loading evidence…</p>;
   if (!evidence?.occurrences?.length)
     return <p className="text-xs text-muted-foreground">No occurrence history attached.</p>;
@@ -84,7 +89,15 @@ function EvidenceTable({ id }: { id: string }) {
         <tbody>
           {evidence.occurrences.map((o) => (
             <tr key={`${o.date}-${o.transaction_id ?? o.amount}`}>
-              <Td>{o.date}</Td>
+              <Td>
+                {o.transaction_id ? (
+                  <Link className="underline" to={`/selection?id=${o.transaction_id}`}>
+                    {o.date}
+                  </Link>
+                ) : (
+                  o.date
+                )}
+              </Td>
               {pairs && <Td>{o.incoming_date ?? ""}</Td>}
               <Td className="text-right font-mono">{fmtAmount(o.amount)}</Td>
             </tr>
@@ -96,7 +109,9 @@ function EvidenceTable({ id }: { id: string }) {
           Typical gap {evidence.gaps.median_days} days
           {evidence.gaps.misses ? ` · ${evidence.gaps.misses} skipped` : ""}
           {evidence.gaps.out_of_bucket ? ` · ${evidence.gaps.out_of_bucket} irregular` : ""}
-          {evidence.amount ? ` · amount variability ${(Number(evidence.amount.cv) * 100).toFixed(0)}%` : ""}
+          {evidence.amount
+            ? ` · amount variability ${(Number(evidence.amount.cv) * 100).toFixed(0)}%`
+            : ""}
         </p>
       )}
     </div>
@@ -111,20 +126,31 @@ type Summary = {
   cadence?: string | null;
   /** A proposing agent's note (#250): what it read, e.g. a statement line. */
   note?: string | null;
+  latest_amount?: string | null;
+  price_changed?: boolean;
+  warning?: string;
 };
 
 function CardHeader({ suggestion }: { suggestion: SuggestionOut }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
-      <span className="grow font-medium">{suggestion.headline}</span>
+      <span className="min-w-0 grow break-words font-medium">{suggestion.headline}</span>
       <Badge>{sourceLabel(suggestion.source)}</Badge>
       {suggestion.confidence && (
-        <Badge variant={confidenceVariant(suggestion.confidence)}>
-          {Math.round(Number(suggestion.confidence) * 100)}% sure
+        <Badge
+          variant={confidenceVariant(suggestion.confidence)}
+          title="Heuristic evidence score, not a probability that the suggestion is correct"
+        >
+          Pattern strength {Math.round(Number(suggestion.confidence) * 100)}/100
         </Badge>
       )}
       {suggestion.seen_count > 1 && (
-        <span className="text-xs text-muted-foreground">seen {suggestion.seen_count}×</span>
+        <span
+          className="text-xs text-muted-foreground"
+          title="Detector checks, not independent transactions"
+        >
+          checked {suggestion.seen_count} times
+        </span>
       )}
     </div>
   );
@@ -155,6 +181,13 @@ function EvidenceLine({ suggestion, noun }: { suggestion: SuggestionOut; noun: s
           {showEvidence ? "hide evidence" : "evidence"}
         </button>
       </p>
+      {summary.warning && <p className="mt-2 text-sm text-amber-700">{summary.warning}</p>}
+      {summary.price_changed && (
+        <p className="mt-2 text-sm text-amber-700">
+          Recent amount changed to {fmtAmount(summary.latest_amount)}. Verify the current price
+          before creating a schedule.
+        </p>
+      )}
       {summary.note && (
         <p className="mt-1 text-xs">
           <span className="text-muted-foreground">Agent's note: </span>
@@ -167,6 +200,7 @@ function EvidenceLine({ suggestion, noun }: { suggestion: SuggestionOut; noun: s
 }
 
 function useDecide(suggestionId: string, onSuccess: (data: DecisionOut) => void) {
+  const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const mutation = useMutation({
     mutationFn: async (body: Decision) => {
@@ -179,6 +213,8 @@ function useDecide(suggestionId: string, onSuccess: (data: DecisionOut) => void)
     },
     onSuccess: (data) => {
       setError(null);
+      qc.invalidateQueries({ queryKey: ["unreviewed"] });
+      qc.invalidateQueries({ queryKey: ["register"] });
       onSuccess(data);
     },
     onError: (e: Error) => setError(e.message),
@@ -215,6 +251,10 @@ function RejectButtons({
       >
         {neverLabel}
       </Button>
+      <p className="w-full text-xs text-muted-foreground">
+        Reject this one remembers this pattern. Never suggest again also suppresses future patterns
+        for this account and payee. Neither changes bank transactions.
+      </p>
       <Button size="sm" variant="ghost" onClick={onCancel}>
         Cancel
       </Button>
@@ -233,7 +273,142 @@ export function SuggestionCard({
     return <TransferLinkCard suggestion={suggestion} onDecided={onDecided} />;
   if (suggestion.kind === "match")
     return <MatchCard suggestion={suggestion} onDecided={onDecided} />;
+  if (suggestion.kind === "transfer_pair")
+    return <TransferPairCard suggestion={suggestion} onDecided={onDecided} />;
   return <ScheduleCard suggestion={suggestion} onDecided={onDecided} />;
+}
+
+type TransferPairDraft = {
+  outgoing_id: string;
+  incoming_id: string;
+  from_account: string;
+  to_account: string;
+  amount: string;
+  outgoing_date: string;
+  incoming_date: string;
+  date_gap_days: number;
+  outgoing_description: string | null;
+  incoming_description: string | null;
+};
+
+/** A transfer_pair suggestion (#386): money leaving one of your accounts
+ * and the same amount arriving in another within a few days, with nothing
+ * in the bank text, a rule or a schedule to link them on its own. Accept
+ * links them as one transfer — the register's Link ⇄, which may also propose
+ * a rule for the pair; "Not a transfer" is remembered, so no rule or keyword
+ * ever links these two rows automatically; snooze only hides the card. */
+function TransferPairCard({
+  suggestion,
+  onDecided,
+}: {
+  suggestion: SuggestionOut;
+  onDecided?: () => void;
+}) {
+  const qc = useQueryClient();
+  const draft = suggestion.draft as unknown as TransferPairDraft;
+  const [rejecting, setRejecting] = useState(false);
+  const { decide, error } = useDecide(suggestion.id, () => {
+    qc.invalidateQueries({ queryKey: ["suggestions"] });
+    qc.invalidateQueries({ queryKey: ["transfer-candidates"] });
+    qc.invalidateQueries({ queryKey: ["register"] });
+    onDecided?.();
+  });
+  const gap =
+    draft.date_gap_days === 0
+      ? "same day"
+      : `${draft.date_gap_days} day${draft.date_gap_days === 1 ? "" : "s"} apart`;
+
+  return (
+    <div className="min-w-0 break-words rounded-lg border border-border p-3 text-sm">
+      <CardHeader suggestion={suggestion} />
+      <Table className="mt-2 text-xs">
+        <thead>
+          <tr>
+            <Th />
+            <Th>Account</Th>
+            <Th>Date</Th>
+            <Th>Bank text</Th>
+            <Th className="text-right">Amount</Th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <Td>Leaves</Td>
+            <Td className="font-mono">{draft.from_account}</Td>
+            <Td>{draft.outgoing_date}</Td>
+            <Td className="max-w-56 truncate">{draft.outgoing_description ?? ""}</Td>
+            <Td className="text-right font-mono">{fmtAmount(`-${draft.amount}`)}</Td>
+          </tr>
+          <tr>
+            <Td>Arrives</Td>
+            <Td className="font-mono">{draft.to_account}</Td>
+            <Td>{draft.incoming_date}</Td>
+            <Td className="max-w-56 truncate">{draft.incoming_description ?? ""}</Td>
+            <Td className="text-right font-mono">{fmtAmount(draft.amount)}</Td>
+          </tr>
+        </tbody>
+      </Table>
+      <p className="mt-1 text-xs text-muted-foreground">
+        {gap} · exactly opposite amounts, but no transfer signal links them on its own
+      </p>
+      <Link
+        className="mt-2 inline-block text-xs underline"
+        to={`/selection?id=${draft.outgoing_id}&id=${draft.incoming_id}`}
+      >
+        Inspect both transactions
+      </Link>
+      <p className="mt-2 text-xs text-muted-foreground">
+        Equal amounts and nearby dates do not prove a transfer. Check both bank descriptions;
+        purchases, refunds and investment allocations can coincide.
+      </p>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Linking combines these rows as one transfer. You can unlink it in the account register.
+      </p>
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        {!rejecting && (
+          <>
+            <Button
+              size="sm"
+              disabled={decide.isPending}
+              title="Links the two rows as one transfer between these accounts"
+              onClick={() => decide.mutate({ decision: "accept", reject_scope: "exact" })}
+            >
+              Link as transfer
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={decide.isPending}
+              onClick={() => decide.mutate({ decision: "snooze", reject_scope: "exact" })}
+            >
+              Snooze 30d
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setRejecting(true)}>
+              Reject
+            </Button>
+          </>
+        )}
+        {rejecting && (
+          <>
+            <Button
+              size="sm"
+              variant="destructive"
+              disabled={decide.isPending}
+              title="Never link these two rows automatically — no rule or keyword will"
+              onClick={() => decide.mutate({ decision: "reject", reject_scope: "exact" })}
+            >
+              Not a transfer
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setRejecting(false)}>
+              Cancel
+            </Button>
+          </>
+        )}
+      </div>
+      {error && <ErrorText>{error}</ErrorText>}
+    </div>
+  );
 }
 
 type MatchDraft = {
@@ -270,10 +445,10 @@ function MatchCard({
     qc.invalidateQueries({ queryKey: ["schedules"] });
     onDecided?.();
   });
-  const variance = Number(draft.variance);
+  const sameAmount = /^-?0(?:\.0+)?$/.test(draft.variance);
 
   return (
-    <div className="rounded-lg border border-border p-3 text-sm">
+    <div className="min-w-0 break-words rounded-lg border border-border p-3 text-sm">
       <CardHeader suggestion={suggestion} />
       <Table className="mt-2 text-xs">
         <thead>
@@ -298,9 +473,19 @@ function MatchCard({
       </Table>
       <p className="mt-1 text-xs text-muted-foreground">
         on <span className="font-mono">{draft.account}</span> ·{" "}
-        {variance === 0 ? "same amount" : <>variance {fmtAmount(draft.variance)}</>}
+        {sameAmount ? "same amount" : <>variance {fmtAmount(draft.variance)}</>}
       </p>
 
+      <Link
+        className="mt-2 inline-block text-xs underline"
+        to={`/selection?id=${draft.expected_id}&id=${draft.posted_id}`}
+      >
+        Inspect expectation and bank transaction
+      </Link>
+      <p className="mt-1 text-xs text-muted-foreground">
+        Confirming settles this expectation with the bank row and records its review. Use Unmatch in
+        the register to correct a mistake.
+      </p>
       <div className="mt-3 flex flex-wrap gap-2">
         {!rejecting && (
           <>
@@ -310,7 +495,7 @@ function MatchCard({
               title="Confirms the match: the bill is paid by this bank row"
               onClick={() => decide.mutate({ decision: "accept", reject_scope: "exact" })}
             >
-              Accept
+              Confirm payment match
             </Button>
             <Button
               size="sm"
@@ -357,6 +542,7 @@ function ScheduleCard({
   const qc = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [rejecting, setRejecting] = useState(false);
+  const formId = useId();
   const draft = suggestion.draft as Record<string, string | null>;
   const [edits, setEdits] = useState<Record<string, string>>({
     name: draft.name ?? "",
@@ -385,20 +571,44 @@ function ScheduleCard({
   };
 
   return (
-    <div className="rounded-lg border border-border p-3 text-sm">
+    <div className="min-w-0 break-words rounded-lg border border-border p-3 text-sm">
       <CardHeader suggestion={suggestion} />
       <EvidenceLine suggestion={suggestion} noun="occurrences" />
+      <p className="mt-2 text-xs text-muted-foreground">
+        Creates an active forecast schedule on {draft.account}; no payment is sent. First date:{" "}
+        {edits.dtstart}. Amount: {fmtAmount(edits.amount)}. Pause or edit it from Schedules.
+      </p>
 
       {editing && (
         <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-3">
           {(["name", "rrule", "dtstart", "amount", "category"] as const).map((key) => (
             <div key={key}>
-              <Label className="text-xs">{key}</Label>
-              <Input
-                value={edits[key]}
-                onChange={(e) => setEdits({ ...edits, [key]: e.target.value })}
-                placeholder={key === "category" ? "expenses.…" : ""}
-              />
+              <Label className="text-xs" htmlFor={`${formId}-${key}`}>
+                {
+                  {
+                    name: "Schedule name",
+                    rrule: "Repeats",
+                    dtstart: "First date",
+                    amount: "Amount (negative for money out)",
+                    category: "Category",
+                  }[key]
+                }
+              </Label>
+              {key === "rrule" ? (
+                <RecurrenceInput
+                  id={`${formId}-${key}`}
+                  value={edits.rrule}
+                  onChange={(value) => setEdits({ ...edits, rrule: value })}
+                />
+              ) : (
+                <Input
+                  id={`${formId}-${key}`}
+                  type={key === "dtstart" ? "date" : "text"}
+                  value={edits[key]}
+                  onChange={(e) => setEdits({ ...edits, [key]: e.target.value })}
+                  placeholder={key === "category" ? "expenses.…" : ""}
+                />
+              )}
             </div>
           ))}
         </div>
@@ -412,10 +622,10 @@ function ScheduleCard({
               disabled={decide.isPending}
               onClick={() => decide.mutate({ decision: "accept", reject_scope: "exact" })}
             >
-              Accept
+              Create schedule
             </Button>
             <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
-              Edit & accept
+              Edit schedule
             </Button>
             <Button
               size="sm"
@@ -433,7 +643,7 @@ function ScheduleCard({
         {editing && (
           <>
             <Button size="sm" disabled={decide.isPending} onClick={submitEdits}>
-              Accept with edits
+              Create with edits
             </Button>
             <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
               Cancel
@@ -549,7 +759,7 @@ function TransferLinkCard({
 
   if (created) {
     return (
-      <div className="rounded-lg border border-border p-3 text-sm">
+      <div className="min-w-0 break-words rounded-lg border border-border p-3 text-sm">
         <CardHeader suggestion={suggestion} />
         <p className="mt-2">
           Rule created as a <strong>draft</strong>. Activating it links{" "}
@@ -577,7 +787,7 @@ function TransferLinkCard({
   }
 
   return (
-    <div className="rounded-lg border border-border p-3 text-sm">
+    <div className="min-w-0 break-words rounded-lg border border-border p-3 text-sm">
       <CardHeader suggestion={suggestion} />
       <p className="mt-1 text-xs">
         <span className="font-mono">{draft.from_account}</span> and{" "}
@@ -630,7 +840,7 @@ function TransferLinkCard({
               title="Creates the rule as a draft; activating it is the next step"
               onClick={() => decide.mutate({ decision: "accept", reject_scope: "exact" })}
             >
-              Accept
+              Create draft rule
             </Button>
             <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
               Edit & accept
@@ -651,7 +861,7 @@ function TransferLinkCard({
         {editing && (
           <>
             <Button size="sm" disabled={decide.isPending} onClick={submitEdits}>
-              Accept with edits
+              Create with edits
             </Button>
             <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
               Cancel
@@ -669,6 +879,74 @@ function TransferLinkCard({
         )}
       </div>
       {error && <ErrorText>{error}</ErrorText>}
+    </div>
+  );
+}
+
+function RecurrenceInput({
+  id,
+  value,
+  onChange,
+}: {
+  id: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const monthly = /^FREQ=MONTHLY;BYMONTHDAY=(\d{1,2})$/.exec(value);
+  const weekly = /^FREQ=WEEKLY;(?:INTERVAL=(2|4);)?BYDAY=(MO|TU|WE|TH|FR|SA|SU)$/.exec(value);
+  const mode = monthly ? "monthly" : weekly ? `weeks-${weekly[1] || "1"}` : "custom";
+  const [custom, setCustom] = useState(mode === "custom");
+  return (
+    <div className="space-y-2">
+      <select
+        id={id}
+        className="h-9 w-full rounded-md border border-border bg-card px-2 text-sm"
+        value={custom ? "custom" : mode}
+        onChange={(e) => {
+          const next = e.target.value;
+          setCustom(next === "custom");
+          if (next === "monthly") onChange(`FREQ=MONTHLY;BYMONTHDAY=${monthly?.[1] || "1"}`);
+          else if (next !== "custom")
+            onChange(
+              `FREQ=WEEKLY;${next === "weeks-1" ? "" : `INTERVAL=${next.slice(-1)};`}BYDAY=${weekly?.[2] || "MO"}`,
+            );
+        }}
+      >
+        <option value="monthly">Every month</option>
+        <option value="weeks-1">Every week</option>
+        <option value="weeks-2">Every 2 weeks</option>
+        <option value="weeks-4">Every 4 weeks</option>
+        <option value="custom">Custom recurrence</option>
+      </select>
+      {custom ? (
+        <Input
+          aria-label="Custom recurrence rule"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+        />
+      ) : monthly ? (
+        <Input
+          type="number"
+          aria-label="Day of month"
+          min={1}
+          max={31}
+          value={monthly[1]}
+          onChange={(e) => onChange(`FREQ=MONTHLY;BYMONTHDAY=${e.target.value}`)}
+        />
+      ) : (
+        <select
+          className="h-9 w-full rounded-md border border-border bg-card px-2 text-sm"
+          aria-label="Day of week"
+          value={weekly?.[2] || "MO"}
+          onChange={(e) => onChange(value.replace(/BYDAY=\w+/, `BYDAY=${e.target.value}`))}
+        >
+          {["MO", "TU", "WE", "TH", "FR", "SA", "SU"].map((day, i) => (
+            <option key={day} value={day}>
+              {["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][i]}
+            </option>
+          ))}
+        </select>
+      )}
     </div>
   );
 }

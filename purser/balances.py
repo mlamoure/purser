@@ -26,7 +26,8 @@ loop.
 """
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import date as date_type
 from decimal import Decimal
 from typing import Any
@@ -131,14 +132,35 @@ RETURNING o.prior
 )
 
 
+# The session flag suspend_marks sets: mark_dirty is then a no-op.
+_SUSPENDED = "balances_marks_suspended"
+
+
+@contextmanager
+def suspend_marks(session: Session) -> Iterator[None]:
+    """Make ``mark_dirty`` a no-op on ``session`` for the block: for a dry run
+    whose every write is rolled back (``holdings.service.record_sale``). It
+    then takes no row lock on the global watermark, and its commit runs no
+    running-balance recompute for writes that never happened."""
+    previous = session.info.get(_SUSPENDED, False)
+    session.info[_SUSPENDED] = True
+    try:
+        yield
+    finally:
+        session.info[_SUSPENDED] = previous
+
+
 def mark_dirty(session: Session, from_date: date_type, *, networth_only: bool = False) -> None:
     """Record that balances at ``from_date`` (and everything after) changed.
 
     Called transactionally by every balance-affecting writer, colocated with
     its ``audit.record``. The UPDATE's row lock serializes concurrent
     writers. Non-networth marks also flag the session so the
-    ``before_commit`` hook consumes the running cursor at commit.
+    ``before_commit`` hook consumes the running cursor at commit. Inside
+    ``suspend_marks`` (a rolled-back dry run) it does nothing.
     """
+    if session.info.get(_SUSPENDED):
+        return
     if networth_only:
         session.execute(_MARK_NETWORTH, {"d": from_date})
         return

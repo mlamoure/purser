@@ -48,6 +48,8 @@ def test_compose_image_is_the_current_release(path: str, service: str) -> None:
     assert s["image"] == f"{IMAGE}:v{_version()}"
     # Contributors still build from a clone with `docker compose build`.
     assert s["build"] == "."
+    assert s["cap_drop"] == ["ALL"]
+    assert s["security_opt"] == ["no-new-privileges:true"]
 
 
 @pytest.mark.parametrize("page", SETUP_PAGES)

@@ -1,100 +1,77 @@
 ---
-title: Memories
-description: Short notes of financial nuance that Purser serves to your agent as context — and why they inform rather than act.
+title: Financial notes
+description: Save notes about your finances in Purser for your agent to use as context.
 ---
 
-Some things about your finances are not in your ledger. That the monthly
-transfer to a brokerage account is a child's 529 contribution. That one card
-is always paid from one checking account. That a recurring payment is a
-sublet, not rent.
+Financial notes keep information alongside your records that transactions alone
+cannot explain: "the HOA bill is annual," "this transfer is a 529 contribution,"
+or "pay this card from checking." Your agent can retrieve these notes as context
+in later sessions.
 
-An agent cannot derive any of that from transactions. **Memories** are where
-you record it, and Purser serves them as context to whatever agent you connect.
+The API calls these records **memories**. The existing `/memories` endpoints,
+`list_memories`, `propose_memory` and `archive_memory` tools manage them. In the
+admin UI, they appear under **Config → Memories**.
 
-## Rules act, review flags ask, memories inform
+## Notes and rules
 
-That division is the whole design.
+Notes store context; they are not executable rules. Saving a note does not
+change a ledger entry. A connected agent, or an optional model integration,
+can use the text when deciding what to do.
 
-A memory never changes what lands in your ledger. No code path parses the
-text — there is no evaluator, no import hook, no scheduled job that reads one.
-The absence is deliberate: free-form text that *acts* would undermine the
-guarantee that only deterministic, user-declared boundaries decide anything.
-
-If a nuance should actually **do** something, it belongs in a
-[rule](../../how-to/rules/). Rules can cite the memory that motivated them, and
-archiving that memory never disables the rule — rules are the executable layer
-and must not change behavior because a note was tidied.
+For automatic categorization or payee renaming, use a
+[rule](../../how-to/rules/). Rules can cite a note, but archiving that note
+does not disable the rule.
 
 ## Where they show up
 
-- **`describe()`** carries a count plus your pinned few, so a fresh agent
-  session is oriented without pulling everything.
-- **`list_memories`** fetches more on demand, filtered by account or payee.
-- **The review loop** attaches memories relevant to each row being reviewed.
-- **The AI classifier**, when configured, gets them as prompt context — which
-  is what lets it act on "the monthly transfer to Fidelity is a 529
-  contribution" instead of guessing.
+- **`describe()`** returns the active-note count and a bounded set of pinned notes.
+- **`list_memories`** retrieves notes, optionally filtered by account, category or payee.
+- **The review loop** attaches notes relevant to the transaction being reviewed.
+- **Optional AI categorization**, when configured, receives relevant notes as prompt context.
 
-## Relevance is exact, never fuzzy
+## Relevance
 
-A memory reaches a transaction only when one of its links **is** that
-transaction's account, its category, or its payee. Foreign-key equality — no
-substring matching, no name similarity, no embeddings. A reviewer never
-receives a memory about a different account.
+Notes can link to accounts, categories or payees. Filtering uses those exact
+links. Notes with no links apply globally.
 
-Memories with no links are global and apply everywhere.
+At categorization time, the category is still being decided, so the classifier
+uses account and payee links. A note linked only to a category will not reach
+it. Link to the relevant account or payee when you want it used there.
 
-One consequence surprises people, so it is worth stating: a memory linked only
-to a **category** cannot reach the classifier, because at categorization time
-the category is the thing being decided. Link to an account or a payee if you
-want the classifier to see it.
+## Drafts and activation
 
-## Drafts are never served
+When an agent proposes a note, it starts as a draft unless you explicitly
+asked the agent to save it as active context. You can approve drafts in
+**Config → Memories**. Drafts are excluded from `describe()`, ordinary listings,
+review context and classifier prompts. Listings can request them explicitly
+with `include_drafts` for inspection.
 
-When an agent records a memory it lands as a **draft**, unless you asked it to
-remember something. Drafts appear in **Config → Memories** for you to approve,
-and are not served anywhere — not in `describe()`, not in listings, not to the
-reviewer, not to the classifier.
+Purser allows up to 500 characters per note, 100 active notes, 8 pinned notes
+and 25 drafts.
 
-That is what stops an agent writing its own future context on its own say-so:
-a memory the agent decided to keep waits for your approval. The same gate
-applies to memories Purser writes itself, if you enable that.
+## Response limits
 
-There are caps for the same reason: 500 characters each, 100 active, 8 pinned,
-and 25 outstanding drafts. The draft cap is the flood valve — nothing can fill
-your inbox faster than you can empty it.
-
-## Budgets, because context is not free
-
-A hundred memories is roughly twelve thousand tokens, which would swamp any
-agent's context. So serving is bounded at every width: `describe()` carries at
-most 8 pinned rows and 1,000 characters, `list_memories` at most 25 rows and
-2,500 characters, and the classifier prompt at most 5.
-
-Every response reports exactly how much it truncated, so an agent always knows
-what it did not see rather than assuming it saw everything.
+`describe()` includes at most 8 pinned notes and 1,000 characters.
+`list_memories` returns at most 25 notes and 2,500 characters per call.
+Classifier context includes at most 5 notes. Listing responses report omitted
+counts when a limit truncates the result.
 
 ## Privacy
 
-Memory text is encrypted at rest alongside your payee names, descriptions and
-memos.
+Note text is encrypted at rest. Reading notes requires `read` scope; creating
+or updating them requires `write`. MCP disclosure defaults also apply to
+notes: with purchase privacy enabled, known payee names in the text are
+replaced with references unless requested. See
+[Privacy and agents](../../explanation/privacy-and-agents/).
 
-Reading memories needs the `read` scope and writing them `write`. With the
-purchase-privacy setting on, payee names inside a memory's text reach an agent
-as references, like everywhere else (see
-[Privacy and agents](../../explanation/privacy-and-agents/)). An agent creates a
-memory as a draft unless you asked it to remember something: an active memory
-is context for every future session.
+## Archiving
 
-## Archive, do not delete
+Archiving removes a note from active context and can be reversed. Hard deletion
+requires admin access. Its audit record remains only for the configured
+retention period.
 
-Archiving is reversible and is the normal way to retire a memory. Hard
-deletion is admin-only and recoverable only for as long as your audit
-retention window keeps the record — your own prose is not derivable from
-anything else in the system, so Purser makes it hard to lose.
-
-Purser never edits or archives your text on its own. A memory whose accounts
-were all closed is flagged **stale** and left exactly as you wrote it.
+Purser does not automatically edit or archive notes. If all of a note's linked
+accounts are closed or hidden, Purser flags it as stale for review.
 
 ## See also
 

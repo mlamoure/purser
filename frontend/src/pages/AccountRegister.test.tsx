@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { components } from "../api/schema";
 import { apiMock, fail, mockApi, ok } from "../test/api";
 import { meQuery } from "../lib/me";
-import { accountOut } from "../test/fixtures";
+import { accountOut, transferCandidate } from "../test/fixtures";
 import { renderWithProviders } from "../test/render";
 import AccountRegister, { RegisterRow } from "./AccountRegister";
 
@@ -29,6 +29,7 @@ const instanceRow = (over: Partial<TransactionOut> = {}): TransactionOut => ({
   schedule_id: "s-1",
   schedule_pinned: false,
   split_lines: 0,
+  securities_trade: false,
   created_at: "2026-10-05T12:00:00Z",
   ...over,
 });
@@ -291,5 +292,190 @@ describe("AccountRegister minimum balance (#466)", () => {
     await user.type(screen.getByLabelText("Minimum balance"), "500");
     await user.click(screen.getByRole("button", { name: "Save" }));
     expect(await screen.findByText("min_balance is too large")).toBeInTheDocument();
+  });
+});
+
+describe("RegisterRow transfer candidates (#386)", () => {
+  // The bank row the candidate pairs: 250.00 leaving checking.
+  const bankRow = () =>
+    instanceRow({
+      id: "t-out",
+      status: "posted",
+      origin: "import",
+      schedule_id: null,
+      amount: "-250.0000",
+      description: "EXAMPLE BANK WEB DEBIT",
+      transfer_account_path: null,
+      is_transfer: false,
+    });
+
+  function renderRow(candidate: ReturnType<typeof transferCandidate>) {
+    return renderWithProviders(
+      <table>
+        <tbody>
+          <RegisterRow t={bankRow()} accountPath="assets.checking" candidates={[candidate]} proposed={[]} />
+        </tbody>
+      </table>,
+    );
+  }
+
+  it("says 'not a transfer' through the pair's inbox card when it has one", async () => {
+    mockApi({
+      "GET /categories": ok([]),
+      "GET /accounts": ok([]),
+      "POST /suggestions/{suggestion_id}/decide": ok({}),
+    });
+    const { user } = renderRow(transferCandidate({ suggestion_id: "s-4" }));
+
+    expect(screen.getByRole("button", { name: "Link ⇄" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Not a transfer" }));
+
+    expect(apiMock.POST).toHaveBeenCalledWith("/suggestions/{suggestion_id}/decide", {
+      params: { path: { suggestion_id: "s-4" } },
+      body: { decision: "reject", reject_scope: "exact" },
+    });
+    expect(apiMock.POST).toHaveBeenCalledTimes(1);
+  });
+
+  it("says 'not a transfer' through the candidate endpoint when the pair has no card", async () => {
+    mockApi({
+      "GET /categories": ok([]),
+      "GET /accounts": ok([]),
+      "POST /matching/transfer-candidates/reject": ok({
+        suggestion_id: "s-9",
+        status: "rejected",
+        already_rejected: false,
+      }),
+    });
+    const { user } = renderRow(transferCandidate());
+
+    await user.click(screen.getByRole("button", { name: "Not a transfer" }));
+
+    expect(apiMock.POST).toHaveBeenCalledWith("/matching/transfer-candidates/reject", {
+      body: { outgoing_id: "t-out", incoming_id: "t-in" },
+    });
+    expect(apiMock.POST).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("AccountRegister securities trades (#390 phase 1b)", () => {
+  it("shows a trade's cash as a read-only Securities trade, with no category picker", async () => {
+    mockApi({ "GET /categories": ok([]), "GET /accounts": ok([]) });
+    const tradeRow = instanceRow({
+      id: "tx-trade",
+      status: "posted",
+      origin: "system",
+      schedule_id: null,
+      amount: "995.0000",
+      category_path: "equity.securities",
+      transfer_account_path: null,
+      is_transfer: false,
+      securities_trade: true,
+    });
+    renderWithProviders(
+      <table>
+        <tbody>
+          <RegisterRow t={tradeRow} accountPath="assets.plan" candidates={[]} proposed={[]} />
+        </tbody>
+      </table>,
+    );
+    expect(screen.getByText("Securities trade")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+  });
+
+  it("never offers a trade's cash as the row that paid a bill", async () => {
+    const bankRow = instanceRow({
+      id: "tx-bank",
+      status: "posted",
+      origin: "import",
+      schedule_id: null,
+      description: "ACH DEPOSIT",
+      amount: "100.0000",
+      transfer_account_path: null,
+      is_transfer: false,
+    });
+    const tradeCash = { ...bankRow, id: "tx-cash", description: "Sale of 1 XYZ", securities_trade: true };
+    mockApi({
+      "GET /categories": ok([]),
+      "GET /accounts": ok([]),
+      "GET /transactions": ok({ items: [bankRow, tradeCash], next_cursor: null }),
+    });
+    const view = renderWithProviders(
+      <table>
+        <tbody>
+          <RegisterRow
+            t={instanceRow({ amount: "100.0000", transfer_account_path: null, is_transfer: false })}
+            accountPath="assets.plan"
+            candidates={[]}
+            proposed={[]}
+          />
+        </tbody>
+      </table>,
+    );
+    await view.user.click(screen.getByRole("button", { name: "Mark paid" }));
+    expect(await screen.findByText("ACH DEPOSIT")).toBeInTheDocument();
+    expect(screen.queryByText("Sale of 1 XYZ")).not.toBeInTheDocument();
+  });
+
+  it("lets an admin say a hand-tracked account's feed balance is its cash", async () => {
+    const account = accountOut({
+      id: "acct-b",
+      type: "brokerage",
+      path: "assets.broker",
+      holdings_source: "manual",
+    });
+    mockApi({
+      "GET /accounts/{account_id}": ok(account),
+      "GET /transactions": ok({ items: [], total: 0, limit: 50, offset: 0 }),
+      "GET /matching/transfer-candidates": ok([]),
+      "GET /matching/proposed": ok([]),
+      "PATCH /accounts/{account_id}": ok({ ...account, feed_balance_is_cash: true }),
+    });
+    const view = renderWithProviders(
+      <Routes>
+        <Route path="/accounts/:accountId" element={<AccountRegister />} />
+      </Routes>,
+      { route: "/accounts/acct-b" },
+    );
+    const session: Record<string, unknown> = { scopes: ["admin"] };
+    view.queryClient.setQueryData(meQuery.queryKey, session);
+    await view.user.click(await screen.findByLabelText("Feed balance is cash"));
+    await waitFor(() =>
+      expect(apiMock.PATCH).toHaveBeenCalledWith("/accounts/{account_id}", {
+        params: { path: { account_id: "acct-b" } },
+        body: { feed_balance_is_cash: true },
+      }),
+    );
+  });
+});
+
+
+describe("Account register guided review", () => {
+  it("honors attention links and confirms only the selected posted rows", async () => {
+    mockApi({
+      "GET /categories": ok([]),
+      "GET /accounts": ok([]),
+      "GET /accounts/{account_id}": ok(accountOut()),
+      "GET /transactions": ok({ items: [
+        instanceRow({ id: "posted", status: "posted", origin: "import", needs_review: true, schedule_id: null, payee: "Example shop" }),
+        instanceRow({ id: "pending", status: "pending", origin: "import", needs_review: true, schedule_id: null, payee: "Pending shop" }),
+      ], total: 2, limit: 50, offset: 0 }),
+      "GET /matching/transfer-candidates": ok([]),
+      "GET /matching/proposed": ok([]),
+      "GET /auth/me": ok({ scopes: ["read", "write", "admin"] }),
+      "POST /transactions/mark-reviewed": ok({ reviewed: 1 }),
+    });
+    const { user } = renderWithProviders(<Routes><Route path="/accounts/:accountId" element={<AccountRegister />} /></Routes>, { route: "/accounts/a1?reviewed=false&status=posted" });
+    await screen.findByText("Example shop");
+    expect(apiMock.GET).toHaveBeenCalledWith("/transactions", expect.objectContaining({ params: { query: expect.objectContaining({ account: "a1", reviewed: false, status: ["posted"] }) } }));
+    expect(screen.queryByLabelText(/Select Pending shop/)).not.toBeInTheDocument();
+    await user.click(screen.getByLabelText("Select all posted transactions awaiting review on this page"));
+    await user.click(screen.getByRole("button", { name: "Review selected (1)" }));
+    const preview = screen.getByRole("region", { name: "Confirm transaction review" });
+    expect(within(preview).getByText(/Example shop/)).toBeInTheDocument();
+    expect(within(preview).queryByText(/Pending shop/)).not.toBeInTheDocument();
+    expect(apiMock.POST).not.toHaveBeenCalled();
+    await user.click(within(preview).getByRole("button", { name: "Confirm review" }));
+    await waitFor(() => expect(apiMock.POST).toHaveBeenCalledWith("/transactions/mark-reviewed", { body: { transaction_ids: ["posted"], escalate: false } }));
   });
 });

@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -96,6 +97,16 @@ class Settings(BaseSettings):
     # (Config, Prices), because Purser is the party that sends it.
     price_provider: str = "none"
     price_stale_days: int = 7
+    # Feed freshness (#480): a mapped account whose bank balance date is more
+    # than this many days old is stale (feed.stale fires once per frozen date).
+    feed_stale_days: int = 4
+    # The household time zone (#471, decision 105): an IANA name whose
+    # calendar date is the ledger day — "today" for schedules, matching,
+    # suggestions, the digest, net worth, review, reconciliation, holdings and
+    # feed freshness. Instants (audit, fetches, sessions) stay UTC, and so do
+    # the scheduler's job times. UTC by default, so existing installs keep
+    # the day they had. Runtime-editable (Config, Settings).
+    timezone: str = "UTC"
     # Optional Grafana base URL for links.grafana deep links on tool
     # responses (readmodel dashboards); links are omitted entirely when unset.
     grafana_url: str | None = None
@@ -109,6 +120,15 @@ class Settings(BaseSettings):
     # their own published source. Instance identity like public_url —
     # env-only, never a runtime override.
     source_url: str = "https://github.com/mlamoure/purser"
+
+    @field_validator("timezone")
+    @classmethod
+    def _iana_timezone(cls, v: str) -> str:
+        from purser.clock import is_valid_timezone
+
+        if not is_valid_timezone(v):
+            raise ValueError(f"PURSER_TIMEZONE must be an IANA time zone name, got {v!r}")
+        return v
 
     @property
     def oidc_enabled(self) -> bool:

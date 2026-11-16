@@ -1,4 +1,5 @@
-"""Matching API: run, review queue, unmatched reports, transfer confirm."""
+"""Matching API: run, review queue, unmatched reports, transfer candidates
+(a pure read, and "not a transfer"), transfer confirm."""
 
 import uuid
 from datetime import date as date_type
@@ -77,6 +78,13 @@ class MatchOut(BaseModel):
 
 class UnmatchedOut(BaseModel):
     transaction_id: uuid.UUID
+    account_id: uuid.UUID | None = None
+    account_path: str | None = None
+    account_name: str | None = None
+    schedule_id: uuid.UUID | None = None
+    schedule_status: str | None = None
+    amount_estimated: bool | None = None
+    date_estimated: bool | None = None
     date: date_type
     amount: Decimal | None
     payee: str | None
@@ -106,6 +114,32 @@ class TransferCandidateOut(BaseModel):
     date_gap_days: int
     outgoing_description: str | None
     incoming_description: str | None
+    suggestion_id: uuid.UUID | None = Field(
+        default=None,
+        description=(
+            "the pair's open kind=transfer_pair card in the suggestions inbox (decide it with "
+            "POST /suggestions/{suggestion_id}/decide); null when it has none — a row is still "
+            "pending (cards are for posted pairs only), its newer leg is older than the card "
+            "window, or no matching pass has run since it appeared. "
+            "POST /matching/transfer-candidates/reject says 'not a transfer' either way"
+        ),
+    )
+
+
+class RejectTransferCandidateRequest(BaseModel):
+    outgoing_id: uuid.UUID
+    incoming_id: uuid.UUID
+    note: str | None = Field(default=None, description="why it is not a transfer (kept encrypted)")
+
+
+class RejectTransferCandidateOut(BaseModel):
+    suggestion_id: uuid.UUID = Field(
+        description="the pair's kind=transfer_pair suggestion, now rejected (exact)"
+    )
+    status: str = Field(description="rejected")
+    already_rejected: bool = Field(
+        description="true when the pair was already rejected: nothing changed"
+    )
 
 
 class ManualMatchRequest(BaseModel):
@@ -182,6 +216,66 @@ def list_unmatched(
     return [UnmatchedOut(**r) for r in rows]
 
 
+@router.get("/transfer-candidates")
+def transfer_candidates(
+    token: ReadToken,
+    session: DbSession,
+    lookback_days: Annotated[
+        int | None,
+        Query(
+            ge=0,
+            le=matching.CANDIDATE_LOOKBACK_MAX_DAYS,
+            description=(
+                "only pairs whose newer leg is at most this many days old (0 = dated today, "
+                "at most 36500); omit for the whole history"
+            ),
+        ),
+    ] = None,
+) -> list[TransferCandidateOut]:
+    """Opposite-amount pairs across accounts with no signal that links them —
+    candidates only, never merged without confirm. A pure read: it emits
+    nothing and writes nothing (the matching pass after each import, and the
+    daily job, emits `transfer.candidate` and keeps the inbox cards). Pairs
+    a person unlinked or rejected as not a transfer are left out; each pair
+    names its open inbox card, `suggestion_id`, when it has one."""
+    try:
+        rows = matching.list_transfer_candidates(session, lookback_days=lookback_days)
+    except LedgerError as exc:
+        raise _handle(exc) from exc
+    return [TransferCandidateOut(**r) for r in rows]
+
+
+@router.post("/transfer-candidates/reject")
+def reject_transfer_candidate(
+    body: RejectTransferCandidateRequest, token: WriteToken, session: DbSession
+) -> RejectTransferCandidateOut:
+    """Not a transfer (write scope, like rejecting the card): remember that
+    these two rows are not one transfer, whether or not the pair has an
+    inbox card and however old it is. The pair's kind=transfer_pair
+    suggestion is rejected — written rejected when it had no card — and from
+    then on the automatic link paths, the candidate list and the inbox leave
+    the pair alone; an explicit confirm-transfer can still link it. Repeating
+    it changes nothing (`already_rejected`). 422 when the rows no longer
+    pair: both must be live one-sided bank rows of exactly opposite amounts
+    on two accounts, inside the transfer window."""
+    from purser import suggestions as suggestions_service
+
+    try:
+        row, changed = suggestions_service.reject_transfer_pair(
+            session,
+            outgoing_id=body.outgoing_id,
+            incoming_id=body.incoming_id,
+            token=token,
+            note=body.note,
+        )
+    except LedgerError as exc:
+        raise _handle(exc) from exc
+    session.commit()
+    return RejectTransferCandidateOut(
+        suggestion_id=row.id, status=row.status, already_rejected=not changed
+    )
+
+
 @router.post("/{match_id}/confirm")
 def confirm_match(match_id: uuid.UUID, token: WriteToken, session: DbSession) -> MatchOut:
     try:
@@ -228,15 +322,6 @@ def unmatch(match_id: uuid.UUID, token: WriteToken, session: DbSession) -> dict[
     return {"recreated_expected_id": str(clone.id)}
 
 
-@router.get("/transfer-candidates")
-def transfer_candidates(token: ReadToken, session: DbSession) -> list[TransferCandidateOut]:
-    """Opposite-amount pairs across accounts — candidates only, never merged
-    without confirm."""
-    rows = matching.list_transfer_candidates(session)
-    session.commit()  # persist first-seen candidate events
-    return [TransferCandidateOut(**r) for r in rows]
-
-
 @router.post("/confirm-transfer")
 def confirm_transfer(
     body: ConfirmTransferRequest, token: WriteToken, session: DbSession
@@ -247,7 +332,8 @@ def confirm_transfer(
     `remainder` and `remainder_category`. An ordinary confirm also proposes a
     payee-scoped transfer_link rule in the suggestions inbox (never active
     until accepted and its link count confirmed); the response then carries
-    that suggestion's `suggestion_id`."""
+    that suggestion's `suggestion_id`. A pair with an open kind=transfer_pair
+    card accepts that card."""
     try:
         merged, suggestion = matching.confirm_transfer_and_propose(
             session,

@@ -1,14 +1,13 @@
 # Purser — Design Document
 
-**The finance backend for the personal agent stack.**
+**The privately hosted finance back-end, designed for use by your personal AI Agent.**
 
-Purser is an AI-native, self-hosted personal finance backend. Its intended primary
-user is not a person clicking a UI — it is the person's AI agent (an OpenClaw, a
-Claude with MCP, any agent runtime). Purser's job is to hold a correct,
-auditable, source-traceable financial ledger and expose it through tools an
-agent can operate safely. The features people associate with "a finance app" —
-analysis, advice, alert judgment, conversation — live in the agent. Purser
-builds the tools.
+Purser is mostly headless: your personal AI agent handles day-to-day work
+through MCP or REST, and a web UI provides administrative controls. Purser
+stores financial records, performs calculations and exposes tools and context.
+It is an AI enablement engine, not an AI. The core requires no AI subscription;
+optional model integrations for categorization and review are off by default.
+Users choose their agent's access scopes and disclosure defaults.
 
 This document is ground truth for v1.0. Implementation tracking: issue #14.
 
@@ -23,22 +22,21 @@ This document is ground truth for v1.0. Implementation tracking: issue #14.
    Optional server-side AI categorization and review follow their configured
    review controls; the core works with AI disabled. An agent must
    never need to sum rows in-context to answer an aggregate question.
-2. **The books cannot be silently wrong.** Double-entry core behind a flat API.
+2. **Balanced postings and correction history.** Double-entry core behind a flat API.
    Postings per transaction sum to zero per currency — enforced in the app
    layer with a database trigger as backstop. Posted transactions are
    immutable; corrections are linked reversals.
-3. **Own the raw feed.** Every SimpleFIN payload is archived append-only,
-   verbatim, before anything touches it. Every ledger row is traceable to the
-   bytes the bank sent. The ledger is a projection and is re-derivable.
+3. **Retain source records.** Every SimpleFIN payload is archived append-only,
+   verbatim, before ledger processing. Imported rows link to their source
+   records; manual entries and later corrections have their own audit history.
 4. **The agent is the user's own.** It acts with the user's authority, and
    Purser makes every write attributable and reversible and every disclosure
    the agent's explicit choice. A user should be able to hand an agent their
-   finances and know precisely what it did and what it saw. Trust is a
-   feature list, not a value statement: scoped tokens, a full read and
-   mutation audit, immutable posted rows corrected by linked reversals, and
-   proposing as a choice the agent makes per call when it acts on its own
+   finances with scoped access, a full read and mutation audit, and immutable
+   posted rows corrected by linked reversals. Proposing is a choice the agent
+   makes per call when it acts on its own
    initiative (#436, decision 90).
-5. **Matching is the center of gravity.** Expected transactions (manual entries
+5. **Match expected and imported transactions.** Expected transactions (manual entries
    and schedule instances) reconcile against imported reality. The posted
    amount always wins; the variance is recorded and useful.
 6. **Optional AI, BYO provider.** The core is fully functional with AI disabled.
@@ -96,14 +94,34 @@ This document is ground truth for v1.0. Implementation tracking: issue #14.
   transfer converted back to a category, and the categorize pass — and the
   automated passes (categorize, rule apply-history) skip such a target
   rather than fail on it (#361).
+- **Time: instants are UTC, the ledger day follows the household time zone**
+  (issue #471, decision 105). Timestamps — audit `at`, `fetched_at`,
+  `created_at`, token and session expiry — are `TIMESTAMPTZ` written as UTC.
+  Every calendar-day decision ("today" for schedules and their default anchor,
+  overdue and next-due, matching's aging and `bill.late`, suggestions and
+  snoozes, recurrence detection, the digest's week of bills, net worth and
+  balance defaults, review age and the aged sweep, reconciliation's "not in the
+  future", holdings and price staleness, feed staleness, the day an account
+  closed) reads one helper, `purser.clock.ledger_today()` (an instant becomes a
+  day through `clock.ledger_date()`): the calendar date in the `timezone`
+  setting, an IANA name, env `PURSER_TIMEZONE` + runtime override, default
+  `UTC` so an existing install keeps its day. Nothing derives a day from the
+  host's local zone. The scheduler's job times stay in UTC. Two things keep the
+  UTC frame on purpose: dates of imported rows (a SimpleFIN epoch's UTC date,
+  and a fetch's UTC day for its snapshots; existing rows are never re-dated),
+  and the SimpleFIN fetch window, whose bounds are epoch seconds at UTC
+  midnight and whose 90-day reach counts back from now. The readmodel computes
+  the same day in SQL (`readmodel.ledger_today()`, §3.1).
 
 ## 3. Data model
 
 Groups: identity (`users`, `api_tokens`) · feed (`connections`, `raw_fetches`) ·
 ledger (`accounts`, `payees`, `transactions`, `postings`, `schedules`,
 `matches`) · snapshots (`holdings_snapshots`, `valuations`; manually tracked
-holdings: `positions`, `position_events`, `security_prices`) · platform
-(`events`, `webhook_subscriptions`, `audit_log`).
+holdings: `positions`, `position_events`, `security_prices`; their lots and
+awards: `lots`, `lot_dispositions`, `holdings_captures`, `awards`,
+`award_vests`) · platform
+(`events`, `webhook_subscriptions`, `audit_log`, `audit_receipts`).
 
 ### 3.1 DDL sketch (authoritative shapes; Alembic owns the real thing)
 
@@ -140,7 +158,9 @@ CREATE TABLE api_tokens (
                                   --   0038: read:redacted -> read)
   expires_at   TIMESTAMPTZ,
   last_used_at TIMESTAMPTZ,
-  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  integration_id UUID,       -- 0049: stable across explicitly linked credential replacements
+  authorization_enc BYTEA   -- encrypted original grant: actor, time, scopes, replaced token
 );
 
 CREATE TABLE app_settings (        -- admin-editable runtime config (issue #102)
@@ -151,6 +171,18 @@ CREATE TABLE app_settings (        -- admin-editable runtime config (issue #102)
   updated_by UUID REFERENCES api_tokens(id),
   CONSTRAINT app_settings_value_shape CHECK ((value IS NULL) <> (value_enc IS NULL))
 );
+
+CREATE TABLE ledger_clock (        -- the env time zone, for SQL (0044, #471, decision 105)
+  singleton     BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+  env_timezone  TEXT NOT NULL DEFAULT 'UTC',  -- PURSER_TIMEZONE of the running
+                                    --   instance; every serve/worker/migrate rewrites it
+                                    --   after the upgrade (not audited: deployment
+                                    --   config, nothing a user wrote)
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- readmodel.ledger_today() (SECURITY DEFINER, STABLE): now() in the
+-- app_settings 'timezone' override, else ledger_clock.env_timezone, else UTC,
+-- as a date. purser_read may EXECUTE it; it needs no grant on app_settings.
 
 CREATE TABLE connections (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -183,7 +215,9 @@ CREATE TABLE raw_fetches (          -- APPEND-ONLY. Never UPDATE, never DELETE.
                                   -- verbatim file for QIF/CSV uploads
   -- Manual imports are raw-first too (issue #127, migration 0023, decision 53)
   source        TEXT NOT NULL DEFAULT 'simplefin'
-                CHECK (source IN ('simplefin', 'qif', 'csv')),
+                CHECK (source IN ('simplefin', 'qif', 'csv', 'capture')),
+                -- 'capture' (0046, decision 107): a bulk lot or award capture,
+                -- archived verbatim (canonical JSON) before it is applied
   CONSTRAINT raw_fetches_source_connection
     CHECK ((source = 'simplefin') = (connection_id IS NOT NULL))
 );
@@ -215,7 +249,10 @@ CREATE TABLE accounts (
   type          TEXT NOT NULL,
     -- checking | savings | cash | credit_card | brokerage | property | loan
     -- | category_expense | category_income
-  is_virtual    BOOLEAN NOT NULL DEFAULT false,   -- true for categories
+    -- | equity (a system virtual account, never a category: 0043, decision 103)
+    -- CHECK accounts_type_check names them all; accounts_equity_virtual keeps
+    -- equity virtual
+  is_virtual    BOOLEAN NOT NULL DEFAULT false,   -- true for categories and system accounts
   path          LTREE NOT NULL,                   -- e.g. expenses.dining.coffee
   description   TEXT,                             -- categories: classifier-oriented (0012)
   currency      CHAR(3) NOT NULL DEFAULT 'USD',
@@ -236,6 +273,10 @@ CREATE TABLE accounts (
                                                   -- NULL until it first does (§7.1, §8)
   manual_period_open BOOLEAN NOT NULL DEFAULT false, -- a manual period waits to be
                                                   -- ended by the importer (§7.1, §8)
+  feed_balance_is_cash BOOLEAN NOT NULL DEFAULT false,
+                                                  -- the feed balance of a manual brokerage
+                                                  -- account is its CASH: the drift check
+                                                  -- compares it (§7.3, decision 103); admin-set
   hidden_at     TIMESTAMPTZ,                      -- display-only hide (0.6.0, §3.4)
   closed_at     TIMESTAMPTZ,                      -- read-only close (0.6.0, §3.4)
   reconciled_through DATE,                        -- latest reconciled date (§3.7, decision 61);
@@ -263,8 +304,13 @@ CREATE TABLE accounts (
   CONSTRAINT accounts_holdings_source_values
     CHECK (holdings_source IN ('feed', 'manual')),
   CONSTRAINT accounts_holdings_source_brokerage
-    CHECK (holdings_source = 'feed' OR type = 'brokerage')
+    CHECK (holdings_source = 'feed' OR type = 'brokerage'),
+  -- The cash opt-in exists only with manual holdings (0043).
+  CONSTRAINT accounts_feed_balance_is_cash_manual
+    CHECK (NOT feed_balance_is_cash OR (type = 'brokerage' AND holdings_source = 'manual'))
 );
+-- Seeded by 0043: equity.securities (type equity, virtual), the other side of
+-- every securities trade's cash; the service recreates it if it is missing.
 CREATE INDEX accounts_path_gist ON accounts USING GIST (path);
 -- One ledger account per (connection, external id) — feed idempotency backstop.
 CREATE UNIQUE INDEX accounts_connection_external_uniq
@@ -362,6 +408,54 @@ CREATE TABLE instance_statements (
   recorded_by       UUID REFERENCES api_tokens(id),
   recorded_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Occurrence certainty (#512, migration 0047; amounts stay on postings).
+CREATE TABLE instance_certainty (
+  transaction_id UUID PRIMARY KEY REFERENCES transactions(id) ON DELETE CASCADE,
+  schedule_id UUID NOT NULL REFERENCES schedules(id),
+  occurrence_date DATE NOT NULL,  -- retained even when a transaction releases its slot
+  original_amount NUMERIC(20,4) NOT NULL,
+  original_date DATE NOT NULL,
+  original_amount_basis TEXT NOT NULL,
+  original_date_basis TEXT NOT NULL, -- fixed | estimated
+  original_window JSONB,           -- method's observation count/date window and as-of
+  original_backfilled BOOLEAN NOT NULL DEFAULT false,
+  original_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  history_enc BYTEA,               -- encrypted superseded evidence and actor/time
+  amount_overridden BOOLEAN,      -- NULL = pre-518 legacy; false = certainty-only evidence
+  amount_state TEXT,              -- NULL (rule-derived) | estimated | confirmed
+  amount_value NUMERIC(20,4),
+  amount_source TEXT, amount_as_of DATE, amount_note_enc BYTEA,
+  amount_set_by UUID REFERENCES api_tokens(id), amount_set_at TIMESTAMPTZ,
+  date_state TEXT, date_value DATE,
+  date_source TEXT, date_as_of DATE, date_note_enc BYTEA,
+  date_set_by UUID REFERENCES api_tokens(id), date_set_at TIMESTAMPTZ
+);
+-- original_* cannot change (trigger); source/state/value have CHECK constraints.
+-- (schedule_id, occurrence_date) is indexed, not unique: unmatch clones keep history.
+
+
+-- Projected certainty (#518, migration 0048). Metadata only: never a forecast value source.
+CREATE TABLE slot_certainty (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(), -- existing ciphertext rotation keyset
+  schedule_id UUID NOT NULL REFERENCES schedules(id) ON DELETE CASCADE,
+  occurrence_date DATE NOT NULL,
+  original JSONB NOT NULL,         -- immutable first-retained projection: amount/date/basis/window/as_of
+  history_enc BYTEA,               -- encrypted superseded evidence, actors and lifecycle transitions
+  materialized_into UUID REFERENCES transactions(id) ON DELETE SET NULL, -- NULL = live slot evidence
+  materialized_at TIMESTAMPTZ,      -- last adoption; released with its instance
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  amount_state TEXT, amount_value NUMERIC(20,4),
+  amount_source TEXT, amount_as_of DATE, amount_note_enc BYTEA,
+  amount_set_by UUID REFERENCES api_tokens(id), amount_set_at TIMESTAMPTZ,
+  date_state TEXT, date_value DATE,
+  date_source TEXT, date_as_of DATE, date_note_enc BYTEA,
+  date_set_by UUID REFERENCES api_tokens(id), date_set_at TIMESTAMPTZ,
+  UNIQUE (schedule_id, occurrence_date)
+);
+-- original is trigger-immutable; dimension state/value/source must be whole;
+-- sources/states are constrained, confirmed history is refused, date_value must be its slot.
+
 
 CREATE TABLE postings (
   id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -523,6 +617,7 @@ CREATE TABLE schedules (
   rrule           TEXT NOT NULL,         -- RFC 5545; FREQ >= DAILY (sub-daily is 422)
   dtstart         DATE NOT NULL,         -- the RRULE anchor (#231): every expansion counts
                                          --   from it; anchor-sensitive rules never drift
+  date_type       TEXT NOT NULL DEFAULT 'fixed', -- fixed | estimated
   amount_type     TEXT NOT NULL,         -- fixed | estimated
   amount          NUMERIC(20,4),
   estimate_basis  TEXT,                  -- last | rolling_avg_3 | rolling_avg_12
@@ -547,31 +642,44 @@ CREATE TABLE suggestions (            -- the inbox (#233, decision 57)
   kind                    TEXT NOT NULL,       -- schedule | transfer_link (CHECK; 0030,
                                                --   decision 67) | match (0034, decision 86:
                                                --   the mirror of an open match proposal)
+                                               --   | transfer_pair (0042, decision 102: a
+                                               --   transfer candidate)
   status                  TEXT NOT NULL DEFAULT 'open',  -- open | accepted | rejected
                                                --   | withdrawn (0034: closed by the system —
                                                --   its match proposal was rescinded, carried,
-                                               --   purged or auto-confirmed; kept, not deleted)
+                                               --   purged or auto-confirmed; its transfer pair
+                                               --   stopped being a candidate or was auto-linked;
+                                               --   kept, not deleted)
   fingerprint             TEXT NOT NULL UNIQUE,-- one row per fingerprint, EVER:
                                                --   re-detection upserts the open row,
                                                --   a rejected row is durable suppression;
                                                --   match: plain text, match:slot:<schedule>:
                                                --   <occurrence>:<bank row> or match:tx:<expected>:
-                                               --   <bank row> (a re-proposal re-opens it)
+                                               --   <bank row> (a re-proposal re-opens it);
+                                               --   transfer_pair: plain text, transfer_pair:
+                                               --   <low id>:<high id>, the candidate's pair key
+                                               --   over the first rows of its correction
+                                               --   chains (a correction keeps the card)
   source                  TEXT NOT NULL,       -- detected | agent | account_added |
                                                --   confirm (a manual transfer confirm, 0030)
   detector                TEXT,
   detector_version        INTEGER,
   confidence              NUMERIC(4,3),        -- deterministic evidence score, 0..1;
-                                               --   NULL for transfer_link (a human acted)
-                                               --   and for an agent proposal (unscored);
+                                               --   NULL for transfer_link (a human acted),
+                                               --   transfer_pair (nothing scores a candidate)
+                                               --   and an agent proposal (unscored);
                                                --   match: the match score
   subject_account_id      UUID REFERENCES accounts(id),  -- transfer_link: the pair, as
   subject_payee_id        UUID REFERENCES payees(id),    --   first confirmed, and the
-  counterparty_account_id UUID REFERENCES accounts(id),  --   alias-resolved scope payee
+  counterparty_account_id UUID REFERENCES accounts(id),  --   alias-resolved scope payee;
+                                                         --   transfer_pair: the accounts
+                                                         --   the money left and reached
   draft_enc               BYTEA NOT NULL,      -- Fernet over the kind's typed draft:
                                                --   ScheduleDraft | TransferLinkDraft | MatchDraft
+                                               --   | TransferPairDraft
   evidence_enc            BYTEA,               -- Fernet over {occurrences, cadence, ...};
                                                --   transfer_link: the confirmed pairs;
+                                               --   transfer_pair: the pair;
                                                --   agent: {note} when it left one
   snooze_until            DATE,                -- hidden from the inbox until then; never auto-accepts
   seen_count              INTEGER NOT NULL DEFAULT 1,
@@ -581,6 +689,7 @@ CREATE TABLE suggestions (            -- the inbox (#233, decision 57)
   decision_note_enc       BYTEA,
   reject_scope            TEXT,                -- exact | counterparty (never again for this pair)
   result_entity_type      TEXT,                -- what accept produced: schedule | rule | match
+                                               --   | transaction (transfer_pair: the merge)
   result_entity_id        UUID,
   created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -622,6 +731,9 @@ CREATE TABLE holdings_snapshots (
   position_id  UUID REFERENCES positions(id),
   price        NUMERIC(20,6),   -- manual rows: the close the value uses
   price_as_of  DATE,            -- manual rows: that close's date (staleness on read)
+  in_transit   NUMERIC(20,4),   -- 0043, decision 104: manual rows only (CHECK
+                                -- holdings_in_transit_manual): a trade's cash not
+                                -- yet on the account that day, inside market_value
   CONSTRAINT holdings_manual_has_position
     CHECK ((source = 'manual') = (position_id IS NOT NULL))
 );
@@ -650,7 +762,9 @@ CREATE TABLE position_events (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   position_id     UUID NOT NULL REFERENCES positions(id),
   occurred_on     DATE NOT NULL,            -- today or earlier (the service refuses a future date)
-  kind            TEXT NOT NULL CHECK (kind IN ('set_quantity', 'buy', 'sell')),
+  kind            TEXT NOT NULL CHECK (kind IN ('set_quantity', 'buy', 'sell',
+                                            'vest', 'transfer_out')),
+                                            -- vest / transfer_out: 0046, decision 107
   quantity        NUMERIC(20,6) NOT NULL,   -- set_quantity: absolute; buy/sell: the delta (> 0)
   price           NUMERIC(20,6),            -- per share; buy/sell only
   fees            NUMERIC(20,4),            -- buy/sell only
@@ -666,17 +780,43 @@ CREATE TABLE position_events (
   note_enc        BYTEA,                    -- Fernet (ORM attr: note)
   source_note_enc BYTEA,                    -- Fernet (ORM attr: source_note): where it came from
   actor_token_id  UUID REFERENCES api_tokens(id),  -- an attribution anchor (§9 session hygiene)
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
                                             -- not now(): events recorded in one transaction
                                             -- keep their order (occurred_on, slot, created_at,
                                             -- id); slot = created_at, or the replaced event's
+                                            -- slot (0040, decision 93)
+  -- A trade's cash (0043, decision 103):
+  proceeds_to     TEXT,                     -- sells: 'cash' | 'none'
+  funded_from     TEXT,                     -- buys: 'cash' | 'none'
+  settle_on       DATE,                     -- when the cash posts (>= occurred_on;
+                                            -- the trade date unless given)
+  transaction_id  UUID REFERENCES transactions(id),
+                                            -- the cash row (posted by Purser against
+                                            -- equity.securities, or a linked row); on a
+                                            -- reversal row, the row that undid it
+  -- A vest (0046, decision 107): quantity is the NET shares delivered,
+  -- price the fair market value per share; CHECK position_events_vest_shape
+  -- keeps both columns on vests only, gross = quantity + withheld, no fees.
+  gross_quantity    NUMERIC(20,6),
+  withheld_quantity NUMERIC(20,6)
+  -- transfer_out carries no price and no fees (position_events_transfer_out_shape);
+  -- neither new kind moves cash (0043's shape CHECKs keep cash on buys/sells)
   -- + shape CHECKs: quantity >= 0 and > 0 off set_quantity; price > 0; fees,
-  --   cost_basis >= 0; set_quantity carries no price/fees; buy/sell no cost_basis
+  --   cost_basis >= 0; set_quantity carries no price/fees; buy/sell no cost_basis;
+  --   proceeds_to on sells only, funded_from on buys only, settle_on and
+  --   transaction_id on buys/sells only
 );
 CREATE UNIQUE INDEX position_events_reversed_once
   ON position_events (reverses_id) WHERE reverses_id IS NOT NULL;
 CREATE UNIQUE INDEX position_events_replaced_once
   ON position_events (replaces_id) WHERE replaces_id IS NOT NULL;
+-- A cash row is the cash of one trade (0043):
+CREATE UNIQUE INDEX position_events_transaction_once
+  ON position_events (transaction_id) WHERE transaction_id IS NOT NULL AND reverses_id IS NULL;
+-- Every event naming a cash row, reversals included (0043): the foreign key's
+-- check when a transaction is deleted, and the lookup of a row's trade.
+CREATE INDEX position_events_transaction
+  ON position_events (transaction_id) WHERE transaction_id IS NOT NULL;
 
 -- Daily closes (0036, decision 89). Feed-implied prices are computed on read
 -- from feed snapshots and never stored, so there is no 'feed' source.
@@ -702,6 +842,128 @@ CREATE TABLE price_answered (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (symbol, source)
 );
+
+-- Lots, captures and awards (0046, decision 107; §8 "Lots, captures and
+-- awards"). A sub-ledger of hand-tracked positions: the share count stays the
+-- history of position_events; nothing here is read by net worth except the
+-- lots' basis, which the projection reports as a lot-tracked position's
+-- cost_basis.
+
+-- One applied bulk observation of a broker's lots or awards. APPEND-ONLY
+-- (trigger holdings_captures_immutable, UPDATE and DELETE).
+CREATE TABLE holdings_captures (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id      UUID NOT NULL REFERENCES accounts(id),
+  kind            TEXT NOT NULL CHECK (kind IN ('lots', 'awards')),
+  as_of           DATE NOT NULL,          -- the broker's figures are as of this day
+  captured_at     TIMESTAMPTZ NOT NULL,   -- when they were read (capture freshness)
+  completeness    TEXT NOT NULL CHECK (completeness IN ('complete', 'partial')),
+  symbols         TEXT[] NOT NULL,        -- lots: the symbols applied (conflicted ones skipped)
+  request_hash    TEXT NOT NULL,          -- keyed hash of the exact request: a retry is a no-op
+  content_hash    TEXT NOT NULL,          -- keyed hash of the economic content (no as_of,
+                                          -- captured_at, note or row order)
+  plan_hash       TEXT NOT NULL,          -- the preview hash it was committed under
+  repeat_of       UUID REFERENCES holdings_captures(id),  -- same content as the previous one
+  raw_fetch_id    UUID NOT NULL REFERENCES raw_fetches(id), -- the verbatim request (raw-first)
+  source_note_enc BYTEA,                  -- Fernet: where it was read
+  result_enc      BYTEA NOT NULL,         -- Fernet JSON: counts, skipped symbols, lot ids
+  origin          TEXT NOT NULL CHECK (origin IN ('manual', 'agent')),
+  actor_token_id  UUID REFERENCES api_tokens(id),
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+CREATE UNIQUE INDEX holdings_captures_request_once
+  ON holdings_captures (account_id, kind, request_hash);
+
+-- A tax lot of one position: opened by exactly one event (a buy with a lot,
+-- a vest) or adopted from exactly one capture (lots_one_origin). Never
+-- deleted (trigger lots_guard): identity columns are immutable, the
+-- reference may be set once, a void is final; basis changes only through
+-- the audited service while no live disposition draws on the lot.
+CREATE TABLE lots (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  position_id        UUID NOT NULL REFERENCES positions(id),
+  acquired_on        DATE NOT NULL,       -- for the term; <= effective_on
+  effective_on       DATE NOT NULL,       -- counts from this day (adopted: from its END)
+  quantity           NUMERIC(20,6) NOT NULL CHECK (quantity > 0),  -- when it began counting
+  basis_per_share    NUMERIC(20,6),       -- both or neither (lots_basis_both_or_neither):
+  cost_basis         NUMERIC(20,4),       --   NULL = unknown, never 0 by default
+  basis_source       TEXT,                -- per_share | total | both | event
+  acquisition        TEXT NOT NULL,       -- buy | rsu_vest | plan_purchase | espp_purchase
+                                          -- | transfer_in | drip | gift | unknown
+  plan_enc           BYTEA,               -- Fernet plan / source label (narrative)
+  plan_bidx          TEXT,                -- HMAC(blind_index DEK, 'lot_plan' + normalized)
+  external_ref_enc   BYTEA,               -- Fernet broker lot reference (an account identifier)
+  external_ref_bidx  TEXT,                -- HMAC(blind_index DEK, 'lot_ref' + ref)
+  ordinal            INTEGER NOT NULL CHECK (ordinal >= 1),
+  opened_by_event_id UUID REFERENCES position_events(id),
+  capture_id         UUID REFERENCES holdings_captures(id),
+  origin             TEXT NOT NULL CHECK (origin IN ('manual', 'agent')),
+  actor_token_id     UUID REFERENCES api_tokens(id),
+  note_enc           BYTEA,
+  voided_at          TIMESTAMPTZ,         -- a voided lot counts for nothing, read-only
+  void_note_enc      BYTEA,
+  voided_by_token_id UUID REFERENCES api_tokens(id),
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+CREATE UNIQUE INDEX lots_ref_uniq ON lots (position_id, external_ref_bidx)
+  WHERE external_ref_bidx IS NOT NULL AND voided_at IS NULL;
+CREATE UNIQUE INDEX lots_natural_uniq
+  ON lots (position_id, acquired_on, COALESCE(plan_bidx, ''), ordinal) WHERE voided_at IS NULL;
+CREATE UNIQUE INDEX lots_opened_by_once ON lots (opened_by_event_id)
+  WHERE opened_by_event_id IS NOT NULL;
+
+-- Shares of one lot (or of the unallocated remainder: lot_id NULL) leaving
+-- with one sell / transfer_out event. APPEND-ONLY (trigger
+-- lot_dispositions_immutable): a reversed event's rows stay, inert.
+CREATE TABLE lot_dispositions (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  event_id      UUID NOT NULL REFERENCES position_events(id),
+  position_id   UUID NOT NULL REFERENCES positions(id),
+  lot_id        UUID REFERENCES lots(id),
+  disposed_on   DATE NOT NULL,
+  quantity      NUMERIC(20,6) NOT NULL CHECK (quantity > 0),
+  cost_basis    NUMERIC(20,4),            -- NULL: unknown (always for unallocated)
+  proceeds      NUMERIC(20,4),            -- NULL: no price (transfer_out, unpriced sale)
+  realized_gain NUMERIC(20,4),            -- only with both basis and proceeds
+  term          TEXT,                     -- short | long; NULL for unallocated
+  method        TEXT NOT NULL,            -- specific | fifo | lifo | hifo
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+);
+-- + UNIQUE (event_id, lot_id) for lots, UNIQUE (event_id) for the unallocated row
+
+-- An equity grant; never read by net worth, balances or the projection.
+CREATE TABLE awards (
+  id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  account_id               UUID NOT NULL REFERENCES accounts(id),
+  symbol                   TEXT NOT NULL,   -- same format CHECK as positions.symbol
+  grant_ref_enc            BYTEA NOT NULL,  -- Fernet broker grant id (an account identifier)
+  grant_ref_bidx           TEXT NOT NULL,   -- HMAC(blind_index DEK, 'award_grant' + ref)
+  granted_on               DATE NOT NULL,
+  plan_enc                 BYTEA,
+  granted_quantity         NUMERIC(20,6) NOT NULL CHECK (granted_quantity > 0),
+  cancelled_quantity       NUMERIC(20,6) NOT NULL DEFAULT 0,  -- 0..granted
+  reported_vested_quantity NUMERIC(20,6),   -- as the broker last reported it
+  reported_as_of           DATE,
+  origin TEXT NOT NULL, actor_token_id UUID, note_enc BYTEA, created_at, updated_at
+);
+CREATE UNIQUE INDEX awards_grant_uniq ON awards (account_id, grant_ref_bidx);
+
+CREATE TABLE award_vests (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  award_id        UUID NOT NULL REFERENCES awards(id),
+  vest_date       DATE NOT NULL,
+  ordinal         INTEGER NOT NULL DEFAULT 1,
+  quantity        NUMERIC(20,6) NOT NULL CHECK (quantity > 0),  -- scheduled units
+  status          TEXT NOT NULL,     -- scheduled | vested | forfeited
+  vest_event_id   UUID REFERENCES position_events(id),  -- when Purser recorded the vest
+  lot_id          UUID REFERENCES lots(id),             -- vested: the lot of its net shares
+  vested_gross, vested_withheld, vested_net, vested_fmv NUMERIC(20,6),
+  created_at, updated_at
+  -- CHECK award_vests_vested_shape: vested <=> gross/withheld/net set, gross =
+  -- net + withheld; a lot exactly when vested with net > 0 (a vest whose every
+  -- unit was withheld delivered no shares and has no lot)
+);
+-- + UNIQUE (award_id, vest_date, ordinal); UNIQUE (lot_id); UNIQUE (vest_event_id)
 
 CREATE TABLE valuations (
   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -824,11 +1086,29 @@ CREATE TABLE audit_log (
                    CHECK (kind IN ('read', 'write', 'change')),
   request_id       UUID,
   detail_enc       BYTEA,   -- Fernet over the call detail JSON (ORM attr: detail; #137)
-  disclosed        TEXT[],  -- MCP call rows: fields included beyond the privacy
-                            --   defaults (0038, #437). Names only, so plaintext; the
-                            --   audit view filters "what my AI chose to see" on it.
-  replacement_id   UUID     -- plaintext skeleton id lifted out of before_after.after (#137):
-);                          --   the register's category-provenance badge filters on it
+  disclosed        TEXT[],  -- MCP extra fields observed in the final result (0049).
+                            --   Legacy rows (channel NULL) record requests only.
+                            --   Names only, so plaintext.
+  replacement_id   UUID,    -- register category-provenance lookup (#137)
+  channel          TEXT,    -- 0049: rest | mcp | resource | system; legacy NULL
+  actor_kind       TEXT,    -- authenticated snapshot: api | session | system
+  integration_id   UUID,    -- stable integration identity, not a bearer secret
+  outcome          TEXT,    -- shared | empty | denied | failed | changed; legacy NULL
+  data_types       TEXT[],  -- fixed, value-free field categories; GIN indexed
+  account_ids      UUID[]   -- resolved account IDs only; GIN indexed
+);
+CREATE TABLE audit_receipts (
+  event_id UUID PRIMARY KEY REFERENCES audit_log(id) ON DELETE CASCADE,
+  at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  state TEXT NOT NULL CHECK (state IN ('returned', 'interrupted'))
+);
+-- Completion receipts append separately; no call evidence is rewritten.
+-- audit_log_integration_at (integration_id, at, id) supports integration history.
+-- detail_enc holds the identity/authorization snapshot and versioned response
+-- inventory: observed field paths/types, count + unit, account references,
+-- requested coverage separately from returned dates, omissions, partial/more flags.
+-- No response values or credential material are copied into that inventory.
+-- Existing rows are NOT backfilled with guessed response or authorization data.
 -- audit_log_at_id (at, id): keyset pagination + retention prune.
 -- audit_log_actor_at (actor_token_id, at): virtual-session grouping.
 -- audit_log_request (request_id) WHERE request_id IS NOT NULL: drill-ins.
@@ -845,6 +1125,10 @@ CREATE TABLE audit_log (
 --   readmodel.v1_forecast_daily             (60-day deterministic projection)
 --   readmodel.v1_holdings_latest
 --
+-- Ledger day (#471, migration 0044): v1_forecast_daily starts its 60 days
+-- at readmodel.ledger_today() instead of CURRENT_DATE (the reading session's
+-- zone), so Grafana's "today" is the app's. Same columns, same contract.
+--
 -- Split rows (#274, migration 0035): v2_transactions_flat reports
 -- category_path NULL for a row with more than one category leg (it used to
 -- pick one with an unordered LIMIT 1); same columns, same contract.
@@ -856,6 +1140,11 @@ CREATE TABLE audit_log (
 -- as the app's readers do (§8, decision 92); the price lookup runs on the
 -- rows DISTINCT ON keeps, not on history. Same columns, same types, same
 -- contract.
+--
+-- Ledger-day bound (#498 review, migration 0045): v1_holdings_latest takes
+-- the newest row at or before readmodel.ledger_today(), so a hand-tracked
+-- set written ahead for cash landing later (decision 104) is not "latest"
+-- before its day. Same columns, same types, same contract.
 --
 -- CONTRACT CHANGE (#137, migration 0016): v1_transactions_flat is dropped and
 -- replaced by **v2_transactions_flat** = the same view MINUS the `payee` and
@@ -908,6 +1197,29 @@ a category never does. The classifier
 is constrained to the tree, agents have no category-creation tool, and
 `POST /categories` is a write-scoped REST route with no MCP tool — finiteness
 is structural.
+
+**System virtual accounts are not categories (decision 103).** A virtual
+account of a SYSTEM type — today only `equity`, seeded once as
+`equity.securities`, the other side of a securities trade's cash (§8) — is
+virtual like a category: a balancing leg outside net worth, the running
+balances and the transfer shapes. It is not one: the category types stay
+`category_expense` and `category_income`, so the category listing, the Config
+→ Categories tab, MCP `list_categories` and `describe` leave it out, it cannot
+be renamed or deleted as a category (nor edited or moved as an account,
+`PATCH /accounts`), and every path that lets someone CHOOSE a category refuses
+it (`ledger.refuse_system_account`): the flat form, split lines, a split
+payment's remainder, an edit or bracket conversion back to a category, a close
+adjustment, rules, schedules, the classifier and payee memory. Only the
+holdings service books to it (`create_flat_transaction`'s `system_leg`). The
+whole `equity` subtree is the system's (`ledger.refuse_system_path`): no
+category or account is created at `equity` or under it (`create_account`,
+so `POST /categories` and `POST /accounts`, by path or `parent_id`;
+`ensure_category_path`; a close adjustment), and no real account moves
+there; the reports that select by path (`category_rollup`, and
+`spending_summary` / `spending_baseline` given a `category_subtree`) read
+category types only, so trade cash never counts as spending or income
+whatever subtree a caller names. The register shows such a row as
+"Securities trade" (`TransactionOut.securities_trade`), read-only.
 
 ### 3.3 Hybrid ledger: flat outside, double-entry inside
 
@@ -1273,16 +1585,43 @@ configured and the operator opts in, Purser may also author drafts itself
 (§11.3); the draft gate above is what makes that safe, and the connected-agent
 path remains primary because it has the conversation and is the better author.
 
+### Home potential-value scenario (#517)
+
+`GET /networth/potential` (read scope) values the current captured unvested
+award quantities using recorded prices as of the ledger day. It returns owned
+assets/net worth plus separate potential totals that add gross unvested value,
+before tax withholding and conditional on vesting. Home shows potential values
+inside the existing Net worth and Assets cards only when unvested awards exist
+(or their valuation is incomplete); no separate or empty future-value card. This is
+not a forecast of prices, a historical award reconstruction, or an input to
+owned balances, forecasts, holdings or net-worth history.
+
+Closed accounts are excluded and hidden accounts included, consistently with
+owned net worth. Remaining units with no schedule still count when known;
+unknown remaining units (even with zero scheduled units), unavailable prices
+or unsupported non-USD award currency make full totals null. The explicitly
+partial known priced amount remains available. Stale quotes retain their value
+with a warning and date. Calculations use Decimal on the server; the UI only
+formats returned values. No financial records are written by this read.
+
 ### 3.7 Account reconciliation (issue #268, decision 61)
 
 "The statement balance of account A at the end of D was X" is an explicit,
 audited ledger write — never an importer side effect, and never a marker
 that can go stale silently.
 
-- **Scope.** Open checking, savings, cash and credit-card accounts: the
-  postings-balance types §7.3's drift check compares. A loan/property balance
-  is a valuation and brokerage adds market value (§8), so a statement for
-  those is recorded as a valuation instead. Categories never reconcile (CHECK).
+- **Scope.** Open checking, savings, cash and credit-card accounts use
+  `component=balance` (default). Manual brokerage requires explicit
+  `component=cash`: the statement target is only cash, excluding owned
+  securities and unvested awards (#514). Feed brokerage is refused. Holdings,
+  awards, prices and feed flags never change. Loan/property accounts use
+  valuations instead; categories never reconcile (CHECK).
+  `component` is returned by write, history and account read surfaces and
+  included in audit/event facts. It derives from immutable account type
+  (brokerage=cash, others=balance); existing claim storage needs no migration.
+  Price changes cannot invalidate a cash claim; backdated cash changes can.
+  A source switch back to feed retains existing cash claims for reads, but
+  requires returning to manual before another cash reconciliation write.
 - **Statement convention in, ledger sign inside.** `statement_balance` is the
   figure as printed: positive = money held, and for a liability (credit card,
   loan) positive = the amount owed. Purser negates liability figures into
@@ -1386,9 +1725,15 @@ original as a fresh clone carrying its prior status — and its `content_hash`
 **moves** from the void row to the clone (the global unique index forbids
 duplication, and the clone now *is* that bank line, so import idempotency and
 the pending lifecycle stay exactly right; the void row remains as forensic
-lineage). A merge-created transfer is then voided with `superseded_by` → the
-resurrected outgoing side; a conversion-created transfer survives with its
-side back to unbacked. The `transfer.unlinked` event payload suppresses the
+lineage) and points at its clone (`superseded_by`), as a posted pending
+points at its successor: the clone carries the original's bank line on — its
+lineage reaches the original's, so a clone of a replacement (no hash, the
+replacement's origin) still pairs as a bank line — and the original is no
+longer merged into the transfer, so it backs none of its legs (#386 review).
+The absorb suppression names the clone's hash and its id. A merge-created
+transfer is then voided with `superseded_by` → the resurrected outgoing
+side; a conversion-created transfer survives with its side back to
+unbacked. The `transfer.unlinked` event payload suppresses the
 automatic relink paths only — explicit confirm/convert can always relink. A
 split loan payment (§3.3, decision 62) unlinks the same way: both bank rows
 come back exactly as they were, and its interest/fee posting is voided with it.
@@ -1572,39 +1917,145 @@ Expected transactions reconcile against imported posted/pending reality.
   transfer, or moving a matched pending under a posted one, moves the head
   the same way, #343).
 - **Transfer detection (deterministic tiers, 0.5.0):** opposite-amount pairs
-  across accounts within a date window are the candidate pool. Pairs whose
+  across accounts, in one currency (#386: an equal number in two currencies
+  is not the same money, and v1 has no FX), within a date window are the
+  candidate pool. The pool is the live one-sided **head of each import
+  lineage** (`matching.bank_line_head_clause`, the one filter on which heads
+  pairing takes): an import row, or — once a correction replaced it — the
+  replacement that carries the bank line on, when automation wrote it
+  (origin `rule` or `system`: the categorize pass corrects most posted rows
+  that land uncategorized) and its correction chain starts at an import row.
+  Never the corrected original, which stays posted beside its replacement:
+  merging or absorbing it would leave the replacement live beside the
+  transfer and count the money twice; never a replacement in which a person
+  or an agent set a category, which is their decision about the row (a
+  description or payee edit leaves it uncategorized, and pairable); never a split row
+  (decision 87) or a row on a closed account (§3.4) (#386). A match stays on
+  the corrected original, the matcher's bank row, so a head is matched — or
+  held, decision 65 — through its correction ancestors, and a merge carries
+  those matches. Pairs whose
   text also carries a **name signal** — a transfer/payment-style keyword
   token (`transfer`, `xfer`, `tfr`, `payment`, `pmt`, `pymt`, `autopay`) or
   the counterparty account's normalized name — are **auto-linked** during
   import and the daily sweep: one merged transaction with two real-account
   postings (`origin = system`), the one-sided originals voided with links.
-  Amount+date-only pairs stay confirm-first candidates. **Absorption:** an
-  imported row matching an existing transfer's *unbacked* side (no voided
-  import child on that account — a structural check, no marker column) with
-  a name signal is voided into that transfer instead of duplicating it.
+  Amount+date-only pairs stay confirm-first candidates (below). **Absorption:** an
+  imported row matching an existing transfer's *unbacked* side with a name
+  signal is voided into that transfer instead of duplicating it. A side is
+  backed — a structural check, no marker column — by a voided child that is
+  a bank line (it holds a content hash, or it is a replacement whose
+  correction chain starts at an import row: the hash stays on the corrected
+  original) or by the converted bank row itself: a bank row converted to
+  `[account]` is that account's bank line, the row its reversal names for a
+  posted conversion, the transfer itself for a pending one converted in
+  place — its own side the account a `transfer.converted` event records
+  (emitted by every conversion that makes a transfer of one row, so the
+  record outlives the audit retention); for an older conversion the
+  `transfer.convert` audit row while it lasts, else the one leg on an
+  account of the feed row's connection.
+  Reading those sides open voided the next real same-amount row into the
+  transfer (#386 review). A manual row converted the same way backs
+  nothing, so the bank's own row for it is still absorbed.
   The old "never silent" rule is now **never unlogged**: every auto-merge
   and absorb writes an audit row, emits an event
   (`transfer.auto_linked` / `transfer.absorbed`, payloads carrying the
   originals' prior statuses for exact undo), is visibly badged in the
   register, and is reversible via unlink. Pairs a human explicitly
-  unlinked are suppressed from the AUTO paths only — explicit
-  confirm/convert can always relink. The auto paths act on **posted rows
+  unlinked **or rejected** ("not a transfer", decision 102) are suppressed
+  from the AUTO paths only — explicit confirm/convert can always link
+  them. The auto paths act on **posted rows
   only**: consuming a bank-pending row in a merge would turn the known
   pending→posted rehash edge into a duplicated leg, so pending pairs stay
   confirm-first candidates until they post. Kill switch:
   `transfer_auto_link` (Config registry, default on). The name-signal test is
   `core.matching.has_transfer_signal`, token-boundary aware via space padding
   so `chase` never matches inside `purchase return`.
+- **Confirm-first candidates (#386, decision 102).** The candidate list —
+  `GET /matching/transfer-candidates`, the register's Link ⇄ flags — is the
+  standard-window pairs of `matching.transfer_pool` (held legs with their
+  expected's other side, decision 65), found in the plan's (date,
+  created_at, id) order, never forming a pair a human unlinked or rejected
+  (`transfers._suppressed_pairs`). Posted rows pair first, exactly as the
+  plan pairs them; pending rows pair only from what is left, so a pending
+  row arriving never takes a posted pair's counterpart (and withdraws its
+  card). The suppression acts inside the greedy pairing, as the account
+  checks do — the pair window rules the pair out — so a suppressed pair
+  never consumes its rows and they still pair with their real
+  counterparts. It is a **pure read**: it
+  emits nothing and writes nothing, takes `lookback_days` (0 to 36500:
+  pairs whose newer leg is at most that old; omitted = the whole history,
+  which the register uses) and names each pair's open card, `suggestion_id`. After every
+  `auto_link_pass` — the importer, the QIF/CSV import, the daily job —
+  `transfers.sync_candidate_suggestions` gives a candidate whose rows are
+  both **posted** and whose newer leg is within `TRANSFER_PAIR_LOOKBACK_DAYS`
+  = 60 days its one `transfer.candidate` event (`dedup_key` = the card's
+  key, and quiet when an earlier event named any rows of the same two
+  lineages) and a `transfer_pair` card in the inbox (§6); older pairs stay in the
+  register only, and a pair with a pending row waits for both to post — the
+  auto paths' own rule, since the bank posts a pending row as a new row and
+  a card on the pending pair would only churn. A person rejects a pair
+  through its card, or — any candidate, card or not, whatever its age —
+  through `POST /matching/transfer-candidates/reject` (write scope). The
+  rejection is memory every AUTO path honours: both stages of
+  `plan_auto_links` (so a rule's projected count is still the linked count,
+  decision 66), an automatic conversion's counterpart (`_counterpart_in`),
+  the candidate list and the inbox — and absorbs: a row is never absorbed
+  into a transfer converted from the other side of a rejected (or unlinked)
+  pair, in the plan's absorb phases or an automatic conversion's absorb
+  target, the transfer standing for the row its reversal names
+  (`transfers._conversion_sources`). An automatic `[account]` answer whose
+  only counterpart in that account is a suppressed pair's other side is
+  **no answer** (`transfers.machine_answer_refused`, `MachineAnswerRefused`):
+  converted in place, the row would become a transfer to that very account,
+  a second copy of the money its rejected counterpart already holds there.
+  The categorize pass leaves the row to its next tier, a categorize rule's
+  apply-history skips it (`skipped_not_a_transfer` — also when an earlier
+  row of the same run took the counterpart a later row's check counted on,
+  the one way its commit can differ from its dry run). The pass reads the
+  memory once (`transfers.SuppressedPairs`). A pair is remembered
+  by **lineage** (`matching.LineagePairs`): each side maps to its root —
+  back through correction chains and the rows a void one-sided row was
+  superseded by (a pending's posted successor, an unlinked original's
+  clone; a merge or an absorb supersedes by a transfer and ends a lineage)
+  — and every row of those lineages to the same root, so neither a
+  correction (the categorize pass corrects most posted rows), the bank
+  posting a pending row nor an unlink makes a rejected or unlinked pair
+  new. A lineage whose live row is an open pending also takes in its
+  successor in waiting (`lineage.open_pending_successors`, #407): a
+  gap-window import (`window_start = None` — the outage repair and
+  `POST /connections/{id}/refetch`) skips the reconcile step, so the
+  posted row it brings lands beside its still-open pending, superseding
+  nothing, while the import's transfer pass runs; the row the reconcile
+  step would pick for that pending (`reconcile.find_posted_replacement`'s
+  rule — an import posted row on the pending's account with its exact
+  amount within `PENDING_MATCH_WINDOW_DAYS`, closest date first, never a
+  row another bank line already lives on in, one row per pending in the
+  reconcile order) and the rows that carry it on count as the pending's
+  bank line until the reconcile step writes the real `superseded_by`. Confirm, the reject endpoint and a card's decision follow stale ids
+  along one forward walk (`lineage.current_rows`) to the rows that carry
+  the bank lines now. Explicit confirm and convert still link the pair;
+  that is the only undo, as it is for an unlink. They never take a
+  corrected original: every write that merges, absorbs, converts or
+  corrects a row first locks it (`ledger.lock_rows`, `FOR NO KEY UPDATE`,
+  rows before the balance watermark) and re-reads it, so a concurrent
+  correction and merge of one row serialize, and `ledger.refuse_corrected`
+  refuses a row a correction replaced (`ledger.RowChanged`; the automatic
+  passes skip such a row and go on). On the
+  machine path the counterpart comes from the transfer pool alone: never a
+  manual row, never a replacement in which a person or an agent set a
+  category.
 - **Declared transfer pairs (0.14.0, issue #174, decision 46; per-pair window
   #210, decision 66):** an active `transfer_link` rule names an
   ordered-insensitive account pair for which the **name-signal requirement no
   longer applies**, and may give that pair its own **date window**
   (`window_days`, 0–14; unset = the global ±3 days). Everything else about
   the candidate pool is unchanged and still applies: exact opposite amount,
-  posted rows only, cross-account, and unlink suppression — a pair a human
-  unlinked stays unlinked, because the suppression checks are ANDed *before*
-  the signal test and the rule replaces only that test (and, for its own
-  pair, the window). The window applies in **two stages, so it never changes
+  posted rows only, cross-account, and unlink and rejection suppression — a
+  pair a human unlinked or rejected stays unlinked, because a suppressed pair
+  is never formed (it is ruled out inside the greedy pairing, before any
+  signal is tested, and its rows stay free for their real counterparts) and
+  the rule replaces only the signal test (and, for its own pair, the
+  window). The window applies in **two stages, so it never changes
   what the standard window decides**: the absorb and pair phases first run
   over ±3 days exactly as before — there a declared pair links without a name
   signal only when its rule's window covers the gap, so a rule can also
@@ -1707,6 +2158,98 @@ Expected transactions reconcile against imported posted/pending reality.
 
 ## 6. Schedules & forecasting
 
+- **Attention evidence (#520):** detector-owned recurrence cards expire with
+  their evidence, and complete scoped scans audit withdrawal of unsupported
+  patterns. A renewed pattern may reopen its withdrawn card; accepted and
+  rejected decisions remain durable, and agent proposals do not expire this way.
+  Detection distinguishes four-week calendar drift from monthly billing and
+  rejects mixed-sign histories. A changed latest amount after a stable history
+  is proposed explicitly with a verification warning, retaining historical
+  median/range as evidence. Loan/investment-side patterns warn about internal
+  allocations. Refund/reward/dividend/earned-interest credits are excluded from
+  amount-and-date-only transfer candidates, with explicit linking still available.
+- Open match inbox lists and counts require a live proposal and live expected/
+  bank rows. Displayed variance is the current signed bank leg minus the expected
+  leg. Dashboard groups are lazy, account-filterable and age/strength-sortable;
+  failed checks are incomplete results, never all-clear. Per-account review
+  summaries use the canonical unreviewed predicate; global totals count each
+  transaction once. Batch UI review previews only selected posted rows.
+
+
+- **Occurrence certainty (decision 108, #512)** annotates existing expected
+  transactions, never a new ledger type. `instance_certainty` records an immutable
+  original amount/date, basis, observation window and capture time; migration
+  snapshots are explicitly `original_backfilled`, not invented initial estimates.
+  Rematerializing a released slot and cloning an unmatched occurrence retain the
+  original. Encrypted history retains superseded confirmation evidence after edits
+  and resets. Amount and date each expose `estimated` or `confirmed` independently.
+- A declared fixed rule supplies its known amount/date; `date_type=estimated`
+  marks approximate arrival dates. A detected pattern remains inferred in both
+  dimensions, even if its observed amounts were identical. Historical inference
+  is never confirmation evidence. A generic override estimates only the changed
+  dimensions; it does not invent confirmation. A statement confirms amount only.
+- `PATCH /schedules/instances/{transaction_id}/certainty` / MCP
+  `update_occurrence_certainty` accepts independent amount/date objects (state,
+  source, as-of, evidence note, optional value), with write scope and
+  `schedule.certainty_update` audit. It changes only this occurrence and never
+  posts it. Explicit confirmation protects that dimension from refresh; it does
+  not introduce a blanket pin on the other dimension. Confirmed occurrences
+  survive rule-slot removal until explicitly reset/skipped. Existing blanket
+  pins from ordinary overrides still hold. Reset clears current evidence and
+  restores the rule, retaining original and historical evidence.
+- `GET /schedules/instances/{transaction_id}/certainty` and MCP
+  `get_schedule_occurrence` expose the original, current evidence, linked actual
+  and original-to-actual amount/timing variance (positive days means later).
+  Schedule detail separates live `instances` from the latest 50
+  `matched_instances`. A proposed match reports `pending_review`; a confirmed
+  link to a pending bank row reports `matched_pending`, never posted actual.
+  `matched` names a posted actual. Unmatch copies both certainty and statement
+  evidence to its replacement occurrence; only reset discards current confirmation.
+- **Projected evidence (decision 109, #518)** addresses an occurrence by
+  `(schedule_id, occurrence_date)`, including beyond the 60-day materialization
+  horizon. `GET/PATCH /schedules/{schedule_id}/occurrences/{occurrence_date}/certainty`
+  and the existing occurrence MCP tools accept this identity without a transaction
+  UUID. This path only annotates existing calculated values: a supplied unequal
+  value is refused, including after materialization. It creates no transaction,
+  pin, posting or match and never changes another slot. Empty writes, blank notes,
+  future as-of dates and historical confirmation are refused. `clear` removes
+  only the named dimensions' evidence, keeping values and history.
+- A fixed Decimal rule value can therefore be explicitly **estimated** for any
+  projected or materialized slot, with source/note/as-of/actor. Calculation stays
+  `fixed`; certainty-only evidence never switches to a history estimator or
+  reports a value override. Unannotated fixed rules retain their legacy defaults;
+  this is the per-slot annotation path, not an automatic rule-wide reclassification.
+- The first projected evidence write retains the then-current projection,
+  calculation basis and observation window as a **first retained snapshot**, with
+  the actual capture time (no invented earlier evidence). Reads never capture it.
+  Materialization transfers that snapshot, evidence and encrypted history into
+  `instance_certainty`; a pre-existing instance original takes precedence.
+  Released slots carry evidence/history back for rematerialization. Cleared or
+  superseded evidence remains historical. Changed values show retained evidence
+  as estimated with its `evidence_value`, never silently confirmed. Explicit
+  confirmed dimensions still protect materialized values per decision 108.
+- Slot writes and materialization serialize by a transaction-scoped advisory lock
+  per schedule, with a second holder lookup after waiting. Metadata-only instance
+  writes lock the transaction without editing the ledger or refreshing `next_due`.
+  Migration 0048 creates an empty metadata table and a nullable basis discriminator;
+  no financial rows, prior originals or evidence are rewritten.
+- Forecast events, including projected slots, expose certainty. REST and the
+  daily resource include evidence; compact MCP events include both dimension
+  flags and basis, with the occurrence tool for detail. Amounts, originals and
+  variances use the forecast account's perspective. The UI's accessible Estimate
+  details identify the uncertain dimensions and evidence, and separate confirmed
+  upcoming occurrences, proposed matches and matched actuals. Agent amount and
+  narrative privacy apply to evidence, original values and variance as well.
+- Matching requires compatible account, currency, direction and counterparty at
+  the final write boundary as well as scoring. Estimated dimensions cannot
+  auto-resolve an occurrence. Candidates within 0.10 of the best score, including
+  competing recurrence slots, require review. Confirmation locks the expected
+  and bank rows and rechecks live ownership; the existing one-live-match indexes
+  prevent double settlement. Proposed-match forecast suppression remains exactly
+  decision 76's per-account behavior. Reject/unmatch restores the expected
+  contribution; a matched occurrence contributes no duplicate cash flow.
+
+
 - Recurrence is RFC 5545 RRULE (parsed/expanded with `dateutil`), anchored on
   the schedule's persisted `dtstart` (#231, decision 55): `FREQ` must be
   `DAILY` or coarser (sub-daily rules are rejected at 422), and the RFC
@@ -1775,8 +2318,7 @@ Expected transactions reconcile against imported posted/pending reality.
   (the card leg takes the balance, decision 78), pins the instance and keeps
   the figure, its closing date and its source in `instance_statements`,
   audited `schedule.statement_balance`. `reset_instance` drops it, and
-  `matching.release_settlement` copies it onto the clone whenever it keeps the
-  pin. A loan payment, or any other correction, is an ordinary override.
+  `matching.release_settlement` copies it onto every clone (decision 108). A loan payment, or any other correction, is an ordinary override.
   Either way the exact amount is also what lets the instance vouch for its
   bank pair, since decision 65 needs it. Changing a schedule's shape releases every un-pinned
   instance (their legs are wrong) and re-materializes.
@@ -1866,6 +2408,61 @@ Expected transactions reconcile against imported posted/pending reality.
   REST `/matching/proposed`, `/{id}/confirm|reject` and `match` are the
   ledger operations the card calls — and `match.proposed` is still emitted
   beside `suggestion.created`.
+- **Transfer pair cards (decision 102).** `transfer_pair` (source
+  `detected`, detector `transfer_pairing`, no confidence: nothing scores a
+  candidate) is a confirm-first transfer candidate (§5); the candidate list
+  stays the source of truth, recomputed from the ledger. Its
+  `TransferPairDraft` is the pair as the card shows it — `outgoing_id`/
+  `incoming_id`, `from_account`/`to_account` (paths), the `amount` moved
+  (positive), both dates, `date_gap_days` and both bank texts — and nothing
+  is editable (`edit_then_accept` is refused: another pair is
+  `confirm_transfer`). The fingerprint is the candidate's pair key in plain
+  text (`transfer_pair:<low id>:<high id>`) over the first rows of the two
+  correction chains (`matching.card_keys`): the plain pair key — the
+  `dedup_key` `transfer.candidate` has always carried — for rows never
+  corrected, and a correction since keeps the card, its snooze and its one
+  event, the draft refreshed to the replacement; `subject_account_id` is the
+  account the money left, `counterparty_account_id` the one it reached; an
+  account move re-points the draft's paths at once, as it does a schedule's
+  or a transfer link's (`ledger.accounts._repoint_suggestion_drafts`).
+  Creating a suggestion never fails its caller over a race (any kind): the
+  insert is `INSERT … ON CONFLICT (fingerprint) DO NOTHING`, so when two
+  passes — an import and the daily job — find the same new fingerprint, the
+  second waits for the first and reads its row back instead of rolling back
+  its whole import or job; a schedule suggestion lost that way is refreshed
+  with the loser's draft, as a later upsert would be. No SAVEPOINT: its
+  release runs the session's commit hook (a balance recompute) at each new
+  row, and more than 64 overflow the backend's subtransaction cache. The
+  sync after each auto-link pass creates the card — or re-opens a withdrawn
+  one, keeping any snooze it carried — for a pair whose rows are both posted, while its newer leg is within
+  60 days (an imported history must not flood the inbox), and **withdraws**
+  an open card whose pair is no longer a candidate at all (a row linked,
+  absorbed, matched to a bill, corrected or voided; the pair unlinked; a
+  closer row paired instead); a card that only ages past the window stays
+  until it is decided. `_merge_transfer_pair`
+  closes cards at the merge: the merged pair's open card is `accepted` only
+  for an explicit confirm of that pair — `confirm_transfer`, REST or MCP,
+  the register's Link ⇄ — with `result_entity_type = transaction` (the
+  merge); any other merge withdraws it, whoever ran it: the auto-linker, a
+  conversion on the machine path (the categorize pass, a rule's
+  apply-history) even under a token, or an `[account]` edit that picked the
+  counterpart itself (audited `suggestion.withdraw` with reason
+  `transfer.convert`). Any other open card naming either original is
+  withdrawn. A decision acts on the rows that carry the card's bank lines
+  now (`lineage.current_rows`: a correction since the last refresh).
+  `decide` accepts through
+  `confirm_transfer_and_propose`, passing the card so the merge leaves it
+  alone: the result is the merged transaction, the response carries the
+  `transfer_link` suggestion the confirm chained (decision 67), and the
+  merge is reviewed as any confirm is. It rejects exactly (`reject_scope`
+  must be `exact`): "not a transfer", the memory §5's AUTO paths honour.
+  Snooze only hides the card. Deciding a card whose rows no longer pair (both
+  live in the pool, exactly opposite, inside the window — `live_transfer_pair`,
+  regardless of a closer third row) withdraws it and answers 422; cards are
+  made of posted pairs only, so none waits on a pending row. A
+  rejection has no undo but an explicit link, as in decision 86. Neither
+  `match` nor `confirm_transfer` retires: `confirm_transfer` stays the only
+  path for a split loan payment, whose unequal legs are never candidates.
 - **Detection v2 (`core/recurrence.py`, #234).** History (live pending/posted
   rows that are not schedule instances, 400 days) is grouped per **(account,
   counterparty)** over the account's perspective leg: one-sided rows by
@@ -1998,16 +2595,118 @@ the preview, and rolls back when what ran differs from it. Audited
 ### 7.1 Connect (SimpleFIN)
 
 - Protocol client, no SDK: one-time claim-token exchange → encrypted access
-  URL; scheduled fetch; respect Bridge limits (≤24 req/day, ≤90-day ranges).
+  URL; scheduled fetch; respect Bridge limits (≤24 req/day, ≤90-day reach).
+- **45-day pages** (issue #490, decision 106). The Bridge recommends at most
+  45 days per `/accounts` request and warns it may cap longer ones, so every
+  multi-day fetch pages at `BRIDGE_PAGE_DAYS` (45): a first sync reaches
+  `FIRST_SYNC_DAYS` (88) as one 45-day gap page plus an open-ended final window
+  of at most 44 whole days (it runs to now); a long-idle catch-up pages its gap
+  windows at 45 days (`SYNC_GAP_WINDOWS_MAX` 8, the reach four 90-day windows
+  had); backfill windows are one page (`BACKFILL_MAX_WINDOWS_PER_RUN` 12,
+  `BackfillRequest.windows` default 8, max 12, and `BACKFILL_EMPTY_STREAK_STOP`
+  4, keeping the 180 days of silence that latch completion); the outage repair
+  and `refetch` fetch their range (still up to 90 days) in `service.pages`
+  (≤45 days each, one day of overlap) and need the whole range's pages in the
+  day's budget or defer/refuse. A sync's counts cover every page it fetched
+  (`gap_stats` is the older pages' share); per-fetch account counts
+  (`unmapped_accounts`, `skipped_ambiguous_accounts`) are the final page's.
+- **Protocol version** (issue #479, decision 97). Every `/accounts` request
+  sends `version=2` (SimpleFIN 2.0.0). A v2 AccountSet carries structured
+  `errlist` entries (`code`, `msg`, optional `conn_id` / `account_id`), a
+  top-level `connections` list (one per bank login: `conn_id`, `name`,
+  `org_id`, `org_name`, `org_url`) and a `conn_id` on every account, and has
+  no `errors` and no per-account `org`. The archive keeps v1 payloads, and a
+  server may answer v1 anyway, so nothing reads those keys directly:
+  `purser.feed.envelope` answers for either shape — issues (a v1 string is a
+  naked `gen.` issue), institutions (v1 derives them from `org`, with no
+  `conn_id`), each account's institution, the Bridge's `x-api-message` notes.
+  Unknown codes read as their prefix (`gen` / `con` / `act`; anything else
+  `gen`). The connection is `warning` when a fetch carries a `con.*` or
+  `act.*` issue or `gen.auth`, `active` otherwise; `gen.api` (the Bridge files
+  its usage warnings there) and a naked `gen.` are reported but leave the
+  status alone. A v1 fetch with any error string is `warning`, as before.
+  Sync results, `GET /connections` and the `connection.sync` audit row carry
+  `issues` beside the message list (`errors` / `last_errors`) and the
+  fetch's `protocol_version`; `/discovered` names each account's login
+  (`org`, `conn_id`). Account identity is unchanged — ids are the same in
+  both versions — but v2 promises an id unique only within its connection,
+  so an id two accounts share in one payload is **ambiguous**: the importer
+  skips both (`skipped_ambiguous_accounts`), the drift check leaves them out,
+  and `/discovered` flags them, rather than merge two logins' rows onto one
+  ledger account.
+- **Feed health** (issue #480, decision 98). After each completed sync,
+  `purser.feed.health` records what is wrong now — bank logins with a `con.*`
+  issue, mapped accounts with an `act.*` issue, mapped open accounts whose
+  `balance-date` is more than `feed_stale_days` old (app setting, default 4) —
+  as a `feed_health` block on the `connection.sync` audit row, and emits on the
+  transitions against the previous syncs' blocks: `feed.auth_required` (a login
+  newly reporting `con.*`), `feed.account_failed` (an account reporting `act.*`
+  on `FAILED_STREAK` = 2 syncs in a row, once when the streak is reached),
+  `feed.stale` (`events.emit_once`, keyed by connection, account and the frozen
+  `balance-date`, so a bank that updates then freezes again fires again) and
+  `feed.recovered` (`kind` `auth` / `account_failed` / `stale`). Backfill audits
+  as `connection.backfill` and a failed sync writes no row, so only completed
+  syncs count; a pre-#480 row reads as healthy. The check runs in a savepoint
+  and never fails a sync. `whats_new` carries a `feed` block — `needs_login`,
+  `failing`, `stale` (with `days`), five each — read from each connection's
+  latest block, so it repeats every call until the problem clears.
+- **Outage repair** (issue #481, decision 99). A bank that stops updating
+  still answers every fetch, so `last_fetch_at` keeps moving and the next
+  sync's window never reaches back to the outage. The `feed_health` block
+  records every mapped account's `balance-date`; when an account's date moves
+  forward from one the previous sync saw that is before this sync's window
+  start, the sync owes a repair from that date (`health.repairs_due`). After
+  the import it runs focused fetches (`account=` for the owed accounts, no
+  `pending`, in 45-day pages) from the earliest owed date less a day, floored at
+  `BRIDGE_MAX_RANGE_DAYS` back, to a day into the sync's window, archived and
+  imported as a gap window (`window_start=None`, every posted row checked for
+  re-description), in a savepoint. Reported as `gap_repair` (sync result,
+  audit row, `trigger_sync`); `unreachable_before` when the outage began
+  beyond the Bridge's reach; on a spent budget or a transport error the repair
+  stays owed in the block (`deferred`) and the next sync runs it. `POST
+  /connections/{id}/refetch` (write; MCP `refetch_feed`) re-fetches a range of
+  at most 90 days for some or all mapped accounts by the same path, audited
+  `connection.refetch`; neither touches `last_fetch_at`, the status or the
+  backfill cursor. Because a repair, a refetch or a focused backfill archives
+  a payload narrowed to a few accounts, discovery, `GET /connections` and the
+  map re-import read the fetch named by the latest `connection.sync` audit row
+  (`latest_sync_fetch`; the newest fetch when no row names one), never simply
+  the newest archived fetch.
+- **Feed inventory** (issue #482, decision 100). `GET /connections/inventory`
+  (read) and MCP `feed_status` (read) read each non-disabled connection's
+  latest sync fetch (`latest_sync_fetch`) and group every delivered account by
+  bank login (`envelope.institutions`): the login's `con.*` issue; per account
+  the ledger path it feeds or none, `connected` / `closed`, `balance_date`,
+  `days_since_balance`, `stale` (past `feed_stale_days`), counts of holdings and
+  transactions in that fetch, its `act.*` issue, `ambiguous`. For tokens that
+  withhold external identifiers (`security.withholds_external_ids`, #437) the
+  SimpleFIN ids, `conn_id` and `connection_id` are null and masked
+  account-number suffixes are stripped from bank names (`inventory.redact_name`).
+  No balances: read scope sees ledger balances elsewhere. `feed_status` returns
+  one line per login and only the accounts that need attention
+  (`not_connected`, `stale Nd`, an `act.*` code, `ambiguous_id`).
+- **Available balance** (issue #483, decision 101). `/discovered` carries the
+  bank's `available-balance` as `available_balance` when it differs from the
+  balance and the account is checking, savings, cash or a credit card (or
+  unmapped, type unknown): spendable cash or a card's remaining credit.
+  Brokerages and loans often report `0.00` there, which means nothing, so it
+  is withheld for them. No ledger use. Requests longer than the Bridge's
+  recommended 45 days (first sync, backfill, outage repair) draw a `gen.api`
+  warning only; they are paged at 45 days if the Bridge starts capping.
 - The fetch schedule is admin-configurable (`sync_schedule` in `app_settings`,
   Config UI): daily at HH:MM UTC (default 06:30), every 12h (06:30/18:30),
   every 6h, or hourly (:30) — every preset lands a run just before the 06:45
   matching job, and hourly (24/day) sits exactly at the Bridge budget; the
   per-connection fetch guard fails soft beyond it. Job id stays
-  `feed.sync_daily` (contract test) regardless of cadence. Changes reschedule
+  `feed.sync_daily` (contract test) regardless of cadence. Every job time is
+  UTC whatever the household `timezone` (decision 105): the setting moves the
+  ledger day, never the job train. Changes reschedule
   the running scheduler live in the single-process topology; in the split
   serve/worker topology they apply at worker restart (the API reports which
-  via `sync_reschedule_live`).
+  via `sync_reschedule_live`). Each run is delayed by a random 0–10 minutes
+  (`SYNC_JITTER_SECONDS`, APScheduler jitter; issue #483, decision 101), as the
+  Bridge asks apps to spread their fetches: the :30 presets still land before
+  06:45.
 - Every payload lands in `raw_fetches` first, verbatim, append-only.
 - Importer derives transactions with **content-hash dedup**
   (external account + date + amount + normalized description, plus the
@@ -2053,7 +2752,7 @@ the preview, and rolls back when what ran differs from it. Audited
   import pending on the connection's **postings-balance** accounts (checking,
   savings, cash and credit card: `drift.ELIGIBLE_TYPES`, the §7.3 set;
   decision 74), less `PENDING_MATCH_WINDOW_DAYS` (7), never further back than
-  `BRIDGE_MAX_RANGE_DAYS` — so every such open pending in reach is re-checked
+  `BRIDGE_PAGE_DAYS − 1` (44 days, one page; decision 106) — so every such open pending in reach is re-checked
   against the bank on every sync, and a posted successor dated before the
   overlap is fetched with it. A pending older than one fetch can serve widens
   nothing and stays as it is: every sync would otherwise pay for a maximal
@@ -2092,6 +2791,11 @@ the preview, and rolls back when what ran differs from it. Audited
   identity under masking — not fuzzy similarity (decision 40's boundary
   stands); counted as `skipped_masked_duplicate` in sync and backfill
   results.
+- **A broker's copy of trade cash** (issue #408, decision 104): on an
+  account with hand-tracked trades, a new row of exactly a standing trade's
+  Purser-posted cash, inside its window, is imported and linked as that
+  trade's cash in place of Purser's row (`linked_trade_cash`); a pending
+  copy is not stored (`skipped_trade_cash_pending`). §8 has the rule.
 - **Re-description guard** (issue #331, decision 74). The description is part
   of a row's identity, so a posted row the bank re-describes after the ledger
   holds it (`…PORTLANDOR` → `…PORTLAND CREDIT`) arrives as a new identity. The
@@ -2137,8 +2841,8 @@ the preview, and rolls back when what ran differs from it. Audited
   `origin` stays `import` — it is a bank row a rule shaped — and the shaping
   is recorded beside the existing provenance payload.
 - **Historical backfill** (`POST /connections/{id}/backfill`, ProposeToken —
-  same scope as sync; issue #126): the incremental sync only reaches ~90 days
-  back, so backfill pages **older** history in ≤90-day windows walking
+  same scope as sync; issue #126): the first sync reaches 88 days back, so
+  backfill pages **older** history in ≤45-day windows (decision 106) walking
   *backward* from the first sync's start. Each window ends one day into
   already-covered territory (1-day overlap; the idempotent import makes the
   re-fetch free), is archived verbatim as a `raw_fetch`, then imported with
@@ -2450,6 +3154,36 @@ the same history re-imported in either format dedups.
 
 ### 7.3 Post-sync balance-drift check (0.9.0, issue #149, decision 39)
 
+**Account financial reads (#505).** `GET /accounts/{id}`, the account's
+`/balance` route and MCP `account_balance` include `bank_snapshot`, using one
+shared archive reader (`feed/snapshot.py`) under ordinary `read` authority.
+Read access covers transactions AND ledger/bank/available balances, freshness
+and comparison basis. Connection discovery and configuration remain admin-only;
+there is no separate balance permission and no per-account/tenant ACL today.
+The snapshot is the requested account alone from `latest_sync_fetch`, with an
+allowlisted schema excluding provider identifiers, bank numbers and secrets.
+No fetch/import/reconciliation/basis observation happens on read; normal call
+auditing and token last-use tracking remain. No schema change.
+
+`kind=latest` remains explicit even when the enclosing ledger read has an
+historical `as_of`. `balance` and `available_balance` stay separate, including
+equal values; currency is the source currency, never guessed. Missing/invalid
+amounts and unavailable comparisons are null, not zero. Closed, disconnected,
+disabled, never-fetched, missing and ambiguous accounts have explicit states.
+Source epochs retain their instant in UTC, offset-bearing ISO instants retain
+their offset, date-only sources retain their date with no invented midnight,
+and malformed timestamps are unknown. `fetched_at` is separate ingestion time;
+freshness uses the source date and the configured stale-day threshold.
+
+The live comparison uses the existing eligibility, sums and history/pin choice
+below, explicitly `ledger_cutoff=all_recorded_dates` (future live postings
+included), with both totals and the selected total. Its `difference` is always
+bank minus that selected total; `matches_either_basis` separately describes the
+existing clean-if-either-matches policy. This additive diagnostic does not
+change the sync alert delta, discovery's legacy fields or the emission gate.
+Available balance is not used in the comparison. Unknown/mismatched currency
+and ineligible account types have an explicit comparison-unavailable reason.
+
 Every successful sync ends by reconciling the feed-reported per-account
 `balance` against the ledger (`feed/drift.py`, called from `sync_connection`
 only — backfill pages and map re-imports never run it). It is the external
@@ -2462,16 +3196,23 @@ reconciling the account to its statement (§3.7) is the audited way to act on
 it.
 
 - **Eligibility.** Mapped `(connection_id, external_id)`, open
-  (`closed_at IS NULL`), type ∈ {checking, savings, cash, credit_card}.
-  Excluded: loan/property (their reported balance already feeds the valuation
-  path, §8), brokerage (reported balance is market value, holdings-driven,
-  §8), unmapped accounts, accounts with no parseable `balance`. Credit-card
-  signs need no flip: SimpleFIN reports cards negative-when-owed, the same
-  convention as our liability postings (a nonstandard bridge reporting cards
-  positive would surface as an honest ~2x drift). The type set
-  (`drift.ELIGIBLE_TYPES`, the postings-balance accounts) also scopes which
-  open pendings widen a sync's window (§7.1, decision 74) and which accounts
-  reconcile to a statement (§3.7).
+  (`closed_at IS NULL`), type ∈ {checking, savings, cash, credit_card} — or a
+  brokerage account an admin opted in with `feed_balance_is_cash` (decision
+  90), allowed only while its holdings are tracked by hand: its feed balance
+  is then the account's CASH (a cash sweep, its positions in Purser), compared
+  with its postings exactly as a checking account's is, with the same emission
+  gate, basis history and pin, discovered fields and `whats_new` lines.
+  Opt-in, because many brokers report the whole account value. Excluded:
+  loan/property (their reported balance already feeds the valuation path, §8),
+  brokerage without the opt-in (reported balance is market value,
+  holdings-driven, §8), unmapped accounts, accounts with no parseable
+  `balance`. Credit-card signs need no flip: SimpleFIN reports cards
+  negative-when-owed, the same convention as our liability postings (a
+  nonstandard bridge reporting cards positive would surface as an honest ~2x
+  drift). The type set (`drift.ELIGIBLE_TYPES`, the postings-balance accounts)
+  also scopes which open pendings widen a sync's window (§7.1, decision 74)
+  and which accounts reconcile to a statement (§3.7); the brokerage opt-in
+  joins the drift check only, not those two.
 - **Dual-basis compare.** Banks differ on whether the reported balance
   includes pendings, so both live postings sums are computed in one grouped
   query — posted-only and pending-inclusive (`SUM … FILTER`; NOT the stored
@@ -2593,8 +3334,11 @@ it.
 - Brokerage: normal cash transactions + a `holdings_snapshots` time series
   from ONE source per account, `accounts.holdings_source` (decision 88):
   `feed` (SimpleFIN snapshots, the default) or `manual` (positions recorded by
-  hand and projected into the same table, below). No lot accounting, no
-  buy/sell postings, no TWR/IRR in v1.
+  hand and projected into the same table, below). A hand-tracked position may
+  track tax lots and an account may hold equity awards (decision 107, "Lots,
+  captures and awards" below); a feed account holds snapshots only. No
+  TWR/IRR and no tax computation; the only buy/sell postings are the cash of a
+  hand-recorded trade (decision 103, below).
 - **Manually tracked holdings** (issue #390, decisions 88/89). For a
   brokerage account whose bank sends cash but no holdings.
   - *Exclusive source.* Readers take every row at an account's newest
@@ -2649,14 +3393,26 @@ it.
     there; a closed position's span ends at its sell-out day, not at a later
     re-confirmed zero; the sell-out day itself is refused to a re-buy, since
     that day's set would carry both; a reversed event and its reversal are
-    not history, so a position that never held shares occupies nothing. Every write locks the
+    not history, so a position that never held shares occupies nothing. A
+    closed position reopens (`PATCH /positions/{id}` with `closed: false`,
+    write scope, audited `position.reopen`, `position.updated`
+    `change='reopened'`) so a wrong event — a final sale, say — can be
+    reversed, recorded again and the position closed again; the reopen is
+    refused (409) while another position in the symbol is open on the
+    account (one open per symbol) or a later one exists (its history follows
+    this one's, so a correction here could overlap it). Every write locks the
     account, then reads the position again (`service.lock_position`), so a
     write that waited on the lock sees what the writer before it committed:
     a close refuses it, an earlier `opened_on` stays. Writes are write scope at
     every surface (a position has no pending state; decision 73's reasoning):
     REST `/accounts/{id}/positions`, `/positions/{id}[/events]`,
     `/position-events/{id}/reverse`; MCP `record_position` ("I hold N as of
-    D": opens the position if needed, then a `set_quantity`).
+    D": opens the position if needed, then a `set_quantity`),
+    `record_sale` (a `sell` with its cash, decision 103) and
+    `reverse_position_event` (the reverse route: an agent undoes a wrong
+    `record_sale` or `record_position`), and `reopen_position` (the reopen,
+    its rules unchanged; both answers and the "position is closed" refusal
+    carry the `position_id`).
   - *The projection* (`purser.holdings.projection`). Manual rows are a pure
     function of the events, the closes, the feed floor and today, so they are
     regenerable: rows are compared on (date, position) and only the ones that
@@ -2674,7 +3430,8 @@ it.
     account row lock (FOR NO KEY UPDATE, ids in order, taken before the
     balance watermark — reconciliation's lock order, §3.7, so a sync that
     holds the watermark while its posting inserts take KEY SHARE never waits
-    in a cycle), and lowers `networth_dirty_from` to the first changed date:
+    in a cycle), and lowers `networth_dirty_from` to the first changed date
+    (a trade's cash still in transit rides in the rows: decision 104):
     net worth heals through `consume_watermark` (decision 38) with no manual
     rematerialization. Readers are unchanged (decision 50's overlay).
   - *Prices* (decision 89). `security_prices` holds manual closes
@@ -2733,6 +3490,337 @@ it.
     and is listed in `GET /prices/status`; one sold down to zero but not yet
     closed is history, like a closed one. Nothing calls a provider from an
     ordinary request path.
+  - *A trade's cash* (decision 103). A `sell` moves its net proceeds
+    (`quantity × price − fees`) onto the account unless `proceeds_to` is
+    `none` (shares withheld for tax); a `buy` takes its cost
+    (`quantity × price + fees`) off it only with `funded_from='cash'` (a
+    payroll plan purchase is funded from outside). Either is rounded once,
+    half up, to the cent: a broker settles in cents, and the feed's copy of
+    the cash reads in cents. The shares come first: the whole timeline, with
+    the new event in it, must pass before the cash is planned, probed or
+    posted, so an oversell is the 422 naming its date whatever the cash
+    would have run into, and a dry run fails exactly like the call.
+    - *The posting.* One ordinary posted flat transaction, dated the trade
+      date (or `settle_on`, a later day, for a broker whose cash should post
+      at settlement), `origin='system'` so it joins the unreviewed set,
+      balanced against `equity.securities` — a SYSTEM virtual account of
+      type `equity`: virtual like a category (outside net worth and the
+      running balances) but never a category (§3.2), so spending, income,
+      the classifier, payee memory, rules, schedules and detection never see
+      it. Net worth is unmoved by the posting: the projection moves the
+      shares on the trade date, so by default the cash arrives the same day
+      the shares' market value leaves the holdings; cash that lands later —
+      a later `settle_on`, a linked bank row, a broker row that took
+      Purser's over — is *in transit* until its date (decision 104, below).
+      `equity.securities` is USD and v1 is single-currency (decision 4): on
+      an account in another currency a trade moves no cash — one that would
+      is refused (422), so it is recorded with `proceeds_to` /
+      `funded_from` `none` — and a link refuses a row whose currency is not
+      its account's.
+    - *The double-count probe.* Before posting, the account is probed for
+      its own copy of the cash — the shape a broker's "SOLD" row has: a
+      live (pending or posted) chain head with exactly two legs, that amount
+      (same sign, to the cent) on the account and a category on the other
+      side — dated from the trade to five days after settlement
+      (`settle_on`, else the next business day, T+1, when a broker books
+      it); a transfer, a split, a corrected original, a trade's cash or a
+      reconciliation adjustment is not one. A copy found refuses the write
+      (409 `cash_already_recorded`, naming the row and the ways out) rather
+      than counting the cash twice: `transaction_id` LINKS that row when it
+      is the trade's cash (a pending copy is linked once it posts, so its
+      409 says to record the sale then), and `force_cash=true` — an explicit override,
+      audited on the trade's `position.record` row with the row it posted
+      over — posts the cash when that row is a different payment of the same
+      amount.
+    - *A copy that arrives later* (decision 104, #408). The probe runs when
+      the trade is recorded; a copy the feed delivers AFTER Purser posted
+      the cash is caught at import (`importer._import_account`, every import
+      path: a sync, its gap windows, an outage repair, a manual refetch, a
+      backfill, a replay). A new feed row on the account of exactly the
+      amount of a standing trade's cash that Purser posted itself (a live
+      posted row, origin `system`, no content hash, not a correction), dated
+      from the trade to five days after the later of its `settle_on` and the
+      next business day (`cash.copy_window_end`, the probe's own window),
+      is imported as usual and then LINKED as the trade's cash, exactly as
+      `transaction_id` links a row (`position.link_cash`), and Purser's row
+      is voided with `superseded_by` pointing at the link's replacement
+      (the one mutation a posted row allows, as in a transfer merge),
+      audited `position.feed_cash`; the oldest such trade takes the row, a
+      trade at most one. The trade's event still names Purser's row, and
+      every reader of a trade's cash follows `superseded_by` to the live one
+      (`cash.live_cash`: the undo, review's `locked`, the purge's refusal,
+      the projection's cash date). A pending copy is not stored at all
+      (`skipped_trade_cash_pending`; a link takes only a posted row), so the
+      posted row the bank books later takes over; it is skipped while any
+      standing trade's cash of that amount and window exists, taken over or
+      not, so a re-import skips it again. A row outside the window, of
+      another amount, or beside a trade whose cash was already linked is an
+      ordinary row (the drift check shows a double count left that way on an
+      opted-in account, §7.3). Import stays idempotent: the copy is stored
+      with its content hash; `linked_trade_cash` (also counted in
+      `imported`) is in the sync, gap-repair, refetch and backfill results,
+      and `skipped_trade_cash_pending` in the sync's (the other paths fetch
+      no pendings).
+    - *Cash in transit* (decision 104, #421). The shares leave the holdings
+      on the trade date while the cash keeps its own date — Purser's row on
+      `settle_on`, a linked row (or one that took Purser's over) on the
+      bank's. From the trade date to the day before that date the projection
+      counts the cash (a sale's proceeds +, a funded buy's cost −) in the
+      position's row: added to the held row's market value, or, once the
+      position holds nothing, as a zero-share row worth only the cash;
+      `holdings_snapshots.in_transit` records it, the cash date is a change
+      date (the next set drops it, with a tombstone for a carrier row), and
+      only effective events count, so a reversed trade carries nothing. A
+      held row with no value (no price, out of range) stays without one.
+      `latest_holdings` keeps a zero-share row that carries cash, `list_holdings`
+      shows `in_transit` and leaves it out of `unrealized_gain`, and
+      `GET /holdings` returns it.
+    - *The link.* `transaction_id` re-books the row to `equity.securities`
+      through the ordinary reversal-pair correction (the trade settles on
+      that row's date). It names exactly this trade's cash: a posted chain
+      head on the account, one real leg and one category leg, of the trade's
+      sign and its net to the cent (so a cash-moving trade always needs its
+      price), dated from the trade to five days after its next business day
+      (the trade alone sets a link's window: `settle_on` is the row's own
+      date and never widens it), and settling no bill (a live match on any
+      row of its correction chain is refused, naming the match and its
+      remedy: reject a proposal, unmatch a confirmed one; sale cash never
+      settles a bill); any other row,
+      or an id that names no row, is a 422, never a re-booked sale.
+    - *The cash and the shares move together.* A trade's cash row cannot be
+      edited or recategorized (`_flat_legs` refuses it). It, the bank row a
+      trade linked and the correction chain between them — every row
+      `ledger.trade_cash_lineage_ids` names: one with a system leg, or one
+      whose chain's live head has one, so a row freed by its trade's
+      reversal is ordinary again — stay out of the matcher's candidates, the
+      transfer pool and schedule detection's history (`link()` puts the
+      system leg on the replacement, so the bank original, still posted,
+      would otherwise pool and merge, or recur as a deposit), and a
+      conversion's merge leaves them out. Every explicit path refuses one
+      (422, `ledger.refuse_trade_cash_lineage`): a transfer merge
+      (`confirm_transfer`, the auto-linker's merges), a conversion to a
+      transfer (absorb, merge or in place) and a match (`match`, Mark paid,
+      confirming a proposal) — sale cash never settles a bill, and the
+      reconciler's pending-to-posted carry releases a bill rather than move
+      its match onto a successor a trade claims — and so does
+      `purge-feed-rows`, naming the trade: deleting the linked bank row would
+      NULL its chain's lineage and leave the trade impossible to reverse, so
+      the trade is reversed first (which frees the row), and the purge then
+      takes the row's whole correction chain (`--include-corrections`), so
+      no replacement stands beside the replayed row. The automatic passes (the
+      nightly matcher, the auto-link pass) read the lineage once
+      (`trade_cash_lineage_set`) and test membership for every candidate,
+      auto-match and merge; the explicit paths walk the row's chain
+      (`is_trade_cash_lineage`); the transfer pool, an explicit
+      counterpart and an absorb target leave trade cash out through
+      `matching.trade_cash_clause` (decision 102's one term: on chain heads,
+      a row with a system leg). Every one of them locks the bank row first
+      (FOR NO KEY UPDATE, read afresh: `ledger.lock_transaction`, and
+      `ledger.lock_rows` on the merge, absorb and conversion paths, which
+      then refuse a row that changed, `RowChanged`): a sale's `link`, a
+      match (`_execute_match`), a transfer merge (both rows, in id order)
+      and a conversion exclude each other, so no guard passes on a state the
+      other writer is about to change. Explicit paths wait; the automatic
+      ones (the matcher's auto-match, the auto-linker's merges and absorbs,
+      the classifier's and rules' conversions) first take the lock with
+      SKIP LOCKED and skip a held row, or one a trade claimed meanwhile
+      (`RowBusy`, distinct from `RowChanged`: the row may be unchanged, only
+      busy), for their next pass — they may already hold the balance
+      watermark the waiting writer needs. `purge-feed-rows` takes the
+      account lock a sale takes before it reads the links. Lock order stays
+      account, then row, then the watermark.
+    - *The undo.* Reversing the trade undoes its cash through the ledger's
+      reversal pair (guardrail 3: a posted row is corrected, never offset).
+      Purser's own row is corrected to nothing: the replacement keeps both
+      legs at zero, so the chain nets to zero and its live head records the
+      undo (a bare reversal would be a head of its own and leave the
+      heads-only running balances at -X where every sum shows 0). A linked
+      row is corrected back to the category it had. A cash row that is no
+      longer a posted chain head is refused rather than undone.
+- **Lots, captures and awards** (issue #393, decision 107; amends decision 8
+  and §13 for hand-tracked positions). Provider-neutral: Purser models,
+  validates and serves lots and awards; reading them off a broker's pages is
+  the agent's job, never Purser's.
+  - *A sub-ledger.* A position's share count stays the history of its events
+    (the projection, prices, cash and net worth are unchanged). A lot
+    (`lots`) is opened by one event — a `buy` with a lot (by default on a
+    position that already tracks lots; `unallocated` keeps a buy's shares
+    out), or a `vest`, which always opens one — and counts from that event's
+    day; or it is ADOPTED from a capture and counts from the END of the
+    capture's as-of day, so only a later day may draw on it (the broker's
+    figure already left out that day's disposals). A lot is live while its
+    opening event is effective and it is not voided. Its remaining quantity
+    is its quantity less its live dispositions (`lot_dispositions`, live
+    while their event is effective; a reversed event's rows stay, inert).
+    `acquired_on` sets the term; `effective_on` the ledger day.
+  - *The invariants* (`core.lots.check`, run by `service._check_timeline`
+    after EVERY write to a position with lots — an event, a reversal, a
+    recount, a capture, a void — so no entry point bypasses them): no lot
+    below zero; on every day the counted lots hold at most what the position
+    holds (the difference is UNALLOCATED, derived, never stored); a
+    disposition draws only on a live lot it may draw on that day; once any
+    lot can be drawn on, every `sell` / `transfer_out` is allocated in full.
+    A refusal is a 422 whose `detail.code` names the rule (`coverage`,
+    `overdrawn`, `dead_lot`, `before_lot`, `unallocated_disposal`,
+    `allocation_required`, `insufficient_lots`).
+  - *Disposals.* A `sell` (cash exactly as decision 103: the probe, the
+    link, the in-transit value, the undo) or a `transfer_out` (shares that
+    left with no price and no cash — never invented as a sale) on a day lots
+    can be drawn on names them: specific identification `lots [{lot,
+    quantity}]` (a lot id, the broker's reference matched by blind index, or
+    `unallocated` for shares outside every lot), or a method — `fifo`
+    (acquisition date, then ordinal), `lifo`, `hifo` (basis per share,
+    highest first; refused while a candidate has no basis). A method never
+    reaches the unallocated shares. Each disposition records its basis
+    (pro rata to the lot's total, 4 places, never more than is left; the
+    disposition that empties a lot takes the remainder, so the lot's
+    dispositions plus its remaining basis are its basis exactly), its share
+    of the net proceeds (the sale's cash amount in cents, spread pro rata in
+    units of 0.0001 by largest remainder: the parts sum to it exactly and
+    none has the other sign, however small the amount or many the lots), the
+    realized gain when both are known, and
+    the term (`long` only AFTER the one-year anniversary; a Feb 29
+    acquisition's anniversary is Feb 28). A backdated disposal draws only on
+    shares no later disposal consumed.
+  - *Basis.* A lot's basis is per share and total, or unknown (both NULL);
+    a buy's lot takes the buy's cost with fees, a vest's the fair market
+    value. A given total is authoritative and stored as given (filling or
+    replacing a basis from a capture keeps the broker's total, never one
+    rebuilt from a rounded per-share figure); a derived per-share figure or
+    total must fit its column, or the basis is refused; a row with no shares
+    left carries no basis. A lot-tracked position's `cost_basis` (position states,
+    `list_holdings`, the projection's `holdings_snapshots.cost_basis`, hence
+    unrealized gain) is the sum of its counted lots' remaining basis, NULL
+    when any share sits in a lot with no basis or outside every lot — never
+    the running average. Before its first lot counts, a position keeps the
+    average-cost basis of simple mode.
+  - *Captures* (`upsert_lots`, `POST /accounts/{id}/lot-captures`;
+    `upsert_awards`, `POST /accounts/{id}/award-captures`). A broker's list
+    as of a day, `complete` (each listed symbol's whole list) or `partial`
+    (only these rows). The dry run (the default) is the reconciliation: a
+    plan of changes and conflicts per symbol and `plan_hash`, a keyed hash of
+    the request, the plan and a digest of every fact the plan read. A commit
+    takes the account lock (the lock order every holdings writer uses),
+    recomputes the plan and refuses (409 `preview_stale`) a hash that is not
+    the caller's `expect_hash`; refuses (409 `capture_conflicts`) a plan with
+    conflicts unless `skip_conflicts` (a symbol with any conflict is then
+    left out whole); archives the canonical request in `raw_fetches`
+    (`source='capture'`, raw-first); records `holdings_captures`; applies;
+    audits `capture.apply`; emits `holdings.captured`. The exact request
+    again (same keyed `request_hash`) is a no-op answered with the first
+    capture — also for a concurrent duplicate that waited on the lock. The
+    same economic content later (a new captured_at or as_of) records a
+    capture with `repeat_of` for freshness and changes nothing else.
+    - *Identity.* A row matches a lot by its broker reference, else by
+      (acquired_on, plan, ordinal). Reference-less rows of one date and plan
+      must carry distinct ordinals (422 otherwise); a referenced row meeting
+      exactly one reference-less lot of its date and plan assigns the
+      reference, several is `ambiguous_identity`.
+    - *Never inferred, always a conflict:* fewer shares left in a lot
+      (`quantity_decrease`: record the sale or transfer out naming it), more
+      (`quantity_increase`), a lot a complete capture leaves out
+      (`missing_from_capture`), a complete total below Purser's count with
+      every lot accounted for (`unexplained_decrease`), a known basis that
+      differs (`basis_differs`; `basis_policy='replace'` takes the broker's
+      while nothing drew on the lot, else `basis_locked`), a partial
+      capture's new lots exceeding the unallocated shares on any day from
+      as_of (`insufficient_unallocated`), and a capture older than the
+      newest applied for that symbol (`stale_capture`: compared, never
+      applied) — ordered by as_of, then by `captured_at`, so an earlier
+      reading of the same day never overwrites a later one; awards are
+      ordered the same way per account. An exact retry stays a no-op. A partial capture never changes the share count; a complete
+      one recounts the position UP to the broker's total with a
+      `set_quantity` on as_of (the new lots explain it). A zero row Purser
+      never saw is skipped.
+    - *Freshness.* `captured_at`/`as_of` (capture freshness: `list_lots`
+      `capture`, `GET /positions/{id}/lots` `summary.capture`,
+      `GET /accounts/{id}/captures`) are reported apart from `price_as_of`
+      (quote freshness).
+  - *Corrections* (audited, under the account lock). A lot an event opened
+    goes with that event's reversal, refused while a disposal still draws on
+    it (reverse that first); the reversal voids the lot (`lot.void`, status
+    `reversed`), so its reference and (date, plan, ordinal) are free for the
+    corrected event recorded next. An adopted lot is voided (`void_lot`,
+    `POST /lots/{id}/void`, audited `lot.void`), refused while a live
+    disposal draws on it or a vest is linked to it; then a new capture (a
+    new captured_at) records the right lot. A basis is corrected in place
+    (`correct_lot_basis`, `PATCH /lots/{id}`, audited `lot.basis`) only while
+    no live disposition drew on the lot. Dispositions and captures are never
+    edited.
+  - *Awards.* `awards` (grant reference, symbol, grant date, granted and
+    cancelled units, the broker's reported vested count and its date) and
+    `award_vests` (dated units, `scheduled` / `vested` / `forfeited`).
+    Nothing that values holdings, balances or net worth reads them: units are
+    not owned until they vest.
+    - *Entitlement* (`core.awards.entitlement`, the one calculation the
+      planner, every mutator and every summary use). Vested = the broker's
+      reported vested count (the baseline, kept when a later capture omits
+      it) — which includes every vest Purser recorded on or before its date —
+      plus the vests Purser recorded after it; with no baseline, the
+      recorded vests. Cancelled = the larger of the broker's cancelled count
+      and the units of the vests marked forfeited: both describe units that
+      will never vest, so a forfeiture the broker also reports as cancelled
+      is counted once, and one it has not reported yet still counts.
+      Remaining (unvested) = granted − cancelled − vested,
+      unknown when there is no baseline and the recorded vests, schedule and
+      cancellations do not account for every unit (then the scheduled units
+      are reported, marked not known). Scheduled = units on dated vests to
+      come; unscheduled = remaining − scheduled (units with no date yet),
+      never inferred from a complete schedule. Every path that changes an
+      award — a capture, `record_vest` (on a scheduled row or a new one),
+      reinstating a vest, correcting granted or cancelled units — is refused
+      when vested + scheduled + cancelled would exceed the grant.
+    - `list_awards`, `GET /accounts/{id}/awards` and the `unvested` block of
+      `list_holdings` report unvested, scheduled and unscheduled units and
+      whether they are known, valued at the latest close for information
+      only. `list_awards` pages inside the response budget: the awards, or
+      one award's vest schedule, continue through `next_cursor` (each entry
+      once, the same filter on every page); the per-symbol summary rides on
+      the first page, largest first, cut to half the budget
+      (`unvested_truncated`); plan labels and references are shortened.
+      `list_holdings` itemizes the three largest unvested symbols per
+      account (`unvested_more` counts the rest). An award capture adds grants and vests,
+    re-estimates a scheduled quantity and raises cancelled units; a changed
+    grant size, fewer cancelled units, a listed vest Purser has vested or
+    forfeited, a schedule exceeding the grant, or (complete) a scheduled
+    future vest the broker no longer lists is a conflict — forfeiting is
+    explicit (`update_award_vest`, `PATCH /award-vests/{id}`). A scheduled
+    vest on or before as_of the broker no longer lists is counted as due and
+    unrecorded.
+  - *Vests* (`record_vest`, `POST /awards/{id}/vests`). Gross, withheld and
+    net (net = gross − withheld) and the fair market value. Either a `vest`
+    event adds the net shares and opens their lot (basis: the fair market
+    value), or `lot` LINKS a lot already held (adopted from the broker's
+    list): same account and symbol, acquired on the vest date, the net
+    shares (an adopted lot may hold fewer, sold before its capture; an
+    event-opened one exactly), the fair market value as its basis when both
+    are known, linked to no other vest — no event, no shares added. A vest
+    whose every unit was withheld (net 0) is recorded with no event and no
+    lot, and undone like a linked one. With an unlinked live lot acquired
+    that day and neither `lot` nor `force_new_lot`, the vest is refused
+    (`possible_duplicate`; a reversed lot never counts). The vest row turns `vested`
+    and names its lot, so its units leave the unvested total exactly when the
+    lot starts counting. The same vest again with the same figures is a
+    no-op (`already_recorded`); other figures are a 409 `vest_conflict`.
+    Reversing the vest event hands the row back to `scheduled`; a linked
+    vest goes back through `update_award_vest`.
+  - *Disclosure* (decision 91). Lot and grant references are account
+    identifiers: encrypted with a blind index, omitted from every agent
+    answer unless the call includes `external_ids`, and omitted for
+    non-admin API tokens over REST (`external_ref_withheld`); they are always
+    accepted as input. Plan labels are narrative (withheld with
+    `privacy_purchase`); a lot's basis — its per-share figure too, which
+    times the remaining shares gives it away — proceeds and gains are single
+    amounts (withheld with `privacy_amount`); `realized_gains` is an
+    aggregate.
+  - *Reads.* `list_lots` / `GET /positions/{id}/lots` (FIFO order, paged,
+    with the lot summary: shares in lots, unallocated, shares of unknown
+    basis, the lots' basis, capture freshness), `GET /lots/{id}` (with every
+    disposition, `live` false once reversed), `realized_gains` /
+    `GET /accounts/{id}/realized-gains?year=` (by term; only dispositions
+    with both basis and proceeds are summed, the rest counted).
+  - *Out of scope here:* tax computation, ESPP qualifying flags, splits and
+    other corporate actions, CSV lot import, forecast vest events.
 - **Feed funds valued at 0** (issue #392, decision 92). A plan's feed can
   report a held fund at market value 0: a plan-only fund (a collective trust,
   say) that no market-data provider prices. The readers value such a FEED
@@ -2971,19 +4059,48 @@ operators must still complete setup before exposing a fresh instance (#429).
 - Every mutation is audit-logged with actor token, action, entity,
   before/after. Browser sessions resolve to token identities too — one audit
   mechanism.
-- **Reads are audited too** (issue #122, decision 31). Every authenticated
-  request writes one `read`/`write` **call row**: REST via pure ASGI
-  middleware (after the response flushes, own short transaction — an audit
-  failure never fails a request; requests that resolve no principal produce
-  nothing; 403s ARE logged), MCP via the `audited_tool` wrapper (tool name,
-  clipped args — values capped, credential material never logged — ok/error,
-  duration). The wrapped tools keep byte-identical schemas (snapshot test).
-  A shared `request_id` groups each call row with the `change` rows it
-  produced. The admin UI (and `GET /audit/sessions`) groups rows into
-  **virtual sessions**: per actor, split after 30 minutes of silence —
-  web sessions span their token lifetime; long-lived API/MCP tokens split
-  into conversation-shaped bursts; scheduler rows (`actor_token_id IS NULL`)
-  render as System.
+- **Sharing evidence** (#525, migration 0049). REST integration responses,
+  MCP tools and direct financial resource reads record a value-free inventory
+  of the final response after privacy filtering. Requested extra fields and
+  observed returned fields are separate. Unknown shapes/free text are marked
+  partial; empty results, denials, failures and legacy entries remain distinct.
+  An inventory is not an exact historical value snapshot. REST retains its
+  existing disclosure behavior; MCP defaults do not silently apply to REST.
+  `request_id` links a call to its mutation rows. A nested `read_series` resource
+  read shares its tool record rather than double-counting a disclosure.
+- **Capture before release.** An API-token REST response and every MCP result
+  must commit its audit record before release (up to three idempotent attempts).
+  REST buffers at most 16 MiB in memory; larger integration responses are
+  withheld with 413 and a narrowing instruction. Capture failure returns 503
+  for REST or a tool/resource error for MCP, withholding the response. A write
+  may already have committed: the error explicitly requires checking its state
+  before retrying. Mutations retain their atomic before/after record. Browser
+  activity remains best-effort to preserve administrative recovery access.
+  Completion is a separate append-only receipt: HTTP send completion for REST,
+  tool/resource return to the transport for MCP. A missing/interrupted receipt
+  makes a successful response's delivery uncertain; neither kind proves client
+  receipt or downstream forwarding. Process-local capture failure counters and
+  their observation start time are exposed only to admins; they reset on restart
+  and do not claim fleet-wide or historical health.
+- **Integration identity and authorization.** Each API token has an integration
+  UUID (existing API tokens use their token UUID). Admin token creation can name
+  `replaces_token_id` from the same owner to preserve that identity. It does not
+  revoke the old token: update the client, then explicitly revoke it. New grants
+  retain the issuing actor, time and scopes in encrypted metadata; calls snapshot
+  the credential, owner and effective scopes at authentication. Historical grants
+  remain unknown when not recorded. Shared credentials identify their shared
+  integration, never an inferred downstream agent. No per-request approval gate.
+- **Audit UI and APIs.** The default Data shared view shows API-token calls;
+  Changes made, Access & permissions and Technical activity expose the rest.
+  `/audit/activity` filters integration/account/data type/outcome/extra fields,
+  time range and request ID server-side with `(at,id)` keyset pagination. A fixed
+  upper time bound keeps a review window stable. `/audit/options` lists all
+  integration identities, accounts, observed types, actual retention and earliest
+  retained entry. `/audit/export` streams every matching page as CSV or JSON
+  with formula-safe CSV cells. All three require admin scope. Old `/audit` and
+  `/audit/sessions` APIs remain compatible; the UI no longer relies on inferred
+  thirty-minute sessions. Evidence-dependent filters cannot match legacy rows
+  lacking that evidence, which the UI explains explicitly.
 - **Audit retention is finite and uniform**: `audit_retention_days` (config
   registry, default 90, floor 7) — `audit.prune_daily` (08:15 UTC) deletes
   older rows in id-batches. Consequences, owner-acknowledged: write audit is
@@ -3148,7 +4265,9 @@ operators must still complete setup before exposing a fresh instance (#429).
 - **Runtime config is admin-scope, curated, and audited** (#102, #105).
   `/config` (GET/PUT/DELETE) edits the `app_settings` overrides for a fixed
   registry: sync schedule, agent privacy defaults (#437), AI provider settings, session lifetimes, Grafana
-  URL, and OIDC (issuer / client id / client secret). Env vars stay the
+  URL, OIDC (issuer / client id / client secret), and the household time zone
+  (`timezone`, decision 105: validated against Python's IANA zones and the
+  database's `pg_timezone_names`, 422 otherwise). Env vars stay the
   bootstrap defaults; a DB row overrides. `ai_api_key` and
   `oidc_client_secret` are write-only — Fernet-encrypted at rest, never
   echoed by any endpoint, masked to set/unset in audit rows. Every change
@@ -3182,6 +4301,10 @@ schedules with monthly-normalized totals + price-change history, 0.2.0;
 `source` is provenance, never a status, and `suggestions_open` counts the
 schedule suggestions awaiting a decision, #347) · `whats_new`
 (cursor-chained agent digest over the events stream, 0.2.0) ·
+`list_lots` (a position's lots, paged, with its lot summary and capture
+freshness; decision 107) · `list_awards` (unvested units per symbol, awards,
+one award's schedule; never net worth; decision 107) · `realized_gains` (by
+term, decision 107) ·
 `list_holdings` (each open brokerage account's newest snapshot set — the
 rows' source, value, positions, `stale_price` / `no_price` counts — with the
 largest positions itemized inside the budget; one named account is paged
@@ -3204,7 +4327,8 @@ rule's `applied` count, §3.1) · `review_batch` (the review loop: unreviewed
 rows with their signals and a checklist inline, 0.14.0) · `list_memories`
 (recorded financial context, 0.14.x) · `list_suggestions` (the inbox: open
 suggestions with headline, draft, evidence summary, confidence; 0.16.0,
-decision 57; `kind` = schedule | transfer_link, decision 67 | match, decision 86)
+decision 57; `kind` = schedule | transfer_link, decision 67 | match, decision
+86 | transfer_pair, decision 102)
 Write: `create_transaction` · `update_transaction` (atomic reversal pair when
 posted; `category='[account]'` is the transfer-conversion sugar, 0.5.0) ·
 `create_schedule` (active; `propose=true` lands a suggestion instead, #436; `dtstart`, `counterparty_account`, 0.16.0) · `update_schedule` /
@@ -3218,17 +4342,33 @@ nearest `due_date`; write scope, credit cards only, decision 80) ·
 | reject | snooze, write scope, 0.16.0; a `transfer_link` accept returns a
 DRAFT rule and its projected link count, decision 67; a `match` accept or
 reject decides the proposal and returns `match{id,state,variance}`, decision
-86) · `match` (confirms an existing proposal of the same pair, decision 76;
+86; a `transfer_pair` accept merges the pair and returns
+`transfer{merged_transaction_id, suggestion_id}`, its reject is "not a
+transfer", decision 102) · `match` (confirms an existing proposal of the same pair, decision 76;
 can pair a rejected one, decision 86) / `confirm_transfer` (optional
 `remainder_category`: a split loan payment, decision 62; an ordinary confirm
 proposes a payee-scoped `transfer_link` suggestion and returns its id,
-decision 67) · `reconcile_account` (statement-balance
+decision 67; it accepts the pair's `transfer_pair` card and can link a
+rejected pair, decision 102) · `reconcile_account` (statement-balance
 reconciliation with dry run, write scope, decision 61) · `record_valuation`
 (a loan's or property's value on a date, `convention` ledger or statement,
 write scope, decision 73) · `record_position` ("I hold N shares as of D" on a
 manually tracked brokerage account; opens the position when needed; commit
 scope, decision 88) / `record_price` (a manual close of a symbol on a date;
-write scope, decision 89) · `update_account` (rename / re-describe / hide a
+write scope, decision 89) / `record_sale` (a sale and its cash through the
+REST `sell` path: `cash_already_recorded` refusal, `transaction_id` link,
+`dry_run` that writes nothing, `force_cash` past a coincidence; write scope,
+decision 103) / `reverse_position_event` (reverses an event and undoes its
+cash, the REST reverse route; write scope, decision 103) / `reopen_position`
+(reopens a closed position, the REST reopen; write scope, decision 103) ·
+`upsert_lots` / `upsert_awards` (bulk captures of a broker's lots or awards:
+dry run by default, commit with the preview's `plan_hash` as `expect_hash`,
+exact retries no-ops, conflicts never applied; write scope, decision 107) /
+`record_vest` (a vest as an event plus its lot, or a link to a lot already
+held; idempotent; write scope) / `record_transfer_out` / `void_lot` /
+`correct_lot_basis` / `update_award_vest` (write scope, decision 107);
+`record_sale` takes `lots` / `lot_method` on a lot-tracked position ·
+`update_account` (rename / re-describe / hide a
 real account or set its floor, `min_balance`; no `path`, categories refused,
 write scope, §3.4, issues #353/#466)
 · `trigger_sync` ·
@@ -3363,9 +4503,11 @@ provider on grants nothing by itself.
    transfer by setting a row's category to `[account]` — a **one-sided**
    conversion naming a counterparty account, not a merge of two rows. That
    conversion may be reconciled against an existing counterpart by the same
-   deterministic pairing `auto_link_pass` already applies (posted rows only,
-   exact opposite amount, inside the date window, unlink-suppression
-   respected). *Which* rows pair stays deterministic; the model only names the
+   deterministic pairing `auto_link_pass` already applies (rows of the
+   transfer pool, posted rows only, exact opposite amount, inside the date
+   window, unlink and rejection suppression respected — and an answer whose
+   only counterpart is a pair a person said is not a transfer is no answer
+   at all, §5). *Which* rows pair stays deterministic; the model only names the
    account. §5's tiers keep sole ownership of collapsing two feed rows.
 
 The asymmetry in rule 5 is a detectability argument, not caution about model
@@ -3470,7 +4612,7 @@ with no connected agent, or for nuances that surface between sessions.
 | 5 | Posted = reversal-only | Strongest agent-trust guarantee: information can be added, never destroyed. API absorbs the ergonomics (atomic reversal pairs). |
 | 6 | Matching engine is central; posted amount wins; variance recorded | Reconciliation is the job. Variance is signal (estimates improve, alerts fire). |
 | 7 | Categories as virtual accounts (ltree) | One hierarchy mechanism; rollups are one indexed query. |
-| 8 | Investments as snapshots; lots deferred (nullable lot_id hedge) | SimpleFIN provides snapshots, not lots; lot import is where migrations die; agent questions are answerable from snapshots. |
+| 8 | Investments as snapshots; lots deferred (nullable lot_id hedge) — *amended by decision 107: hand-tracked positions may track lots in `lots`; the `holdings_snapshots.lot_id` hedge stays NULL* | SimpleFIN provides snapshots, not lots; lot import is where migrations die; agent questions are answerable from snapshots. |
 | 9 | Bills: no provider exists for self-hosters (FDX/1033 enjoined & aggregator-gated) → manual + detected + agent-parsed email via MCP | The agent stack IS the bill provider; server stays clean of email parsing. Provider plugin seam reserved. |
 | 10 | Python / FastAPI; one image, role commands (serve/worker/migrate) | Single-process simplicity for Mac self-hosters; 12-factor seam for compose/k8s splits without image proliferation. |
 | 11 | React (Vite/TS/shadcn/Tailwind) static SPA served by FastAPI; same public API as agents | Design potential + agent-assisted development velocity; no Node at runtime; UI dogfoods the API. |
@@ -3519,7 +4661,7 @@ with no connected agent, or for nuances that surface between sessions.
 | 54 | **Fan-out is cursor-driven** (issue #219, migration 0024): `webhook_subscriptions.cursor_at` is a watermark over `events.at` — each `fan_out` pass scans only `at >= cursor_at` per subscription, advances the cursor to the newest event scanned, and inserts deliveries with ON CONFLICT DO NOTHING on the `(subscription_id, event_id)` unique; a new subscription's cursor defaults to now(), so it receives no historical backlog; the migration backfills existing subscriptions to their newest delivered event's `at`. | The anti-join over the full events table grew without bound and re-ran per subscription per pass, and a fresh subscription drowned in the entire event history as deliveries — replay is what `GET /events` (decision 12) exists for, so fan-out re-serving history was duplicated responsibility. The `>=` boundary plus DO NOTHING is deliberate: `events.at` is transaction time, so same-timestamp ties on the boundary are re-scanned next pass and deduped by the constraint — which simultaneously closes the IntegrityError race between concurrent passes without any locking. |
 | 55 | **Schedule instances belong to the user; the rule owns only what the user has not touched** (issue #231, migration 0025, §4/§6): `schedules.dtstart` is persisted and anchors every expansion (`FREQ` allow-listed to DAILY or coarser; RFC `UNTIL=…Z` accepted); `transactions.occurrence_date` is the rule slot and the idempotency key across every status; `transactions.schedule_pinned_at` marks a token-bearing edit; a user skip (void) keeps its slot, a rule resync (edit/pause/end) voids-and-releases it; estimated schedules refresh live un-pinned instances; `next_due` is a cache refreshed from the instance write paths; `status` gains terminal `ended` + `ended_at` | `dtstart` was validated then dropped (#221), so anchor-sensitive rules silently anchored to row creation and the phase drifted; persisting it (rather than deleting the parameter, the other way #221 could go) is what detection v2 needs to propose "every other Friday from the last observed payday". Idempotency keyed on `date` made an instance date edit free the slot for a duplicate, so the slot needed its own column — and once slots exist, skip vs resync is the crux: both are voids, but a skip must never come back while a rule edit undone must be able to re-fill exactly the slots it released, hence a released slot is `NULL` rather than a second status. Pinning is the invariant that lets estimate refresh exist at all without a rule silently overwriting "this Citi payment is 8,067.37"; it is a timestamp, not a flag, so the audit trail says when the user took the row. `next_due` stays a column because three list surfaces order by it; deriving it on read would put a subquery under each. |
 | 56 | **Recurring transfers are schedules with a counterparty, and matching sees every row through the perspective leg** (issue #232, migration 0026, §5/§6): `schedules.counterparty_account_id` (CHECK-exclusive with `category_path`); instances are two-leg expected transfers created through `ledger.create_transfer`; `estimate_basis=counterparty_balance` reads the counterparty's reported balance; the matcher's candidate pool is `origin IN (import, system)` OR any live two-leg row, `MatchInput` carries the leg on the account being matched plus the other real account, a shared counterparty scores as payee agreement, a two-leg expected is tried from each side, `unmatch` clones any posting shape, and `manual_match` views both rows through their shared account; MCP `search_transactions` shows a transfer's perspective leg and `counterparty` instead of nulls | The 30-day drivers on a checking account are transfers — card payments, loan payments, 529/IRA contributions — and they were invisible twice: detection and matching both filtered to `origin='import'` with exactly one real leg, so a card-payment schedule could never be detected and, once the bank rows auto-linked into a merge, could never be matched: the expected stayed "overdue", landed today in the forecast on top of the posted outflow already in the opening balance, and the projection double-counted every card. Modelling the transfer as a two-leg expected (not a flat outflow to a `transfers` category, which §3.2 deliberately does not have) keeps §3.3's invariant that a transfer is two real legs everywhere, makes the instance show up on both accounts' forecasts for free, and lets the matcher supersede it with the merge exactly as it supersedes a flat expected with an import row. "Perspective leg" is the one idea that makes one-leg imports and two-leg merges comparable without special cases: an amount only means something from an account's point of view, which is also why `search_transactions` returned nulls for transfers — it had no perspective. Origin cannot define the pool because a human-confirmed merge carries the human's origin; two real legs can, and it is the same structural test `is_transfer_shaped` already uses. `counterparty_balance` is deliberately the *reported* balance, not a statement balance Purser does not have: it is honest as an estimate, refreshes nightly, and the user overrides (pins) the instance when the statement says otherwise. |
-| 57 | **Suggestions are a first-class entity, and "proposed" is a suggestion, not a schedule status** (issue #233, migration 0027, §3.1/§6/§10; the first further kind, `transfer_link`, is decision 67): `suggestions(kind, status open\|accepted\|rejected, fingerprint UNIQUE, source, detector, confidence, subject/counterparty ids, encrypted typed draft + evidence, snooze_until, seen_count, decision fields, reject_scope, result entity)`; detection and propose-scoped `create_schedule` upsert by fingerprint; `decide(accept\|edit_then_accept\|reject\|snooze)` is write scope and accept applies the draft through `create_schedule`; legacy `proposed`/`rejected` schedule rows migrate into suggestions and `schedules.status` is CHECKed to `active\|paused\|ended`; `schedule.detected` retired for `suggestion.created`/`suggestion.decided` | Purser already ran four bespoke confirm paths and a "proposed" schedule was a row with no evidence, no confidence, no snooze, and rejection memory only by accident (the rejected row happened to block re-detection by payee). Each detector added would have grown that linearly. A suggestion carries state the target object must not: what convinced Purser, how sure it is, when to ask again, and what the user said last time — and the fingerprint is what makes "never re-propose what I rejected" a property rather than a hope. The draft is typed and accept is a pure apply so the audit trail says exactly what was created from exactly what was shown; a re-derivation at accept time could silently create something else. Snooze is a date on purpose: expiry that auto-accepted would be a second, hidden auto-activation path, and the whole design rests on nothing that moves the forecast activating without a commit decision. The universal-`status=proposed` alternative (no table, a cross-entity read view) was weighed and loses exactly the four things — evidence, confidence, snooze, rejection memory — that keep an inbox from becoming spam. Scope this round is schedules only; transfer candidates and proposed matches keep their paths and fold in as later kinds (proposed matches did in decision 86, as mirror cards — their paths stay). |
+| 57 | **Suggestions are a first-class entity, and "proposed" is a suggestion, not a schedule status** (issue #233, migration 0027, §3.1/§6/§10; the first further kind, `transfer_link`, is decision 67): `suggestions(kind, status open\|accepted\|rejected, fingerprint UNIQUE, source, detector, confidence, subject/counterparty ids, encrypted typed draft + evidence, snooze_until, seen_count, decision fields, reject_scope, result entity)`; detection and propose-scoped `create_schedule` upsert by fingerprint; `decide(accept\|edit_then_accept\|reject\|snooze)` is write scope and accept applies the draft through `create_schedule`; legacy `proposed`/`rejected` schedule rows migrate into suggestions and `schedules.status` is CHECKed to `active\|paused\|ended`; `schedule.detected` retired for `suggestion.created`/`suggestion.decided` | Purser already ran four bespoke confirm paths and a "proposed" schedule was a row with no evidence, no confidence, no snooze, and rejection memory only by accident (the rejected row happened to block re-detection by payee). Each detector added would have grown that linearly. A suggestion carries state the target object must not: what convinced Purser, how sure it is, when to ask again, and what the user said last time — and the fingerprint is what makes "never re-propose what I rejected" a property rather than a hope. The draft is typed and accept is a pure apply so the audit trail says exactly what was created from exactly what was shown; a re-derivation at accept time could silently create something else. Snooze is a date on purpose: expiry that auto-accepted would be a second, hidden auto-activation path, and the whole design rests on nothing that moves the forecast activating without a commit decision. The universal-`status=proposed` alternative (no table, a cross-entity read view) was weighed and loses exactly the four things — evidence, confidence, snooze, rejection memory — that keep an inbox from becoming spam. Scope this round is schedules only; transfer candidates and proposed matches keep their paths and fold in as later kinds (proposed matches did in decision 86 and transfer candidates in decision 102, as cards — their paths stay). |
 | 58 | **The MCP server is built on standalone FastMCP 4, not the SDK-bundled class** (issue #255, §10): `purser.mcp._registry` imports `fastmcp.FastMCP`; `audited_tool` derives each widget tool's `outputSchema` from its `Annotated[CallToolResult, <TypedDict>]` return and validates `structuredContent` against it server-side before the result leaves the tool; `mount.py` builds `mcp.http_app(path="/", stateless_http=True)` behind the Bearer wrapper with FastMCP's Host/Origin request guard carrying the same allowlist as before; the FastAPI lifespan enters the MCP app's lifespan. The wire surface is unchanged: `/mcp/`, stateless, 38 tools with the same names/parameters/defaults, `ui://` and `purser://` resources, three-tier results. Tests drive the server with the SDK v2 client (`streamable_http_client` over `httpx2`) so interop with a plain SDK client stays proven. | MCP Python SDK v2 removed `mcp.server.fastmcp` (the FastMCP 1.0 class bundled in v1), and `mcp>=1.28.1` had no upper bound — the first lock refresh would have broken the server at import. Standalone FastMCP is where that class's features live and are maintained; it serves the handshake-era protocol ContextForge speaks and the sessionless 2026-07-28 era from one process. The SDK's own `MCPServer` would have been a second rewrite of the same layer; a `<2` cap alone only deferred the break. Standalone FastMCP infers no outputSchema from `Annotated[CallToolResult, X]` and does not validate `structuredContent` server-side (SDK v2 clients validate it client-side), so both moved into `audited_tool` to keep decision 41's "drift fails loudly" guarantee at the server. Known wire deltas: tool `meta` gains a `fastmcp` namespace; input schemas drop property titles and declare `additionalProperties: false` (ContextForge now rejects unknown arguments it used to pass). |
 | 59 | **Password sign-in throttling is in-memory and per process — no DB table** (issue #212, §9): `admin.throttle.LoginThrottle`, one per app on `app.state`, counts failed `POST /auth/login` attempts per casefolded email and per client address (the ASGI peer, IPv6 grouped by /64); at 5 / 20 failures the next attempt is refused with `429` and `Retry-After` (integer delta-seconds) **before any password check**, for 30 s doubling per further failure to a 900 s cap; a refused attempt neither counts nor extends the lockout; attempts are charged on admission and refunded when the password verifies; success clears the email's count, never the address's; a count is forgotten after 3600 s with no failure and no lockout in force (measured from the lockout's end); five env-only `PURSER_LOGIN_*` knobs, `0` switching a limit off; the app parses no forwarding header, so uvicorn's `FORWARDED_ALLOW_IPS` is the only proxy trust list; failed and throttled attempts write unattributed `auth.login_failed` / `auth.login_throttled` change rows carrying the email as entered and the address, never the password. | A throttle only has to take an online guesser's throughput away, and that survives losing its state: a restart hands back at most one fresh budget (5 guesses per email), and a restart loop is its own alarm. A DB table would make every failure — and, under a flood, every refused attempt — a counter write on the hottest unauthenticated path, and add a migration, a cleanup job and row-lock contention, all for state whose loss is harmless. The price is per-replica counts: under Helm with `api.replicas` > 1 each replica allows its own budget, so N replicas allow N times the guesses; the documented deployments run one API process, and a multi-replica default is the trigger to move the counts into shared storage. Charging on admission closes the check-then-act race: argon2 verification is slow by design, so counting only completed failures would let a burst as wide as the threadpool (40 by default) through at every lockout expiry — 40 times the cap's rate. Refusing before the password check is what makes a lockout real (no oracle while blocked) and sheds the argon2 cost of a flood; `Retry-After` in whole seconds is the RFC 9110 form browsers and agents honour directly. Success leaves the address count alone so one valid credential cannot launder a spray across other accounts, and the quiet period runs from the lockout's end so a capped lockout is never forgotten the moment it lapses. The app trusts no forwarding header of its own: uvicorn's proxy-header middleware already rewrites the ASGI client for trusted peers only, and a second parser would either duplicate that list or believe a header any client can forge — so behind a proxy uvicorn does not trust, the per-address limit degrades to instance-wide (documented) instead of becoming bypassable. The audit rows are change rows beside the existing `auth.login` rather than call rows, so the middleware's no-principal-no-row rule stays exact and the rows age out with the rest of the trail. |
 | 60 | **Manual imports honour the file's cleared flag, and Quicken reminders are not history** (issue #249, §4/§7.2): a Quicken CSV row whose `Scheduled` column is marked is filtered before hashing into `skipped_scheduled` — never imported, never half a transfer, outside the dedup identity, counted identically by preview and commit; the cleared flag (QIF `C`: `*`/`c` cleared, `X`/`R` reconciled; the CSV `Clr`/`Cleared` column) is honoured **per file account**, an account with no marks at all reading as all-cleared; cleared rows land `posted`, uncleared rows land **`expected`** (origin `import`, no schedule, counted `uncleared`); a two-leg transfer is expected only when no leg the file carries is cleared, a split one-leg flat follows its own leg, and opening balances always post; status stays out of the content hash, so re-import remains a no-op; a later file that **marks** such a row cleared posts it in place (#310: audited `transaction.posted` with reason `cleared_in_file`, counted `promoted` in preview and commit — a bucket, per leg for a transfer, creation's transfer rule) unless it is a schedule instance or a feed row or touches a closed or feed-connected account; a CSV without a cleared column carries no marks. No migration and no matcher, reconcile, review-scope or balance change. | A Quicken register import landed future reminder rows and never-cleared rows as `posted`, and the post-sync drift check (§7.3) — posted/pending ledger vs the bank's reported balance — could only report the difference after the fact. Reminders are the register's view of the future, not history; turning them into suggestions (§6) is a separate decision, so this round skips them and keeps the count visible in the preview. `expected` is the only status that is true for an uncleared row: `posted` claims the bank has it (the bug), and `pending` collides with the feed's vanished-pending sweep (`feed/reconcile.py`), which voids every `origin='import'` pending dated in a sync window that the fetch no longer lists without asking which source the row came from — the next sync of a connected account would void every uncleared file row. As `expected` the row behaves exactly like a schedule instance: outside the balances (so drift compares like with like), in the forecast (an outstanding check is money already committed; overdue lands on day 0), aged by `bill.late`, and superseded by the matcher when the posted bank row arrives — and manual expected rows without a schedule were already a supported shape, which is why no consumer had to change. The per-account no-marks rule exists because an absent mark is ambiguous: bank-generated files never mark rows and Quicken leaves never-reconciled accounts (cash) unmarked, so reading blank literally would turn those accounts' whole history into forecast items. A transfer posts when any leg is cleared because the alternative strands the cleared side — before the feed's start there is no bank row to match, so that balance would stay short for good — whereas a posted transfer only runs ahead on the uncleared side until its bank row is absorbed (§5). Promotion (#310) closes what the first cut left as a residual: status is not identity, so a later export in which a row had since cleared deduped against the expected row, and on an account without a feed nothing ever settled it — the user had to post or void it by hand. The identity match is exact and the newer file is the evidence, so the row is posted in place, never duplicated. Only an explicit mark counts: an unmarked account is cleared by convention, and a narrow export holding only an account's still-uncleared rows reads as unmarked, so taking the convention as evidence would post the very rows #249 kept out of the balance. Feed-connected accounts are left to the matcher because the bank's own row arrives there: the matcher supersedes the expected row with it, and a promoted row would sit beside it as a second posted copy of one bank line. |
@@ -3529,7 +4671,7 @@ with no connected agent, or for nuances that surface between sessions.
 | 64 | **The drift basis is a per-account property learned from sync history, not a per-sync smaller-\|delta\| pick** (issue #283, §7.3): over the account's last 20 observations (this sync plus the newest 19 `connection.sync` rows), the basis whose delta (reported minus that ledger sum, recomputed from the stored `reported`/`posted`/`pending`) changed on fewer consecutive-sync steps wins; equal counts keep the previous observation's `basis`; none recorded → smaller \|delta\|, tie → pending-inclusive; the choice is recorded as `basis` on every observation block (no schema change); cleanliness stays either-basis; the event's `mode`, `whats_new` drift lines (`basis`, present only when recorded) and `GET /connections/{id}/discovered` (`drift_basis`) report it; a per-account pin is deferred (it needs an `accounts` column; added by decision 83) | Found in the #208 investigation: a card issuer whose balance leaves pendings out held a constant posted-only gap across hundreds of syncs, but the per-sync rule picked pending-inclusive whenever the pending total made that delta smaller, so the reported delta moved with every pending charge and opened a new `balance.drift` episode each time. Whether a bank counts pendings is a property of the bank, so it belongs to the account and is learned from history the audit memory already keeps — decided on the first sync after upgrade, no migration. Stability is counted in changes, not distinct values, because changes are what open episodes (a recurring hold that comes and goes has two values but a change every sync). Ties defer to the previous basis so the label never flips without evidence; either-basis cleanliness means a basis guess can never manufacture a drift on an account whose other basis matches. |
 | 65 | **A transfer schedule's instance is a pair signal, and a settlement follows its bank line into a merge** (issue #270, §4/§5/§6; amends 56): an instance of an active schedule with a `counterparty_account_id` **covers** a pair when it names the same two accounts in the same direction, exactly the pair's amount, and both legs sit inside the ±3-day transfer window of its date; it then replaces the name-signal test in the standard stage's pair phase of `transfers.plan_auto_links` like a `transfer_link` rule (absorption and decision 66's widened stage unchanged), vouching while open or for a pair holding the row that settles it; `transfer.auto_linked` and its audit row carry `signal` — `rule:<id>`, `name` or `schedule:<schedule_id>`, the first that applies, so a covering declaration is credited first as in the absorb phase and the projected count — and a merge an open instance covers, in either stage, settles it at once through the ordinary matcher. A one-sided bank row whose live match (proposed or confirmed) is to a plain expected transfer, on one of its sides in the same direction, is **held**: it stays in the one pairing pool (`matching.transfer_pool` — both pair phases of the plan and so `project_links`, transfer candidates, and the conversion counterpart) but pairs only with a row on that expected's other account and never with another held row (`MatchInput.pair_account_id`, checked inside `detect_transfer_pairs` beside decision 66's per-pair window), and it is never absorbed. `_merge_transfer_pair` carries the originals' matches on every path: a confirmed match the merge covers moves to it (`posted_id` and the expected's `superseded_by`, audited `match.carry`), a proposal is rescinded and its expected re-matched at once, any other confirmed match stays as decided. Unlink resurrects only merged/absorbed originals — never an expected the transfer settles — and releases what a voided merge settled (`matching.release_settlement`, the body of `unmatch`); `has_linked_originals` and the register's linked flag use the same test. `schedules.matched_actuals` reads one amount per settling row, from the schedule account's side. No schema change. | The nightly job matches before it links, so when the two bank legs of a scheduled transfer post on different days — about half of real linked transfers post 1–3 days apart — the first leg was proposed (exact amount and date alone score 0.55) or auto-matched against the two-leg instance, matched rows left the transfer pool, and the counterpart never linked: the review of #253 reproduced 6/20 + 6/21 legs → 0 links, 0 candidates, leaving the far side as income or spending. Making the matcher wait for both legs would need a clock and a guess about whether the far side has a feed at all (a 529 without one is settled by its single leg for good), so matching stays greedy — decision 56's "a one-leg import may settle a two-leg instance" — and pairing learns to see held legs instead; that is order-independent: whichever leg arrives first and whenever the matcher runs, the pair links once both are present. Moving a confirmed match rather than unmatch-and-rematch keeps one settlement per slot ("settled exactly once"), and once the merge is matched no second expected can claim it; a proposal is re-decided by the matcher rather than special-cased. The pair constraint lives inside the greedy loop for #173's reason — a post-filter silently loses the true counterpart. Unlike a `transfer_link` rule the schedule signal needs no activation gate: it cannot sweep history, because open instances exist only on the horizon or overdue, a settled one vouches only for the row that settled it, and each vouches once. Exact amount keeps estimated instances out (their bank amount differs); those link by name, by rule, or by confirm. The schedule signal keeps the ±3-day window; decision 66 widens declared pairs only. Unlinking a settled merge used to resurrect the instance as a posted transfer, a phantom second copy of the money that also defeated the pair's suppression; a void row settles nothing, so the instance is due again. And a merged settlement has two real legs: reading both fed an estimate an opposite pair per payment — `last` could flip a transfer's direction and a rolling average fell to zero, which stops materialization. |
 | 66 | **A `transfer_link` rule sets the date window of the pair it declares — and only that pair — and a widened window acts in a second stage that never changes what the standard window decides** (issue #210, migration 0029, §3.1/§5/§10; amends 46): `rules.window_days` (INTEGER; NULL = the global ±3-day `TRANSFER_WINDOW_DAYS`, else 0–14 = `TRANSFER_WINDOW_MAX_DAYS`; `transfer_link` only — the service refuses anything else with a `RuleError`, 422 at REST (a strict integer) and an error at MCP, and the `rules_window_shape` CHECK stands behind both) is the most days apart the declared pair's two legs may post and still link; it composes with `amount_exact`/`effective_from`, and overlapping rules on one pair take the widest window. `auto_link_pass` executes one planner, `transfers.plan_auto_links`: the absorb and pair phases first run over ±3 days exactly as before (a declared pair links there without a name signal only when its rule's window covers the gap, so 0–2 narrows the pair), then a widened rule pairs its accounts farther apart among the rows the standard stage left without any partner, and absorbs only into open legs it left unclaimed; the pool is ordered (date, created_at, id). The activation confirm counts that same plan with the rule declared first — every merge and absorb it justifies — so the projected count is the linked count; `preview_rule` (`pair_accounts`) and `POST /rules/preview` (`pair_account_a`/`pair_account_b`) return that count and a sample before a rule exists. An active `transfer_link` rule's pairing scope (pair, `amount_exact`, `effective_from`, `window_days`) is frozen: an edit is refused until the rule is disabled, and re-activating re-confirms. The rule's audit rows carry its `window_days`. | Option 1 of #210, the preference of #174's implementation-input comment: a declared pair is a user-declared boundary — the argument that already dropped the signal requirement — and a window on it is as deterministic and auditable as the pair itself; the motivating monthly card autopay posted its legs four days apart, and a declaration that still leaves it unlinked reads as a broken rule. Option 2 (state the fixed window) kept the window as the bound on a false pairing, but that bound belongs with the declaration, which the activation confirm already guards. The cap is 14 days: two calendar weeks covers slow ACH and holiday settlement, and it is at most half the shortest month, so a monthly pair's leg can be in window of only one occurrence of its counterpart; past that, an exact-amount pairing no longer identifies a transfer and becomes a judgement call, which belongs to an explicit `confirm_transfer`. Two stages rather than one wider greedy pass: in a single pass a declared row up to 14 days away could take an out-row that the standard window links by name signal to a same-day counterpart, so the global window would no longer be unchanged for everything else; restricted to the rows a pass leaves without any partner, a widened window only adds links to that pass. Counting through the pass's own plan rather than a parallel re-implementation keeps preview = commit as the selection grows — decision 46's projection counted merges only, while a declared pair also absorbs. Freezing an active rule closes the route around the confirm (activate at 3 days, then widen to 14). |
-| 67 | **A manual transfer confirm proposes a payee-scoped `transfer_link` rule in the suggestions inbox; Purser keeps no hidden memory of confirmed transfers** (issue #271, migration 0030, §3.1/§5/§6/§10; amends 46 and 57): an ordinary `confirm_transfer` (REST and MCP — a split proposes nothing) upserts ONE suggestion of the new kind `transfer_link` (`source = confirm`, no confidence), fingerprinted on the unordered account pair plus the scope payee — the outgoing row's payee, else the incoming one's, resolved through its aliases; no payee, no suggestion — so repeat confirms refresh one open row (`seen_count`; evidence = the confirmed pairs) and the confirm response carries its `suggestion_id`. Its typed `TransferLinkDraft` is the rule: the pair, `payee_id`, and `amount_exact`/`window_days`/`effective_from` unset unless edited (the only editable fields). `rules.payee_scope_id` (`transfer_link` only, CHECK `rules_payee_scope_shape`) narrows a declared pair to rows where either leg's payee is in the scope payee's **alias group**, resolved when the rule loads; it is part of the frozen pairing scope, the activation projection and the rule's audit shape, and `RuleOut`/`list_rules` show it as `payee_scope`. `suggestions.decide` dispatches on `kind` with a typed draft per kind (`ScheduleDraft`, `TransferLinkDraft`): a `transfer_link` accept creates the rule as a **draft** through `rules.create` and returns `project_links` for it — it activates only through `rules.set_state` with that count confirmed. Rejection is remembered (`exact` = the pair and payee group, `counterparty` = the pair, any payee), compared by alias group so a later rename cannot reopen it; a `transfer_link` rule on the pair covering that payee group (draft, active or disabled; archived is deleted) suppresses a proposal; snooze is a date. Unlink touches neither suggestion nor rule. The deprecated schedule wrappers decide schedule suggestions only; forecast coverage and `list_recurring` count schedule suggestions only. | Review D of #253: the hidden `transfer_payee_memory` learned from one confirm, applied retroactively through the nightly sweep without decision 46's projected-count gate (which exists because a merge is balance-neutral and §7.3 cannot see a bad one), was never unlearned on unlink, and stopped matching once a rename changed the payee. A suggestion is visible, reversible and gated: nothing links until a human accepts the draft and confirms its projected count, a rejection is durable, and an unlink has nothing to unlearn. Rules stay the only automatic mapping (decision 46) — the inbox only proposes one. The scope is a payee id matched by alias group, not a text predicate: payee identity is already the blind-indexed entity that rename aliasing consolidates, and a predicate on the raw descriptor stops matching rows a rename rewrote. Its reach is aliasing's: a payee is merged only by a rename's apply-history, which sees live rows, so a payee found only on merged transfer originals, or renamed only going forward, keeps its own group — a confirm under the new name then proposes a rule for it (§14). One payee rather than both legs' keeps the fingerprint a single identity, and either leg may carry it. A whole-pair rule from one confirm would be the broad claim the review objected to, so a payee-less pair proposes nothing; an unordered fingerprint follows the unordered rule it drafts. `amount_exact` starts unset because one confirm says who a transfer is with, not how much it will be. Transfer candidates stay out of the inbox (#246 phase 2); proposed matches are cards since decision 86. |
+| 67 | **A manual transfer confirm proposes a payee-scoped `transfer_link` rule in the suggestions inbox; Purser keeps no hidden memory of confirmed transfers** (issue #271, migration 0030, §3.1/§5/§6/§10; amends 46 and 57): an ordinary `confirm_transfer` (REST and MCP — a split proposes nothing) upserts ONE suggestion of the new kind `transfer_link` (`source = confirm`, no confidence), fingerprinted on the unordered account pair plus the scope payee — the outgoing row's payee, else the incoming one's, resolved through its aliases; no payee, no suggestion — so repeat confirms refresh one open row (`seen_count`; evidence = the confirmed pairs) and the confirm response carries its `suggestion_id`. Its typed `TransferLinkDraft` is the rule: the pair, `payee_id`, and `amount_exact`/`window_days`/`effective_from` unset unless edited (the only editable fields). `rules.payee_scope_id` (`transfer_link` only, CHECK `rules_payee_scope_shape`) narrows a declared pair to rows where either leg's payee is in the scope payee's **alias group**, resolved when the rule loads; it is part of the frozen pairing scope, the activation projection and the rule's audit shape, and `RuleOut`/`list_rules` show it as `payee_scope`. `suggestions.decide` dispatches on `kind` with a typed draft per kind (`ScheduleDraft`, `TransferLinkDraft`): a `transfer_link` accept creates the rule as a **draft** through `rules.create` and returns `project_links` for it — it activates only through `rules.set_state` with that count confirmed. Rejection is remembered (`exact` = the pair and payee group, `counterparty` = the pair, any payee), compared by alias group so a later rename cannot reopen it; a `transfer_link` rule on the pair covering that payee group (draft, active or disabled; archived is deleted) suppresses a proposal; snooze is a date. Unlink touches neither suggestion nor rule. The deprecated schedule wrappers decide schedule suggestions only; forecast coverage and `list_recurring` count schedule suggestions only. | Review D of #253: the hidden `transfer_payee_memory` learned from one confirm, applied retroactively through the nightly sweep without decision 46's projected-count gate (which exists because a merge is balance-neutral and §7.3 cannot see a bad one), was never unlearned on unlink, and stopped matching once a rename changed the payee. A suggestion is visible, reversible and gated: nothing links until a human accepts the draft and confirms its projected count, a rejection is durable, and an unlink has nothing to unlearn. Rules stay the only automatic mapping (decision 46) — the inbox only proposes one. The scope is a payee id matched by alias group, not a text predicate: payee identity is already the blind-indexed entity that rename aliasing consolidates, and a predicate on the raw descriptor stops matching rows a rename rewrote. Its reach is aliasing's: a payee is merged only by a rename's apply-history, which sees live rows, so a payee found only on merged transfer originals, or renamed only going forward, keeps its own group — a confirm under the new name then proposes a rule for it (§14). One payee rather than both legs' keeps the fingerprint a single identity, and either leg may carry it. A whole-pair rule from one confirm would be the broad claim the review objected to, so a payee-less pair proposes nothing; an unordered fingerprint follows the unordered rule it drafts. `amount_exact` starts unset because one confirm says who a transfer is with, not how much it will be. Proposed matches are cards since decision 86, and transfer candidates since decision 102 (#246 phase 2). |
 | 68 | **Identical rows in one payload are distinct identities: an occurrence ordinal joins the content hash** (issue #275, §7.1/§7.2): within one payload — one account's rows in a SimpleFIN fetch, one QIF/CSV file — the n-th row whose occurrence-1 hash equals an earlier row's is occurrence n, hashed with `#n` appended to the canonical string (`core.occurrence_part`; the abs()-based transfer hash takes the same suffix); occurrence 1 appends nothing, so no stored hash changes and nothing is migrated; rows are numbered in the order the importers already claimed hashes — the feed per account in payload order, pending or not; files with flat rows and opening balances on one count, each file account's k-th leg of one transfer identity joining transfer k, and a leg's flat hash counted among its own transfer's legs only; the feed's import loop and its vanished-pending sweep read one per-payload hash list; the masked-reference guard (decision 44) is unchanged. No new count, field or migration. | Two identical same-day charges from one merchant are ordinary (two coffees, two fares), and content identity merged them: the #208 investigation found live card accounts short by exactly such charges, and a replay could not bring them back because it re-imports with the same hashes. An ordinal keeps identity content-derived — SimpleFIN ids are unstable (§7.1) — and numbering within a payload is what keeps overlapping windows idempotent: identical rows share a date, so a fetch carries all of them or, cut mid-day, a prefix whose ordinals already exist, and per identity the ledger converges on the largest count any one payload carried. Occurrence 1 hashing exactly as before is the compatibility contract: the first sync after upgrade re-fetches its 7-day overlap and must land on the stored hashes, so the only change it makes is the dropped twins inside that window. Older dropped twins are not recovered automatically: a replay of the archive would land them, but it would land old fetches' pending twins as well, and a replay never sweeps pendings (`window_start=None`), so that recovery stays a deliberate per-account fix (#208). Numbering follows the old claim order so the row that already holds the unqualified hash keeps it. That is also why a leg's flat hash is not counted across transfers: which transfer claimed the unqualified hash depended on file layout and on which transfers split, so a wider count could renumber a leg whose one-leg row already exists. A same-day round trip between two accounts becomes two transfers for the same reason two coffees become two rows — the transfer hash ignores direction to stay inversion-neutral (decision 35), so the way back used to merge into the way there. Residual: when identical rows in one fetch differ in pending status and the bank reorders them between fetches, the sweep can void the pending early, superseded by its posted twin (same balance); a pending that posts under an unchanged identity is #282's. |
 | 69 | **A settlement follows its bank row through the pending lifecycle, and an estimate learns only from posted chain heads** (issue #273, §4/§5/§6; no schema change): the reconciler captures the live match on a pending BEFORE voiding it (`reconcile.void_pending`), then `matching.settle_voided_pending` carries a confirmed match to the posted successor when no other confirmed match holds it (`matches.posted_id` and the expected's `superseded_by`, `match.carry` with reason `pending_posted`; a proposal on the successor yields and is re-decided at once), rescinds a proposal (`match.rescind`, re-decided at once when the pending posted), or releases the confirmed match through decision 65's `release_settlement` (`match.unmatch` with reason `pending_vanished`/`successor_matched`; `keep_pin` carries the instance's pin onto the clone); `matched_actuals` follows each confirmed match's bank row to its lineage head (`superseded_by`, then the `reverses_id` correction chain, walked set-wise), counts only a `posted` head, reads it as one amount from the schedule account's side (decision 65) and counts a head two matches reach once; the estimate probe brackets the carry, so `recurring.price_changed` fires when the posted amount lands, and it brackets a manual pending → posted transition the same way (#330) and a transfer absorb — `transfers._absorb_row`, shared by the auto-link pass and an explicit conversion, probes the transfer and the absorbed row together (#343); a manual void of a matched pending (`transition_status` pending → void) settles its match the same way with no successor — a proposal rescinded and not re-decided, a confirmed match released with `keep_pin` — with reason `pending_voided` and the voiding token as actor (`settle_voided_pending(actor_token_id=, reason=)`, #343) | The matcher pairs expecteds with pending rows, but the reconciler voided a vanished pending without looking at its match: the instance stayed void, "settled" by a dead row, so the bill never came back, never went late and stayed out of every forecast — a dropped payment read as a paid bill. `matched_actuals` meanwhile summed whatever row a match named, whatever its status: a voided pending still fed the estimate, a pending's provisional amount moved it, and a superseded or corrected row was read instead of its successor or replacement. Carrying keeps a settled bill settled with no human step when the bank merely rehashed the row — the same rule decision 65 applies when a merge consumes a matched row; releasing rather than resurrecting keeps void terminal and lets the next matching pass find the real posting (a tip, a different amount) through the normal tiers, and the release goes through the one `release_settlement` that unmatch and unlink share. The pin is kept on these paths because nothing the user decided about the instance changed: the feed's release is automatic, and a manual void is a decision about the bank row — refusing it until the match is undone would make the person do by hand what the feed does on its own. An absorb moves a head exactly as a manual post does, so it takes the same probe. Following lineage rather than filtering on the named row matters because post-sync categorization corrects every posted feed row that lands uncategorized (a reversal plus a replacement): a filter would have dropped each of those actuals. |
 | 70 | **Every open pending is re-checked on every sync, and the bank posting a pending under its own identity supersedes it** (issue #282, §4/§7.1; no schema change): the live fetch starts at min(resync overlap, oldest open import pending on the connection's accounts − `PENDING_MATCH_WINDOW_DAYS`; postings-balance accounts only since decision 74), never before `today − BRIDGE_MAX_RANGE_DAYS` (an older pending widens nothing and is left as it is); the reconciler pairs a vanished pending with its posted successor (same account, exact amount, ±7 days) where only another feed pending's `superseded_by` counts as a claim; a posted payload row whose identity — the occurrence-qualified hash `_row_hashes` gives it (decision 68) — an open import pending on the same account holds moves the hash to a new posted row and supersedes the pending via the same `void_pending` path (audit `identity_moved`, match follows per decision 69) on every import path; `pending.vanished` feeds a `whats_new` section `pendings_vanished` (count, material lines largest first, cap 3); a vanished void is never revived | Found in the #208 investigation: the feed re-fetched only the last 7 days, so a pending older than that was never looked at again — card accounts carried pendings for weeks after the bank had posted or dropped them, double-counting against their posted rows. Some posted rows never landed at all: one dated before the overlap was never fetched, and one whose date, amount and description equalled its pending's was skipped as a duplicate of that pending — which the reconciler then voided as vanished, losing a refund. Widening the one live fetch is budget-neutral (a second fetch would break the hourly preset's 24/day), lasts only while an old pending is open on a postings-balance account, and is bounded so a pending the bridge can no longer serve cannot make every sync maximal. The account scope is decision 74's: a brokerage feed that lists every fund purchase as pending forever made the widening permanent, so every sync archived a maximal payload and re-fetched a 90-day tail in which a re-described posted row landed as a duplicate. Moving the identity instead of promoting the pending in place keeps ONE pending→posted shape (a new posted row with the bank's values, the pending superseded) whatever the hash does, so posted amount wins and matches re-point the same way. The claim check was over-broad: a bill matched to the posted row also points `superseded_by` at it, and that hid the successor of a pending the bank had in fact posted. Reviving a vanished void on a later sighting was rejected: void is terminal, and a revival would race the manual repairs of already-lost rows; the digest line is how such a row is noticed. |
@@ -3542,7 +4684,7 @@ with no connected agent, or for nuances that surface between sessions.
 | 77 | **Series are readable as a tool, forecast events are fitted to the budget, and one function bounds the horizon** (issue #354, §6/§10; no schema change): a read-scoped MCP tool `read_series(uri)` (`audited_tool(kind="read", entity="series")`, defined in `purser/mcp/resources.py` beside the resources it mirrors) accepts `purser://` URIs only — `ui://` and every other scheme are refused — reads them through FastMCP's own `read_resource`, and returns the resource body byte for byte as the single text content of a `CallToolResult` with no `structuredContent`; like the resources it is exempt from the response budget, bounded by their caps plus a hard ceiling of 200,000 characters (`_READ_SERIES_MAX_CHARS`), above which it refuses with a hint to narrow the window; `forecast_balance` replaces its ten-event cap with `_fit_events`: the low's event first, then qualifying events (`materiality`, a decimal string: \|amount\| ≥ it) by \|amount\| descending, ties by date, added while the serialized payload stays within 1,900 characters (`_FORECAST_BUDGET_CHARS`) and presented in date order; `truncated` is true only when the budget left out a qualifying event; `omitted {count, net}` is present whenever an event is not listed, for either reason, and `end_balance` always, so `start_balance + Σ events.amount + omitted.net = end_balance`; the headline names the omitted count and net and points at `read_series(daily_uri)`; `schedules.validate_horizon` (1..`FORECAST_MAX_DAYS` = 365) is the one horizon check — the tool, the `purser://forecast` resource (which used to accept 366) and `forecast_account` call it and REST bounds `days` by the same constant — so every `daily_uri` the tool hands out resolves; the resource also carries `end_balance` and `low`; widgets read a series through `resources/read` and fall back to `read_series` | Gateways that forward tools but not resources (the ContextForge proxy) left `daily_uri`, `series_uri` and the widgets' underlays unreachable, and a count cap hid a 2,123.52 card payment behind ten larger moves while saying nothing about what it dropped. A separate tool rather than an inline series keeps the widget contract inside the budget — Apps hosts hand `structuredContent` to the widget and the model alike — reuses the resources' serializers so the two cannot drift, fixes all three series URIs at once, and keeps the budget exemption in one documented place. The fitter measures what the budget actually limits, characters, so long names cost events instead of overflowing, and `omitted`/`end_balance` make what is not itemized explicit. "One call" becomes two (`forecast_balance`, then `read_series(daily_uri)`) by design. An unvalidated `days` crashed below 1 and handed out unresolvable URIs above 366. |
 | 78 | **An expected or pending transfer takes an amount edit in place, from a chosen leg, with its direction fixed; bank-backed, split and posted transfers are refused** (issue #350, §3.3/§4/§6; amends 56; no schema change): `ledger.update_transaction` dispatches an amount edit of a transfer to `transfers.set_amount_in_place` — `amount` is the leg of the side `account` names (`TransactionUpdate.account`, its second meaning), else for a schedule instance its schedule's `account_id`, else the edit is refused ("name the side whose leg amount is"); that leg takes `core.quantize(amount)` (nonzero) and the other leg its negation; a sign that differs from the current leg is refused, quoting the leg, and nothing changes; every check runs before a posting, date or label moves; a SPLIT transfer ("unlink it and confirm again"), a transfer with linked originals ("unlink it first") and any edit of a POSTED transfer (`transfers.posted_edit_refusal`: unlink when it carries bank rows, else convert it back to a category) are refused with messages that say so; pin, review mark, `balances.mark_dirty` for a pending row and the `transaction.update` audit (both legs, before and after) are unchanged. MCP `override_instance` reads its amount as the schedule account's leg and returns `amount`; the SPA's override forms send only the fields that changed, the register adding `account` = its own account. | Decision 56 and §6 promise that the statement case is an override of the instance, but `_flat_legs` assumed one real leg plus one category leg, so every amount edit of a two-leg instance failed with "transfers cannot be recategorized" — and the SPA prefilled and always sent the amount, so even a date-only override of a card payment failed there. An amount means nothing without a perspective (decision 56), hence the chosen leg; a schedule's own account is the perspective its instances are listed and estimated in, so it is the default. Refusing a direction flip rather than taking the absolute value keeps a typo from silently becoming its opposite: the error quotes the leg, and a real reversal is a different transfer. Bank-backed and split transfers keep their bank amounts by construction (a split's legs are deliberately unequal), so the honest correction is an unlink, as for recategorizing them (§3.3); a pending transfer with no bank rows (a propose-scoped manual transfer) is as freely editable as a flat pending row. Overriding to the statement amount is also what lets the instance vouch for its bank pair, because decision 65 needs the exact amount. |
 | 79 | **Instance labels follow the rule; only amount, date and category edits pin; `reset_instance` hands an instance back** (issue #353, §4/§6/§10; amends 55; no schema change): `update_schedule` runs `_relabel_instances` after its resync whenever the name or the rule payee (`_rule_payee_name`: the schedule's payee, else a flat schedule's name, none for a transfer) actually changes, whatever the status — every live instance, pinned ones included, whose description equals the old name takes the new one, and a flat instance whose payee normalizes to the old rule payee is re-pointed to the new one; it never touches the pin, amounts, dates or slots, writes one `schedule.relabel` row (before `{name, payee}`, after `{name, payee, instances}`) and nothing when no instance changed; MCP `update_schedule` returns `relabeled`. `ledger.update_transaction` pins a schedule instance only for an amount, date or category edit — description and payee are labels. `schedules.reset_instance` (REST `POST /transactions/{id}/reset-instance`, MCP `reset_instance`, both write scope; a Reset button on pinned rows in the Schedules page) takes a live instance of an active schedule, clears the pin and sets the date to `occurrence_date`, the description to the name, the payee to the rule payee, a flat instance's category to the rule's and the amount to `instance_amount` through `_set_instance_amount` (both legs of a transfer); a slot outside `_rule_slots` or a zero estimate voids and releases the instance (`_void_and_release(reason="reset")`), and an instance whose legs no longer have the rule's shape (a pinned survivor of a reshape) is released and its slot re-materialized; audited `schedule.instance_reset`. | Decision 55's "the rule never touches it again" made a schedule rename stop at the instances: they kept the old name in `forecast_balance` for the materialized ~60 days (projected slots already used the live name), and a payee-less bill kept it in `whats_new`, which labels by payee first. Relabelling by hand made it worse, because every token-bearing edit pinned, so the relabelled instances stopped re-estimating, and nothing could ever clear a pin. A label is not an override — it changes no amount, date or slot the rule's refresh would undo — so labels follow the rule, and pinned instances too, or every amount-overridden card payment would keep the old name; comparing with the old value is what tells the rule's label from one the user chose, without a new column. Reset is the remedy for instances already pinned by label edits and the general undo of an override; it re-derives everything from the rule rather than keeping a pre-override copy, so it is right even after the rule itself changed. |
-| 80 | **A card statement balance is recorded on the payment instance it is due on, with its provenance, and every forecast event says where its amount comes from** (issue #351, migration 0031, §3.1/§6/§10; amends 56): `instance_statements(transaction_id PK → transactions ON DELETE CASCADE, statement_balance > 0 as printed, statement_date, source human|agent, recorded_by, recorded_at)`; `schedules.record_statement_balance` (REST `POST /schedules/statement-balance`, MCP `record_statement_balance(statement_balance, account, due_date, statement_date?)`, both write scope) takes the instance by `transaction_id` (REST only) or by a credit card plus the statement's due date — the live expected instance of a transfer schedule whose leg on that card is positive, nearest the due date within `STATEMENT_DUE_WINDOW_DAYS` = 14, an equally near pair refused with their dates — and refuses a non-card account, a flat instance, a loan payment, a matched or void row, a balance ≤ 0 (pointing at `skip_instance`) or with more than 4 decimal places, and a `statement_date` in the future or after the instance's date; it sets the amount through `ledger.update_transaction` with the card as the perspective leg (decision 78: both legs, pin, review mark, `transaction.update`), upserts the row and audits `schedule.statement_balance` (before = the prior row, after = `{statement_balance, statement_date, source, previous_amount, amount}`, amounts the schedule account's leg). `reset_instance` deletes the row (and records it in its audit `before`); `matching.release_settlement` copies it onto the clone when `keep_pin` holds. `schedules.instance_basis(schedule, tx, statement)` is the one basis helper: `statement` when a leg equals the recorded balance, else `override` when pinned, else `fixed` (also a non-schedule expected row) or the schedule's estimate basis; `ExpectedItem`/`ForecastEvent` carry it, REST `ForecastEventOut.basis` and the `purser://forecast` resource always, MCP forecast events only for `statement`/`override`; REST `InstanceOut` adds `basis`, `statement_balance`, `statement_date`, `statement_source`. No `estimate_basis = statement_balance`, no feed source. | `counterparty_balance` is the card's current balance — pendings and charges since the close included — while the payment is the statement balance, so a card payment ran high every cycle (8,441.34 forecast against an 8,347 statement), and the override decision 56 pointed to left no trace of why the amount changed. SimpleFIN's account object has no statement balance or closing date, so the figure has to come from the user or the agent reading the statement email; keyed by card and due date, that is one call, with no id lookup first. Per instance rather than per account and cycle: an account-level record would need an engine to decide which instance a statement belongs to (an overdue previous-cycle payment would take the new statement), and the instance is what the forecast and the matcher already read. A separate `statement_balance` basis would add nothing — `counterparty_balance` plus a recorded statement already is "statement, else current balance". Recording goes through the transfer edit so the exact amount also lets the instance vouch for its bank pair (decision 65). MCP names only the supplied bases because the agent must explain those amounts and the fitted event list pays for every key; an estimate's basis is the schedule's. Write scope: the figure pins the payment the forecast and the shortfall scan rely on. |
+| 80 | **A card statement balance is recorded on the payment instance it is due on, with its provenance, and every forecast event says where its amount comes from** (issue #351, migration 0031, §3.1/§6/§10; amends 56): `instance_statements(transaction_id PK → transactions ON DELETE CASCADE, statement_balance > 0 as printed, statement_date, source human|agent, recorded_by, recorded_at)`; `schedules.record_statement_balance` (REST `POST /schedules/statement-balance`, MCP `record_statement_balance(statement_balance, account, due_date, statement_date?)`, both write scope) takes the instance by `transaction_id` (REST only) or by a credit card plus the statement's due date — the live expected instance of a transfer schedule whose leg on that card is positive, nearest the due date within `STATEMENT_DUE_WINDOW_DAYS` = 14, an equally near pair refused with their dates — and refuses a non-card account, a flat instance, a loan payment, a matched or void row, a balance ≤ 0 (pointing at `skip_instance`) or with more than 4 decimal places, and a `statement_date` in the future or after the instance's date; it sets the amount through `ledger.update_transaction` with the card as the perspective leg (decision 78: both legs, pin, review mark, `transaction.update`), upserts the row and audits `schedule.statement_balance` (before = the prior row, after = `{statement_balance, statement_date, source, previous_amount, amount}`, amounts the schedule account's leg). `reset_instance` deletes the row (and records it in its audit `before`); `matching.release_settlement` copies it onto every clone (amended by decision 108). `schedules.instance_basis(schedule, tx, statement)` is the one basis helper: `statement` when a leg equals the recorded balance, else `override` when pinned, else `fixed` (also a non-schedule expected row) or the schedule's estimate basis; `ExpectedItem`/`ForecastEvent` carry it, REST `ForecastEventOut.basis` and the `purser://forecast` resource always, MCP forecast events only for `statement`/`override`; REST `InstanceOut` adds `basis`, `statement_balance`, `statement_date`, `statement_source`. No `estimate_basis = statement_balance`, no feed source. | `counterparty_balance` is the card's current balance — pendings and charges since the close included — while the payment is the statement balance, so a card payment ran high every cycle (8,441.34 forecast against an 8,347 statement), and the override decision 56 pointed to left no trace of why the amount changed. SimpleFIN's account object has no statement balance or closing date, so the figure has to come from the user or the agent reading the statement email; keyed by card and due date, that is one call, with no id lookup first. Per instance rather than per account and cycle: an account-level record would need an engine to decide which instance a statement belongs to (an overdue previous-cycle payment would take the new statement), and the instance is what the forecast and the matcher already read. A separate `statement_balance` basis would add nothing — `counterparty_balance` plus a recorded statement already is "statement, else current balance". Recording goes through the transfer edit so the exact amount also lets the instance vouch for its bank pair (decision 65). MCP names only the supplied bases because the agent must explain those amounts and the fitted event list pays for every key; an estimate's basis is the schedule's. Write scope: the figure pins the payment the forecast and the shortfall scan rely on. |
 | 81 | **Valuations are refused off loan and property accounts, brokerage included** (issue #343, §8; amends 71 and 73; no schema change): `networth.record_valuation`, the one write path for manual valuations (REST `POST /accounts/{id}/valuations`, MCP `record_valuation`), refuses an account whose type is outside `networth.VALUATION_TYPES` (`loan`, `property`) right after the virtual-account check and before decision 71's sign rule, with a message naming the two types and where that account's balance comes from (its transactions, and for a checking, savings, cash or credit-card account `reconcile_account` to bring it to a statement; its latest holdings snapshot as well for brokerage); nothing is stored, audited or emitted; the feed's balance valuation uses the same set instead of its own literal; valuation rows already stored on other types stay and are never read; REST's field descriptions no longer describe credit-card valuations | Every reader of `valuations.value` (`net_worth_at`, the decision-42 overlay, the per-account balance series) filters on `VALUATION_TYPES`, and an account's type can never change, so a valuation on any other type was stored, audited and announced as `valuation.recorded`, then silently ignored. Decision 71 and its docs even described credit-card valuations, which encouraged the dead write. Refusing beats documenting it: there is no reader to document. Brokerage is refused too, because its balance is postings plus holdings market value (decision 50), and a valuation would neither replace nor add to either. A credit card is refused for its type before the sign rule runs, so the caller is pointed at reconciliation rather than at a sign it should not be choosing. Stored rows are left alone rather than deleted: they are inert, and deleting user data needs a reason beyond tidiness. |
 | 82 | **A pending's review mark follows it to its posted successor, and every copied mark is whole** (issue #342, migration 0032, §3.1/§4; amends 47, reverses #286's "a settlement carried onto a pending's posted successor moves no review"): when the feed supersedes a pending by its posted row — successor pairing and #282's identity move, both through `reconcile.void_pending`, the only place a pending is superseded by its own posted bank line — `review.carry_to_successor` copies the pending's mark to the successor's live head (`schedules.chain_heads`: post-sync categorization may already have corrected the posted row) when that head is inside `scope_clause()`, has no mark of its own, and carries the same set of category-leg (virtual) account ids as the pending; the copy is whole — `reviewed_by`, `via`, `reviewed_at`, note, `escalated_at` — with the new `transaction_reviews.carried_from UUID REFERENCES transactions ON DELETE SET NULL` naming the source, audited `transaction.reviewed` with a NULL actor and `after={via, carried_from, reason, reviewed_by, reviewed_at, escalated}`, no new event; correction inheritance from a system/rule actor (`inherit`, reason `correction`) and unlink (`copy_to_clone`, reason `unlink`) go through the same copier, `review._copy_mark`; a merge or an absorb never carries a mark, and a copy never overwrites one | Decision 29's rule is that a superseding row *is* that bank line: a row someone reviewed, or confirmed a match on, while it was pending came back as "needs review" the moment the bank posted it, and the reconciler already hands the settlement to the successor on exact amount and account. Three things the plain carry would get wrong: the chosen successor can be a reversed original once categorization corrected it, and the unreviewed predicate never asks about a reversed row, so the mark goes to the head; the posted row's category comes from rules or payee memory (which counts posted rows only), not from the pending, so a person's category fix on the pending never reaches it — the equal-category guard re-surfaces exactly the rows whose content nobody reviewed, the rule `mark()` already states; and the old copiers wrote `reviewed_by=NULL` and `reviewed_at=now()` (unlink also dropped escalation), so a carried mark would have lost its actor and time the same night through `inherit`. A column rather than the audit row because the table has no JSON field, audit rows are pruned after `audit_retention_days`, and a carried `reviewed_at` older than the row's `created_at` needs its explanation on the row; `ON DELETE SET NULL` keeps the guarded deletes unchanged. Merges and absorbs pair rows into a transfer, a judgement of its own, so they keep "moves the decision, not a review". |
 | 83 | **An admin can pin an account's drift basis; the learned rule keeps running under the pin** (issue #307, migration 0033, §3.1/§7.1/§7.3; ends 64's deferral): nullable `accounts.drift_basis_override` in the drift vocabulary (`posted_only` \| `pending_inclusive`, not reconciliation's `posted`), CHECKed to those values and NULL on categories; set and cleared through `PATCH /accounts/{id}` (admin scope, field-conditional like `feed_start`; explicit null clears; 422 off checking/savings/cash/credit-card), audited in `account.update`. `compare_with_history(pinned_basis=)` always computes the learned basis and reports the pin when set; cleanliness stays either-basis; pinned observations add `pinned: true` and `learned`, and the tie-break reads `learned` on them; the event adds `basis_pinned: true` and `whats_new` drift lines `pinned: true` (both only when pinned); discovered adds `drift_basis_pinned`/`drift_basis_learned`; the SimpleFIN Feed accounts table gets a per-row select. No MCP tool | Decision 64 learned the basis but left no recourse when history is short (a new account) or misleading. Admin scope because it is feed configuration, like `feed_start`/`feed_invert`, and its only viewing surface (discovered) is admin. The pin chooses only which delta is reported, so decision 64's guarantee holds: a wrong pin can never create drift on an account whose other basis matches. Recording `learned` beside the pin keeps the history rule's tie-break on evidence rather than on the pin, so clearing it is exactly as if it had never been set. One vocabulary with the reported basis means the stored pin equals what every surface prints. |
@@ -3559,13 +4701,31 @@ with no connected agent, or for nuances that surface between sessions.
 | 94 | **A feed-implied close ranks below a current manual or provider close, and an unchanged one keeps the day it first appeared** (issue #406, §8; amends 89; no schema change): `core.holdings.PriceBook` still resolves the newest date first with the source breaking a same-date tie, but a feed-implied winner yields to the newest manual or provider close at or before the day when that close is at most `FEED_DEFER_DAYS` (7) older; and a feed-implied close equal to the symbol's previous feed-implied close is dropped, so it stays dated the day it first appeared. Every surface that resolves a close (projection, `position_states`, the #392 overlay's readers) goes through the book. | A feed-implied close is dated by the UTC fetch day of the 06:30 sync, not the session it prices, so the newest-date rule let it outrank the provider's and the user's close for the latest session, and a bank whose value lagged or froze was never stale. Dating it to the previous trading session needs an exchange calendar and the bank's own timing, which Purser does not know; ranking it lower while a real close is current, and dating an unchanged value by its first day, uses only what Purser stores and invents no value: a worthless asset stays at the value the bank reports, and a frozen one ages into `stale`. The window is the staleness default rather than the runtime setting so the book stays pure; a feed-only symbol (no provider, no manual close) keeps its feed-implied close exactly as before. |
 | 95 | **SSO links are (issuer, subject); a verified email relinks only across providers; an admin can unlink; `__Host-` state cookie on https; emails case-insensitive** (issue #429 D1–D4, migration 0041, §3.1/§9): `users.oidc_issuer` joins `oidc_subject` and uniqueness moves to the pair (a NULL-issuer legacy link keeps subject-only uniqueness). The migration backfills every existing link with the configured issuer (the `app_settings` override, JSON null meaning none, else `PURSER_OIDC_ISSUER`), audited `user.oidc_issuer_backfill`; with none it leaves NULL, and the configured provider's next sign-in with that subject claims it. A new subject of the linked provider asserting the account's verified email is refused and audited; a different provider's is relinked (the migration path); `DELETE /users/{id}/oidc` is the admin's way out. On https the state cookie is `__Host-` + name at `Path=/`. Email comparison is `lower() = lower()` everywhere with a unique index on `lower(email)`; the migration stops, naming them, on case-only duplicates and never merges. | Owner decision 2026-10-27 on the #456 review. A subject is unique only at its issuer, so after a provider switch a colliding subject signed in as someone else (D1); relinking any new subject by email let a second identity at the same provider take a linked account over, while refusing every relink would have stranded OIDC-only users after a provider change (D2). `__Host-` needs `Path=/`, so the path scoping is kept only where the prefix cannot be used (D3). Case-sensitive matching left a provider's differently cased email unlinked and, with auto-provisioning, created a second account (D4). |
 | 96 | **An account's floor is an editable, write-scope setting, limited to cash accounts and cards** (issue #466, §3.4/§6/§10; no schema change): `min_balance` joins `PATCH /accounts/{id}` (explicit null clears) and MCP `update_account` (`""` clears) and the register header; create and update share one validator — finite, NUMERIC(20,4), any sign, and only `checking`/`savings`/`cash`/`credit_card` (clearing always allowed). Audited `account.update` before/after; reversed by restoring `before`, like every account edit. | Owner decision 2026-10-30. A floor was settable only at creation, so an account created without one could never join the shortfall scan. It only governs warnings, so the agent may set it ("warn me if checking goes under $500") with the user's authority (decision 90) rather than admin. Brokerage, property and loan forecasts open from a market value or stated valuation that moves on its own, so a floor there would warn on price, not cash; refusing it keeps the scan meaningful. |
+| 97 | **The feed asks for SimpleFIN v2 and reads v1 and v2 through one parser; status follows issue codes; an id two logins share is never imported** (issue #479, §7.1; no schema change): `fetch_accounts` sends `version=2`; `purser.feed.envelope` is the only reader of `errors` / `errlist` / `org` / `connections`, so archived v1 fetches replay unchanged and a server that answers v1 still works. `warning` on `con.*`, `act.*` or `gen.auth`; `gen.api` and naked `gen.` are listed only; any v1 error string still flags. `issues` (code, msg, conn_id, account_id) and `protocol_version` join the sync result, `GET /connections` and the `connection.sync` audit row; `/discovered` gains `conn_id` and `ambiguous`. An account id that appears twice in one payload is skipped by the importer and the drift check (`skipped_ambiguous_accounts`). | Verified against the live Bridge on 2026-11-08: it serves v2 on request though `/info` still advertises `["1.0"]`, and a v2 reply drops `errors` and `org`, so a server-side default change would have left Purser reporting no errors and no bank names with no visible failure. One parser keeps the archive's v1 payloads and v2 equal by construction (account ids match across versions, and no identity input changes). The Bridge puts its own usage warnings ("date range exceeds recommended range") in `errlist` as `gen.api`; flagging the connection for them would hide real bank problems in noise. v2 scopes an account id to its connection while Purser maps by id alone; real Bridge ids are globally unique, so the guard costs nothing today, and skipping beats silently merging two banks' rows if a server ever reuses one. |
+| 98 | **Feed problems are tracked per bank login and per account and surfaced as episode events plus a standing digest block** (issue #480, §7.1; no schema change; new app setting `feed_stale_days`, default 4, env `PURSER_FEED_STALE_DAYS`): the `connection.sync` audit row's `feed_health` block is the cross-sync memory; `feed.auth_required` / `feed.account_failed` (2-sync streak) / `feed.stale` (once per frozen `balance-date`) / `feed.recovered`; `whats_new.feed` lists what is open now from the latest block. | A fetch succeeds while a bank behind it has stopped updating or needs a new login, and the connection-level status recalculated per fetch hid both: on the owner's instance a bank's balance date froze for 72 days and two logins reported "Auth required" on hundreds of fetches with nothing raised. The balance date is the one signal every account carries, so staleness needs no guess about the bank. Events give webhooks one line per episode; the digest block keeps naming the problem every morning until it is fixed, which a once-only event cannot. The drift check's audit-block memory (decision 39) needs no schema and ignores backfill by construction. Four days: a balance dated Friday is still fresh on Tuesday after a long weekend; the 72-day freeze would have been raised on day five. A two-sync streak for `act.*` because the spec says "try again later" and one-off failures clear on their own. |
+| 99 | **A sync re-fetches what a bank outage left behind; a range can be re-fetched on demand** (issue #481, §7.1; no schema change): repairs are owed when an account's balance date jumps forward from before the sync's window, carried in the `feed_health` block until run; one focused gap-window fetch per sync; `POST /connections/{id}/refetch` / MCP `refetch_feed` for manual ranges (≤ 90 days). | On the owner's instance a bank froze for 72 days; on recovery the next sync asked for the last 7 days and about two months of checking and loan rows were never requested, leaving a large drift and missing loan payments. The balance date is the only per-account signal that the bank's data was stale, and a forward jump past the window is exactly the case the resync overlap cannot cover. Focused (`account=`) requests have their own Bridge quota and keep the payload small; gap-window semantics (no pending reconciliation, re-description check) are the backfill's proven path. Carrying an owed repair instead of dropping it keeps a full budget from losing the rows for good; the manual endpoint covers gaps that happened before the block existed or beyond what the detector sees. |
+| 100 | **Agents get a read-only feed inventory, identifiers and account numbers withheld** (issue #482, §7.1; no schema change): `GET /connections/inventory` + MCP `feed_status`, built from each connection's latest sync fetch; ids and `(1234)`-style suffixes removed for non-admin API tokens; no bank balances. | The only view of every delivered account, connected or not, was the admin-only discovery page, so an agent could not say whether a newly opened account had reached Purser or which bank needed a new login. Discovery stays admin (it maps accounts and shows bank balances beside ledger drift); the inventory answers connectivity only. Names keep enough to recognise an account ("New Card"), while the masked digits banks append are the one identifier an agent never needs. `feed_status` lists healthy accounts as counts so a typical answer stays inside the token budget. |
+| 101 | **Sync runs are jittered 0–10 minutes; discovery shows a meaningful available balance** (issue #483, §7.1; no schema change). | The Bridge's developer guide asks apps to fetch at a random minute, and its traffic peaks on round minutes; APScheduler jitter only delays, so the :30 presets keep landing before matching at 06:45. The available balance is the one useful extra field the Bridge sends for cards (credit left) and checking (holds), but it reads `0.00` on most brokerages and loans, where showing it would mislead. Not taken: an account open date (not in the spec, never delivered) and MCC (sent by one institution only). |
+| 102 | **A transfer candidate is a `transfer_pair` card in the suggestions inbox, the candidate list is a pure read, and "not a transfer" is memory the automatic link paths honour** (issue #386, #246 phase 2, migration 0042, §3.1/§5/§6/§10; amends 57 and 67): `suggestions.kind` gains `transfer_pair` (`withdrawn` exists since 0034); a `TransferPairDraft` (`outgoing_id`, `incoming_id`, `from_account`, `to_account`, the `amount` moved, both dates, `date_gap_days`, both bank texts), no confidence, nothing editable; fingerprint `transfer_pair:<low id>:<high id>` in plain text, the candidate's pair key over the first rows of its correction chains (`matching.card_keys`; the plain pair key for rows never corrected); `transfers.sync_candidate_suggestions` runs after every `auto_link_pass` (`feed.importer.import_fetch`, `qif_import.import_qif`, `matching.run_matching_job`): for each candidate whose rows are both posted (posted rows pair first, as in the plan; pending rows only from what is left) and whose newer leg is within `TRANSFER_PAIR_LOOKBACK_DAYS` = 60 days it emits `transfer.candidate` once per pair of bank lines (keyed like the card; quiet when an earlier event named rows of the same two lineages, so a pair that already had one stays quiet) and upserts the card (`suggestion.created`; a withdrawn card re-opens, keeping its snooze), and it withdraws (`suggestion.withdraw`) an open card whose pair is no longer a candidate, while a card that only ages past the window stays; `_merge_transfer_pair` accepts the merged pair's open card only for an explicit `confirm_transfer` (`result_entity_type = transaction`; `accepts_card`) and withdraws it on any other merge — the auto-linker, a machine conversion even under a token, an `[account]` edit (reason `transfer.convert` for a conversion) — and withdraws any other open card naming either original; `decide` acts on the rows that carry the card's bank lines now: accept → `confirm_transfer_and_propose` (passing the card; `DecisionOut.transfer` = `merged_transaction_id` + the chained `transfer_link` `suggestion_id`), reject → `rejected` exact, snooze hides it, `edit_then_accept` is refused, and a card whose rows no longer pair (`matching.live_transfer_pair`) is withdrawn with a 422; `GET /matching/transfer-candidates` emits and commits nothing, takes `lookback_days` (0 to 36500, `CANDIDATE_LOOKBACK_MAX_DAYS`; omitted = the whole history), leaves out suppressed pairs and adds `suggestion_id`; `POST /matching/transfer-candidates/reject` (write scope) rejects any candidate pair, writing the row rejected when it had no card (`suggestion.created` + `suggestion.decided`, as decision 86's register reject), and is idempotent; rows pair only in one currency (also in the plan, where a mixed pair made `create_transfer` fail the pass); the pool is the live head of each import lineage (`matching.bank_line_head_clause`: an import row, or a replacement whose correction chain starts at one, written by automation or still uncategorized), matched or held through its correction ancestors (the explicit counterpart too), so a corrected bank line pairs through its replacement and the corrected original never merges — nor on the explicit paths (confirm, reject and a card's decision follow stale ids along `lineage.current_rows`, through corrections and later sightings but never into a merge; every merge, absorb, conversion and correction locks its rows first, `ledger.lock_rows`, and `ledger.refuse_corrected` refuses a corrected row); an unlinked original points at its clone, which carries its bank line on; `matching.trade_cash_clause` is the one term #390's trade-cash rows are kept out by; a transfer's side is backed by a child still merged into it that is a bank line, or by the converted bank row itself (`transfers._converted_bank_lines`; a pending converted in place by the account its `transfer.converted` event records); `transfers._suppressed_pairs` = unlinked ∪ rejected (`suggestions.rejected_transfer_pair_rows`), remembered by lineage (`matching.LineagePairs`: each side's root back through correction chains, a pending's posted successor and an unlinked original's clone, plus an open pending's successor in waiting — the posted row a gap-window import brought before any reconcile step, `lineage.open_pending_successors`, #407), acts inside the greedy pairing (`matching.detect_transfer_pairs_for(suppressed=…)`: the pair window rules the key out, so a suppressed pair never consumes its rows) in both stages of `plan_auto_links` — so `rules.project_links` too — and in the candidate list, and filters `_counterpart_in` and both absorb paths (`_plan_absorbs`, an automatic conversion's `_absorb_target_for_convert`: no absorb into a transfer converted from the other side of a suppressed pair), and an automatic `[account]` answer whose only counterpart is a suppressed pair's other side is no answer (`transfers.machine_answer_refused`; apply-history `skipped_not_a_transfer`), while explicit confirm and convert ignore it; on the machine path the counterpart comes from the transfer pool only; the Dashboard drops its "possible transfer pairs" count and renders a `TransferPairCard`, and shows every open kind under its own total (`GET /suggestions/counts`; MCP `list_suggestions` `open_by_kind`), each kind's cards paged with `limit` and `offset` — unscored kinds sorted last in one mixed page, out of sight — and is never "All clear" while one waits; the register's ✗ rejects through the card when `suggestion_id` is set and through the endpoint otherwise; MCP `list_suggestions` lists the kind and `decide_suggestion` returns `transfer{merged_transaction_id, suggestion_id}`; nothing retires | Candidates were never stored: they were recomputed over the whole pool on every GET, `transfer.candidate` was emitted — and committed — as a side effect of a read-scope GET, so it fired only when someone opened a register, a candidate could not be rejected, and an unlinked pair came back as a candidate because the list ignored the unlink suppression. The inbox already had what a candidate lacked (snooze, rejection memory, one decision surface for the UI and agents). Unlike a match proposal, a candidate holds no rows, so the card is its only stored state and the list can stay a recomputation; a pure-read GET moves the event to the pass that produces candidates. A rejection has to bind the AUTO paths too, or a `transfer_link` rule activated later — or a pending pair's keyword once it posts — would link the very pair a person said was not a transfer; it binds both stages of the plan so the confirmed count is still the linked count (decision 66). The 60-day window bounds the inbox, not the decision: the first pass over an imported history would otherwise turn years of amount-only coincidences into cards, while the register keeps the whole-history list and "not a transfer" works for any pair. A card stays until its pair stops being a candidate rather than being withdrawn at day 60, so a person mid-decision is not overruled by a clock. Pool, memory and cards follow the bank line's lineage because the categorize pass corrects nearly every posted row that lands uncategorized: keyed on raw rows, a correction cut the bank line out of pairing for good and made every rejected pair new (#386 review round 2); a pending's posted successor is the same bank line, as in decision 86. The successor in waiting exists because gap-window imports became routine with the outage repair (#481): their pass runs before any reconcile, and keying the memory on content hashes would not help there, since the posted row's hash differs from its pending's whenever the bank changes the date or the text; reusing the reconcile step's own pick keeps the two answers to "which posted row is this pending" from drifting apart (#407). `match` and `confirm_transfer` stay: `confirm_transfer` is the only path for a split loan payment, whose unequal legs are never candidates. |
+| 103 | **A sale's proceeds and a funded buy's cost move the account's cash against the system account `equity.securities`, never counted twice; a manual brokerage account can opt into the drift check of its feed balance as cash** (issue #390 phase 1b, migration 0043, §3.1/§3.2/§7.3/§8; amends 8 and 50 as far as sale cash goes): a new account type `equity` (system virtual, not a category; `accounts_type_check` widened, `accounts_equity_virtual`), seeded `equity.securities` (recreated if it is ever missing by `ledger.securities_account`, an `INSERT ... ON CONFLICT (path) DO NOTHING` then a read, so two writers recreating it at once agree); `position_events` gains `proceeds_to` (sells: `cash` default \| `none`), `funded_from` (buys: `none` default \| `cash`), `settle_on` (when the cash posts: the trade date unless a later day is given) and `transaction_id` (one trade per cash row; every event naming one is indexed, reversals included: `position_events_transaction`). A trade on an account whose currency is not `equity.securities`' (USD; v1 is single-currency) moves no cash: one that would is refused (422) before any probe or link, so a link only ever sees rows in USD (every write path posts a leg in its account's currency). A cash-moving trade posts its net (`quantity × price ∓ fees`, rounded once, half up, to the cent) as one flat transaction, posted, `origin='system'`, dated the trade date (or `settle_on`), against `equity.securities` (`create_flat_transaction(system_leg=True)`, audited by the existing path), after a probe for the account's own copy of that cash (`cash.probe`: a pending or posted chain head with exactly two legs, that amount, same sign and to the cent, on the account and a category on the other; correlated `NOT EXISTS` for the head test) dated in [trade, settlement + 5 days] (settlement: `settle_on`, else the next business day): one found refuses the write (`CashAlreadyRecorded`, REST 409 `cash_already_recorded` with its id, the message naming the ways out: a pending copy is linked once it posts) unless `force_cash=true` — the explicit override, recorded on the trade's `position.record` audit row as `force_cash` and `cash_probe_overridden` (the row's id), refused with a link or a trade that moves no cash — posts the cash anyway; `transaction_id` links the row instead by re-booking it to `equity.securities` (`position.link_cash`, the reversal-pair correction) — only a posted flat row on the account of the trade's sign and exact net to the cent (a cash-moving trade always needs its price), dated in [trade, next business day + 5 days] — a link's window comes from the trade alone, `settle_on` never widens it — and with no live match on any row of its correction chain (the matcher pools the import original, so a bill can be settled through a row since corrected; the refusal and the 409 name the match and its remedy: reject a proposal, unmatch a confirmed one); any other row, an unknown id included, is a 422. Reversing the trade undoes the cash through the reversal pair: Purser's own row is corrected to a replacement whose two legs are zero (`position.undo_cash`), a linked one back to its category (`position.unlink_cash`); a cash row that is no longer a posted chain head is refused rather than undone. Over MCP, `record_sale(account, symbol, quantity, price, trade_date, settle_date, fees, proceeds_to, transaction_id, note, dry_run, force_cash)` (write scope) makes the same `record_event` `sell` call — the same validation, refusal (its message led by `cash_already_recorded` and the row's id), link and audit row; `dry_run=true` runs it inside a savepoint that is rolled back, with balance marks suspended (`balances.suspend_marks`: no lock on the global watermark, no recompute at commit, for writes that never happen), answering with the shares before and after, the cash and its settlement date, and the row the probe found (`already_recorded`), writing nothing; with `force_cash` the call and its dry run both name the row the cash posts over (`cash_probe_overridden`). Every trade checks its shares first (`_check_timeline` with the new event, before `trade_cash.plan`), so an oversell is the same 422 naming its date in the call and in its dry run. `reverse_position_event(event_id, note)` and `reopen_position(position_id)` (write scope, audited like their REST twins) are the REST reverse route and reopen, so an agent that recorded a wrong sale undoes it, shares and cash; a closed position reopens first (`PATCH /positions/{id}` `closed: false`, audited `position.reopen`, `position.updated` `change='reopened'`, refused with 409 while another position in the symbol is open or a later one exists), because a final sale's position is closed and reversing needs an open one. `review_batch` marks every row of a trade-cash lineage `securities_trade` (read once per batch, so a bank row escalated before a trade linked it is marked too) with `locked: {event_id, position_id}` naming the trade, and the batch's guidance (dropped with `include_guidance=false`) says what that means: mark it reviewed, or reverse the trade (reopening its position first), since the loop's usual fixes — `update_transaction`, `confirm_transfer` — are refused or wrong for it. A trade's cash row is locked (`_flat_legs`), out of rule candidates and schedule detection; it and the bank row a trade linked, with the correction chain between them (`ledger.trade_cash_lineage_ids`: a row with a system leg, or one whose chain's live head has one — one recursive walk back from those heads, reusable by a pool of chain heads as the single clause "the head has no system leg"), are out of the matcher's candidates, `list_unmatched(direction='posted')`, the register's Mark-paid picker, the transfer pool, schedule detection's history (`_history_rows`: a linked monthly sale is not a recurring deposit) and a conversion's merge (`transfers._counterpart_in`), and refused (422) by every explicit path that would part them from their trade — `_merge_transfer_pair` (REST confirm-transfer, MCP `confirm_transfer`, the auto-linker), `convert_to_transfer` (before its absorb, merge or in-place branch) and `_execute_match` (`match`, Mark paid, a confirmed proposal); the reconciler's pending-to-posted carry never moves a bill's confirmed match onto a successor a trade claims — the bill is released, pin kept (`match.unmatch` reason `successor_trade_cash`); `purge-feed-rows` refuses a feed row a live trade holds (`feed_repair._trade_links`, its dry run counting them as `trade_links`, the refusal naming each trade and the six steps that work: reopen the position if closed, switch a feed-sourced account to manual, reverse the trade, purge with `--include-corrections`, replay, record the trade again linking the re-imported row): purging the row would NULL its chain's lineage, so the trade could never be reversed; and it refuses any corrected feed row (a reversal names it: a recategorization, a rule, a reversed trade's link) unless `--include-corrections`, which purges the row's whole correction chain (one recursive walk forward; refused for a chain with a leg on another real account; the dry run counts the chains and lists those a person or an agent corrected, whose choice is lost), because purging the original alone NULLed its reversal's lineage and left the replacement a live head beside the replayed row, counted twice; the shared guarded delete NULLs `position_events.transaction_id` on surviving events that name a deleted row, the append-only trigger disabled for it like the posted guards (only a reversed trade's events can name one); every category-choosing path refuses a system account, and nothing is created at or under `equity` (`refuse_system_path`: `create_account` by path or `parent_id`, `ensure_category_path`, a close adjustment, a move), while the path-selected reports (`category_rollup`, `spending_summary` / `spending_baseline` with a subtree) read category types only (§3.2). `accounts.feed_balance_is_cash` (admin, `PATCH /accounts/{id}`, CHECKed to brokerage with `holdings_source='manual'` and validated under the account lock the source switch takes, so a switch to the feed committed meanwhile refuses it with a 422 rather than failing the CHECK; cleared with a basis pin when the account goes back to the feed or the flag is turned off) makes `drift._eligible` admit the account, so its feed balance is compared with its postings through the unchanged §7.3 machinery (live compare, emission gate, basis history and pin, discovered fields, `whats_new`); reconciliation and the pending re-check widening stay on the postings-balance types. | Phase 1a alone left the motivating account short: its postings held only the disbursements out, so its cash stayed negative until the sales that funded them were recorded — and a sale needs no lot machinery to move cash, only a price. A new non-category type rather than `income.opening_balances`' precedent because the reports filter on the category types, so trade cash is out of spending and income by construction instead of every sale counting as income. One flat posted row is the ledger's ordinary shape (balances marked, audit and events by the existing funnel), and `origin='system'` puts each one in front of a person, like a reconciliation adjustment. The cash posts on the trade date by default because the projection moves the shares on the trade date: posted at T+1, it left net worth short by the sale's value until settlement; the probe still looks to five days after T+1, where a broker books the cash. A *linked* sale keeps the bank's date, and a later `settle_on` posts Purser's cash later: between the trade and that date the cash is in transit (decision 104), so net worth stays whole. Cents, because the probe compares amounts exactly and a broker's cash (and the feed's copy of it) is in cents while fractional plan shares make `quantity × price` sub-cent. The probe takes only the shape a broker's cash row has because a wider one refused trades over rows a link cannot take (transfers, splits), leaving `proceeds_to='none'` — no cash at all — as the only way out; `force_cash` is the explicit, audited way past a true coincidence. The probe exists because many brokers already send "SOLD" cash rows: defaulting to `proceeds_to='cash'` there would book the proceeds twice, so the default is refused exactly when it would double count, and the link turns the existing bank row into the trade's cash without inventing a second one. The cash and the shares must move together or the account's cash and holdings disagree, hence the lock, the pool exclusions and reversal undoing both. The undo is a correction to zero because guardrail 3 makes a posted row's correction a reversal pair linked by `reverses_id` — an unlinked offsetting row would leave two live rows and no lineage — and because a reversal alone is a chain head while the row it reverses is not, so the heads-only running balances would show -X where every sum shows 0; with the zero replacement as the head, every reader of chain heads and every sum agree. The drift opt-in is opt-in because a brokerage feed's balance is usually the account's total value; for a cash sweep whose positions live in Purser it is the cash, the one figure the ledger can check, and the existing machinery checks it unchanged. `record_sale` exists because recording a plan's sales is an agent's job; it is the REST path itself, and its dry run is that path rolled back rather than a second computation, so the preview cannot disagree with the write. |
+| 104 | **A broker's copy of trade cash Purser already posted takes it over at import; cash that lands after its trade is valued in transit, so a sale never dips net worth** (issues #408 and #421, migration 0043, §3.1/§7.1/§8; amends 103's "the probe runs when the trade is recorded" and its accepted dip; `position_events` stay append-only): (1) *the copy.* `importer._import_account`, on every import path, asks `cash.unclaimed_cash` for each new feed row on an account with trades: a standing trade whose cash Purser posted itself (live posted, origin `system`, no content hash, not a correction) of exactly the row's amount, with the row dated in [trade, `copy_window_end`] (five days after the later of `settle_on` and the next business day: the probe's window). A posted row is imported as usual, then linked as that trade's cash through 103's link (`position.link_cash`), and Purser's row is voided with `superseded_by` → the link's replacement, audited `position.feed_cash` (event, both rows, amount, fetch); the trade's event keeps naming Purser's row and every reader follows `superseded_by` (`cash.live_cash`: undo, review's `locked`, the purge's refusal, the projection). A pending copy is not stored (`skipped_trade_cash_pending`) while any standing trade's Purser-posted cash of that amount and window exists, taken over or not (`taken_too`), so the posted row takes over later and a re-import skips it again. Oldest trade first; one copy per trade; anything else is an ordinary row. Counts: `linked_trade_cash` (inside `imported`; sync, gap repair, refetch, backfill) and `skipped_trade_cash_pending` (sync). (2) *in transit.* `projection.in_transit` reads each trade event's live cash row and its date; when that date is after the trade, `core.projection_rows` adds the cash (account side: proceeds +, a funded buy's cost −) to the position's row from the trade date to the day before the cash date — the held row's market value, or a zero-share row worth only the cash once nothing is held — records it in `holdings_snapshots.in_transit` (NUMERIC(20,4), manual rows only, CHECK), makes the cash date a change date — in the account's current period even when it is after today, so the set that ends the transit is written ahead and the cash never counts twice on the day it posts (#498 review; every reader takes the newest set at or before its day, `holdings_set_on` defaulting to the ledger day and `readmodel.v1_holdings_latest` bounded by `readmodel.ledger_today()`, migration 0045) — and counts only effective events. A held row with no value stays without one. `latest_holdings` keeps a carrier row; `list_holdings` lines and `HoldingOut` carry `in_transit`, which `unrealized_gain` leaves out. | #408: a broker that sends "SOLD" rows delivers them a day or more after the trade, and an agent recording a sale from the broker's activity page often does so first, so the copy arriving later was the common case and the money was counted twice until someone noticed. Linking at import was the issue's preferred fix; an event-and-review alternative would leave the double count standing until a person acted. The copy is IMPORTED and then linked, rather than stored already booked to `equity.securities`, so the bank row's original never carries the system leg: when the trade is reversed the row gets back the category it was imported with and is an ordinary row again (free for a purge), exactly like a row linked by hand. Purser's row is voided through `superseded_by` because a posted row's only allowed mutation is that one (a transfer merge's), and because events are append-only the trade cannot be re-pointed: following `superseded_by`, the lineage pointer matches already follow (decision 69), keeps one source of truth. A pending copy is skipped rather than stored because a link takes only a posted row and a pending stored beside Purser's cash would double count until it posted; skipping it whenever such cash exists, taken over or not, is what keeps a re-import of the same payload from storing it later. #421: the issue offered moving a cash-moving trade's shares to its cash date (option 1) or a correction primitive that re-dates the cash (option 2, which changes the register and reconciliation, against the bank's dates). Option 1 was not taken because §8 counts shares on the trade date everywhere — the timeline, the oversell and overlap checks, `opened_on`, the price spans — and a share count recorded between the trade and the cash date (a re-count from the broker's holdings page, which already shows the sale) would then subtract the sale twice, silently: holding 412.5, selling 100 linked to a T+2 row and re-counting 312.5 on T+1 would leave 212.5. Valuing the cash in transit keeps both dates as they really are — the shares the broker shows on the trade date, the cash on the bank's date for reconciliation and the drift check — and is what a broker shows too (unsettled proceeds). It lives in the projection because every reader of holdings value (net worth, its daily series, account surfaces, Grafana's latest view) already reads the projected rows; a column, not a folded-in number alone, so an agent can tell cash from shares and the gain stays the shares'. |
+| 105 | **One ledger day: the calendar date in the household time zone, default UTC; instants stay UTC** (issue #471, §2/§3.1/§7.1/§9; migration 0044): new setting `timezone` (IANA name; env `PURSER_TIMEZONE`, runtime override through `/config`, admin scope, audited `config.update`; an unknown zone is a 422, and an unknown env zone stops startup; `GET /clock`, read scope, returns `ledger_today` and `timezone` so a client that dates its own writes — the Positions forms — uses the server's day, #496 review). `purser.clock.ledger_today()` is the only source of "today" for calendar-day decisions across the package, `clock.ledger_date()` turns an instant into a day (an account's close date); the 63 former "today" call sites used `date.today()` (host-local: schedules, suggestions, matching, transfers, reporting, seed, lifecycle) or `datetime.now(UTC).date()` (UTC: digest, net worth, review, reconciliation, holdings, feed staleness, MCP/REST defaults), and 8 close-date and switch-date conversions took a UTC timestamp's UTC date. SQL: `readmodel.ledger_today()` reads the override, else `ledger_clock.env_timezone` (written by every startup), else UTC; `v1_forecast_daily` starts there. Unchanged on purpose: instants (`datetime.now(UTC)`), job times (UTC crons), the dates of imported rows (epoch → UTC date; a fetch's UTC day for its snapshots, decision 94), and the SimpleFIN window (bounds at UTC midnight, now explicit rather than host-local; the Bridge's 90-day reach counted from the UTC date). | Owner decision 2026-11-08. Two definitions of "today" agreed only on a UTC host: on any other host the evening hours put schedules a day behind the digest, and one surface could call a bill late that another still listed as coming. One setting the household chooses is the only definition that is right everywhere; UTC as the default keeps every existing install on the day it already had, since production containers run in UTC. Job times stay UTC because the train is ordered around the Bridge and the 06:45 matching job, not around the household's evening. Imported rows keep their UTC dating so a re-import stays idempotent and no stored row moves; the fetch window follows the rows' frame, so a window never misses a day of them and never asks the Bridge for more than it serves. |
+| 106 | **Every multi-day SimpleFIN request pages at the Bridge's recommended 45 days** (issue #490, §7.1; amends decisions 32 and 70; no schema change): `BRIDGE_PAGE_DAYS` = 45; first sync 88 days in two pages; gap windows, backfill windows, outage repair and `refetch` page at 45 days; the pending widening reaches at most 44 days; sync counts sum every page. | The Bridge answers longer requests with "Requested date range exceeds recommended range of 45 days. In the future, this may be capped." Following upstream guidance before the cap lands means a cap never silently truncates a first sync, a backfill or an outage repair. 88 days for the first sync keeps three monthly occurrences for recurrence detection in two requests (90 would need three because pages overlap by a day). The pending widening shrinks from 90 to 44 days: a pending open for over six weeks on a cash or card account is rare, and widening for it would cost a second page on every sync. Backfill keeps its 180-day empty-history rule and a similar per-call reach by doubling its page counts; each page still counts against the 24-a-day budget. Summing counts across pages is the only truthful report once a first sync is paged: counting the final page alone reported a first sync's history as nothing imported. |
+| 107 | **Hand-tracked positions may track tax lots, and accounts may hold equity awards, as a sub-ledger that never changes how shares, cash or net worth are counted; bulk captures are previewed, hash-bound, idempotent and never infer a sale** (issue #393, migration 0046, §3.1/§8/§10/§13; amends decision 8 and the §13 non-goal "lot-level investment accounting" for hand-tracked positions): new `lots` (opened by one event or adopted from one capture; encrypted reference and plan label with blind indexes; basis per share and total or unknown; identity immutable by trigger, never deleted), append-only `lot_dispositions` (tied to `sell`/`transfer_out` events, inert once reversed), append-only `holdings_captures` (as-of, captured-at, completeness, keyed request and content hashes, plan hash, raw payload in `raw_fetches` `source='capture'`), `awards` and `award_vests`; `position_events` gains `vest` (net shares, `gross_quantity`/`withheld_quantity`, fair market value as price) and `transfer_out` (no price, no cash). Invariants (`core.lots.check`, after every write through `_check_timeline`): no lot below zero, counted lots never above the position on any day (the rest is unallocated, derived), disposals only from live drawable lots, every disposal fully allocated once lots can be drawn on. Allocation: specific (lot id, broker reference or `unallocated`) or fifo/lifo/hifo (never reaching unallocated shares; hifo refused with an unknown basis). Exact basis conservation (the emptying disposal takes the remainder); proceeds are the sale's cash in cents, split by largest remainder (exact, never of the other sign); a given total basis is authoritative and derived figures must fit their columns; term long only after the anniversary; reversing a lot's opening event voids the lot, freeing its reference. A lot-tracked position's cost_basis is its lots' remaining basis (NULL with any unknown or unallocated share), in every reader and the projection. Captures: dry run returns the plan and a keyed `plan_hash` over request, plan and state digest; commit under the account lock recomputes and refuses a different hash (409 `preview_stale`) or conflicts (409 `capture_conflicts`, unless `skip_conflicts`, per symbol), archives raw first, records, applies; an exact retry is a no-op, a repeat observation records freshness only, captures are ordered by as_of then captured_at; decreases, increases, missing rows (complete), totals below the count, basis differences, ambiguous identities, partial captures beyond the unallocated shares and out-of-order captures are conflicts; a complete capture recounts only UP. Vests: event + lot, or a checked link to a held lot with no new shares, or (all withheld) neither; duplicate refused unless forced; identical retry no-op, different figures 409. One entitlement calculation (reported baseline kept when omitted and counting recorded vests up to its date, recorded vests after it, schedule, cancellations; unvested remaining, scheduled, unscheduled, or unknown) bounds every award path. Awards are never read by net worth. The migration's downgrade refuses while any lot, award, capture or new-kind event exists. References are external ids under decision 91. | Owner decision 2026-11-15 (Mike approved amending decision 8 / §13 and building the provider-neutral API; the broker side — logging in, reading pages, scheduling — stays with the agent). A broker's lot list is the only complete account of an equity-plan holding and its basis; average cost misstates both. A sub-ledger keeps every existing guarantee (the projection, cash, net worth, simple positions) unchanged and puts the new rules in one checked place every write path passes through. Captures come from an agent reading pages, so a missing or partial page must never become a sale or a deletion: anything the book cannot explain is a conflict a person or the agent resolves with an explicit, audited, reversible write. The hash binds a commit to the state its preview saw, so two writers or a change in between cannot apply a stale plan. Awards stay out of net worth because unvested units are not owned; linking a vest to an already captured lot is what keeps a vest from being counted twice. |
+| 108 | **Certainty belongs to each occurrence and each dimension** (#512, migration 0047; amends 55, 65, 80 and 85): immutable original snapshots, encrypted evidence/history, independent confirmation, matched-actual provenance and variance; uncertain or ambiguous matches require review, and unmatch preserves confirmation. | A recurring rule and an amount edit cannot establish this occurrence's amount and date independently. Keeping evidence separate from posting preserves the immutable ledger and prevents double counting without losing the estimate that led to the payment. |
+
+| 109 | **Projected certainty uses schedule plus recurrence date, independently of value calculation** (#518, migration 0048, §3/§6). Slot evidence is metadata-only, retains a first observed projection, and transfers to the instance with history on materialization. New instance evidence distinguishes value overrides from certainty-only annotations; existing classifications remain compatible. | A fixed planning amount need not be known, and distant projections have no transaction UUID. Preserve forecast values while making uncertainty and its evidence visible through REST, MCP and the UI. |
 
 ## 13. Non-goals (v1)
 
-Budgeting/envelopes · lot-level investment accounting & performance math
-(TWR/IRR) · multi-currency FX · server-side email/bill parsing · bank
-aggregation beyond the SimpleFIN protocol · statistical (non-deterministic)
-forecasting.
+Budgeting/envelopes · performance math (TWR/IRR) and tax computation · lot
+accounting for feed-sourced holdings · multi-currency FX · server-side
+email/bill parsing · bank aggregation beyond the SimpleFIN protocol ·
+statistical (non-deterministic) forecasting.
+
+*(History: "lot-level investment accounting" was a non-goal until issue
+#393 — decision 107 added tax lots and equity awards for hand-tracked
+positions, as a sub-ledger; the owner approved the amendment on 2026-11-15.)*
 
 *(History: "ledger-view UI" was a non-goal until 0.5.0 — the per-account
 registers replaced the review queue as the admin UI's action surface,
@@ -3581,10 +4741,7 @@ issue #112.)*
   canary rewrite is deferred (#93)
 - Schedules v2 follow-ups (0.16.0 round, decisions 55–57): multi-posting
   schedule templates (a paycheck that splits into net pay, taxes, 401k and a
-  savings transfer — a single-amount schedule cannot express it); folding
-  transfer candidates into the suggestions inbox as a further `kind`
-  (`transfer_pair`, #246 phase 2 — proposed matches are cards since decision
-  86, and neither phase retires `match` or `confirm_transfer`);
+  savings transfer — a single-amount schedule cannot express it);
   AI-tier suggestion authoring
   under decision 49 (#250's server pass; it never drafts a transfer
   schedule, so rule 5 holds trivially); `autopost_policy` is stored but not enacted — if

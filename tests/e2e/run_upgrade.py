@@ -2,16 +2,19 @@
 
 Run via:
   uv run --group e2e python tests/e2e/run_upgrade.py \
-      --old-image ghcr.io/mlamoure/purser:v2026.10.0 --new-image purser:dev
+      --old-image ghcr.io/mlamoure/purser:v2026.11.1 --new-image purser:dev
+
+For a pre-write-scope image, add --legacy-scopes to exercise conversion from
+the retired propose scope. Current-release upgrades preserve read/write scopes.
 
 1. The OLD image takes first-run setup and real writes over REST: accounts, a
    category, posted and pending transactions (encrypted narrative), a schedule,
-   and an agent token with the old scopes.
+   and an agent token with the scopes accepted by that version.
 2. A pre-upgrade logical backup is taken (the documented rollback point).
 3. The NEW image's API and worker start at the same moment against that
    database: startup migrations must run once, and both must come up healthy.
 4. The upgraded data must answer exactly as before (balances, rows, decrypted
-   narrative); the old agent token keeps working with its converted scopes.
+   narrative); the old agent token keeps working with read/write scopes.
 5. Rollback rehearsal: the pre-upgrade backup restores into a fresh database
    and the OLD image serves it, with the same key, exactly as before.
 
@@ -77,7 +80,7 @@ def _body(raw: bytes) -> Any:
         return raw.decode(errors="replace")
 
 
-def seed(url: str) -> str:
+def seed(url: str, *, legacy_scopes: bool = False) -> str:
     """First-run setup and writes on the OLD version; returns the agent token."""
     admin = Client(url)
     admin.ok("POST", "/auth/setup", ADMIN)
@@ -120,7 +123,11 @@ def seed(url: str) -> str:
             "category": "expenses.upgrade_food",
         },
     )
-    minted = admin.ok("POST", "/tokens", {"name": "upgrade-agent", "scopes": ["read", "propose"]})
+    minted = admin.ok(
+        "POST",
+        "/tokens",
+        {"name": "upgrade-agent", "scopes": ["read", "propose" if legacy_scopes else "write"]},
+    )
     return str(minted["token"])
 
 
@@ -146,6 +153,11 @@ def main() -> int:
     parser.add_argument("--old-image", required=True)
     parser.add_argument("--new-image", required=True)
     parser.add_argument("--postgres-image", default="postgres:16")
+    parser.add_argument(
+        "--legacy-scopes",
+        action="store_true",
+        help="The old image predates write scope; require scope conversion during migration",
+    )
     parser.add_argument(
         "--port",
         type=int,
@@ -195,7 +207,8 @@ def main() -> int:
             ports = ["-p", f"127.0.0.1:{port}:8000"] if publish else []
             docker(
                 "run", "-d", "--name", name, "--label", label, "--network", network,
-                "--env-file", str(app_env), *ports, image, *command,
+                "--env-file", str(app_env), "--cap-drop", "ALL",
+                "--security-opt", "no-new-privileges:true", *ports, image, *command,
             )  # fmt: skip
 
         def stop(name: str) -> None:
@@ -213,7 +226,7 @@ def main() -> int:
             configure(db)
             start(prefix + "-old", args.old_image, publish=True)
             wait_app(url)
-            agent_token = seed(url)
+            agent_token = seed(url, legacy_scopes=args.legacy_scopes)
             before = observe(url)
             old_revision = sql(db, "SELECT version_num FROM alembic_version")
             stop(prefix + "-old")
@@ -269,7 +282,10 @@ def main() -> int:
             migrated = sql(
                 db, "SELECT count(*) FROM audit_log WHERE action = 'token.scopes_migrate'"
             )
-            assert int(migrated) >= 2, "token conversions were not audited"
+            if args.legacy_scopes:
+                assert int(migrated) >= 2, "token conversions were not audited"
+            else:
+                assert int(migrated) == 0, "current scopes unexpectedly needed conversion"
             stop(prefix + "-worker")
             stop(prefix + "-api")
 
@@ -296,7 +312,11 @@ def main() -> int:
                         "migrated": f"{old_revision} -> {new_revision}",
                         "concurrent_api_and_worker": "both running, one alembic revision",
                         "data_after_upgrade": "identical (balances, rows, narrative, schedules)",
-                        "old_agent_token": "converted to read+write, posts a row",
+                        "old_agent_token": (
+                            "converted to read+write, posts a row"
+                            if args.legacy_scopes
+                            else "read+write preserved, posts a row"
+                        ),
                         "rollback": "pre-upgrade backup + old image + same key: identical",
                     }
                 )

@@ -35,10 +35,13 @@ EXPECTED_TABLES = {
     "balance_watermark",  # dirty-watermark singleton (#145/#146, decision 38)
     "account_reconciliations",  # statement-balance claims (#268, decision 61)
     "instance_statements",  # card statements on payment instances (#351, decision 80)
+    "instance_certainty",  # per-occurrence estimate certainty (#512, decision 108)
+    "slot_certainty",  # evidence on projected, unmaterialized slots (#518, decision 109)
     "positions",  # manually tracked holdings (#390, decision 88)
     "position_events",  # their append-only share-count history (#390)
     "security_prices",  # daily closes, manual and provider (#390, decision 89)
     "price_answered",  # the date ranges each provider answered for good (#390)
+    "ledger_clock",  # the env time zone the readmodel's ledger day reads (#471)
 }
 
 
@@ -49,6 +52,22 @@ def test_all_tables_exist(migrated_engine: Engine) -> None:
         ).scalars()
         tables = set(rows)
     assert tables >= EXPECTED_TABLES
+
+
+def test_every_event_naming_a_cash_row_is_indexed(migrated_engine: Engine) -> None:
+    """position_events.transaction_id references transactions (decision 103):
+    deleting a transaction checks that foreign key, and a row's trade is
+    looked up by it. The unique index covers non-reversal rows only, so the
+    reversal rows need an index of their own (0043)."""
+    with migrated_engine.connect() as conn:
+        definition = conn.execute(
+            text(
+                "SELECT indexdef FROM pg_indexes WHERE tablename = 'position_events'"
+                " AND indexname = 'position_events_transaction'"
+            )
+        ).scalar_one_or_none()
+    assert definition is not None and "(transaction_id)" in definition
+    assert "reverses_id" not in definition  # reversal rows included
 
 
 def test_required_extensions_installed(migrated_engine: Engine) -> None:

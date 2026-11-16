@@ -126,6 +126,8 @@ class TestConfigurableSyncSchedule:
         fields = _trigger_fields(scheduler, "feed.sync_daily")
         assert fields["hour"] == "*"
         assert fields["minute"] == "30"
+        # Spread across :30-:40 as the Bridge asks (#483), never early.
+        assert scheduler.get_job("feed.sync_daily").trigger.jitter == 600
 
     def test_build_falls_back_to_default_when_config_unreachable(
         self, monkeypatch: pytest.MonkeyPatch

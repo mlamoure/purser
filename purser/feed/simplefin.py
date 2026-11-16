@@ -8,12 +8,18 @@ stored encrypted. Access URLs and setup tokens are secrets: never log them.
 import base64
 import binascii
 from contextlib import nullcontext
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 import httpx
 
+from purser.feed import envelope
+
 BRIDGE_MAX_RANGE_DAYS = 90  # Bridge caps ranges at 90 days
+# The Bridge's recommended span for one /accounts request (#490): longer ones
+# draw a "Requested date range exceeds recommended range of 45 days. In the
+# future, this may be capped." warning. Every multi-day fetch pages at it.
+BRIDGE_PAGE_DAYS = 45
 BRIDGE_MAX_FETCHES_PER_DAY = 24  # Bridge allows <=24 requests/day
 
 
@@ -49,6 +55,14 @@ def claim_access_url(setup_token: str, *, client: httpx.Client | None = None) ->
     return access_url
 
 
+def _utc_midnight(day: date) -> int:
+    """A window bound as epoch seconds at UTC midnight (#471). Imported rows
+    are dated by their epoch's UTC date, so the window is drawn in the same
+    frame; a naive ``datetime(...).timestamp()`` would follow the host's local
+    zone instead."""
+    return int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp())
+
+
 def fetch_accounts(
     access_url: str,
     *,
@@ -56,21 +70,24 @@ def fetch_accounts(
     end: date | None = None,
     include_pending: bool = True,
     accounts: list[str] | None = None,
+    version: int = envelope.PROTOCOL_VERSION,
     client: httpx.Client | None = None,
 ) -> dict[str, Any]:
     """GET /accounts with the (credentialed) access URL. Returns the payload
     verbatim — the caller archives it before anything interprets it.
 
+    ``version`` asks for that protocol version (#479). A server that does not
+    know it chooses its own default, so the payload may still be v1: callers
+    read it through ``purser.feed.envelope``, which understands both.
+
     ``accounts`` narrows the fetch via the protocol's repeatable ``account``
     param (external ids). Advisory: a bridge may ignore it and return every
     account — callers must not rely on the payload being filtered."""
-    params: list[tuple[str, str]] = []
+    params: list[tuple[str, str]] = [("version", str(version))]
     if start is not None:
-        params.append(
-            ("start-date", str(int(datetime(start.year, start.month, start.day).timestamp())))
-        )
+        params.append(("start-date", str(_utc_midnight(start))))
     if end is not None:
-        params.append(("end-date", str(int(datetime(end.year, end.month, end.day).timestamp()))))
+        params.append(("end-date", str(_utc_midnight(end))))
     if include_pending:
         params.append(("pending", "1"))
     for external_id in accounts or ():

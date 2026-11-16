@@ -26,7 +26,7 @@ export default function Selection() {
 
   return (
     <Card>
-      <CardTitle>Shared by your agent</CardTitle>
+      <CardTitle>Selected transactions</CardTitle>
       {note && <p className="mb-4 text-sm">{note}</p>}
       {ids.length === 0 && (
         <p className="text-sm text-muted-foreground">This link names no transactions.</p>

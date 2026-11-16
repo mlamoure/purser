@@ -103,6 +103,8 @@ class Detected:
     occurrences: int
     gaps: GapStats
     confidence: Decimal
+    latest_amount: Decimal
+    price_changed: bool
 
 
 def collapse_same_day(occurrences: list[Occurrence]) -> list[Occurrence]:
@@ -190,6 +192,8 @@ def _rrule_for(bucket: Bucket, ordered: list[Occurrence]) -> tuple[str, str]:
     """(cadence label, rrule). Anchor-sensitive rules rely on dtstart = last."""
     last = ordered[-1].date
     days = [o.date.day for o in ordered]
+    if bucket.name == "fourweekly":
+        return "every 4 weeks", f"FREQ=WEEKLY;INTERVAL=4;BYDAY={_WEEKDAYS[last.weekday()]}"
     if bucket.name == "weekly":
         return "weekly", f"FREQ=WEEKLY;BYDAY={_WEEKDAYS[last.weekday()]}"
     if bucket.name == "biweekly":
@@ -232,6 +236,11 @@ def _confidence(occurrences: int, gaps: GapStats, cv: Decimal) -> Decimal:
 def detect(occurrences: list[Occurrence], *, today: date_type) -> Detected | None:
     """Same account + same counterparty + regular cadence -> a schedule draft's
     worth of facts, or None. Detection only describes; nothing here activates."""
+    # A reversal/refund or a feed sign change is not one recurring cash flow.
+    # Check before summing same-day legs so opposite entries cannot disappear.
+    signs = {o.amount.compare(Decimal(0)) for o in occurrences if o.amount != 0}
+    if len(signs) > 1:
+        return None
     ordered = collapse_same_day(occurrences)
     if len(ordered) < MIN_OCCURRENCES_YEARLY:
         return None
@@ -240,6 +249,16 @@ def detect(occurrences: list[Occurrence], *, today: date_type) -> Detected | Non
     if picked is None:
         return None
     bucket, stats = picked
+    # Four-week subscriptions drift across the calendar. Require repeated
+    # exact 28-day gaps and calendar drift; a short February is not evidence.
+    if (
+        len(ordered) >= 4
+        and gaps[-2:] == [28, 28]
+        and max(o.date.day for o in ordered) - min(o.date.day for o in ordered) > 6
+        and sum(26 <= gap <= 30 for gap in gaps) / len(gaps) >= IN_BUCKET_RATIO_MIN
+    ):
+        bucket = Bucket("fourweekly", 26, 30, 28)
+        stats = _gap_stats(gaps, bucket)
     if len(ordered) < bucket.min_occurrences:
         return None
     if (today - ordered[-1].date).days > bucket.period_days * LAPSED_CADENCES:
@@ -251,6 +270,14 @@ def detect(occurrences: list[Occurrence], *, today: date_type) -> Detected | Non
         return None
     cv = (_population_stdev(amounts) / abs(typical)).quantize(Decimal("0.0001"))
     cadence, rrule = _rrule_for(bucket, ordered)
+    prior = amounts[:-1]
+    prior_median = Decimal(median(prior))
+    price_changed = bool(
+        len(prior) >= 3
+        and prior_median != 0
+        and _population_stdev(prior) / abs(prior_median) <= FIXED_CV_MAX
+        and abs(amounts[-1] - prior_median) / abs(prior_median) > FIXED_CV_MAX
+    )
     confidence = _confidence(len(ordered), stats, cv)
     if confidence < CONFIDENCE_MIN:
         return None
@@ -267,4 +294,6 @@ def detect(occurrences: list[Occurrence], *, today: date_type) -> Detected | Non
         occurrences=len(ordered),
         gaps=stats,
         confidence=confidence,
+        latest_amount=amounts[-1],
+        price_changed=price_changed,
     )

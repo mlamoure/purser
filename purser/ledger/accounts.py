@@ -2,19 +2,21 @@
 closed-account write guard (DESIGN §3.4)."""
 
 import uuid
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from datetime import date as date_type
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import cast, literal, not_, or_, select, text
-from sqlalchemy.orm import Session
+from sqlalchemy import CompoundSelect, cast, exists, literal, not_, or_, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import Session, aliased
 
 from purser import audit, events, locks
 from purser.core import ledger as core
 from purser.feed import drift
-from purser.ledger.errors import LedgerError, NotFoundError, PathConflictError, check_path
-from purser.models import Account, LtreeType, Posting, Schedule, Suggestion
+from purser.ledger.errors import LedgerError, NotFoundError, PathConflictError, RowBusy, check_path
+from purser.models import Account, LtreeType, Posting, Schedule, Suggestion, Transaction
 
 # ---------------------------------------------------------------------------
 # Accounts & categories
@@ -55,6 +57,226 @@ def check_min_balance(account_type: str, value: Decimal | None) -> None:
             f"min_balance applies only to {', '.join(sorted(FLOOR_TYPES))} accounts, "
             f"not {account_type}"
         )
+
+
+# System virtual accounts (#390 phase 1b, decision 103): virtual like a
+# category — a balancing leg outside net worth and the running balances — but
+# NOT a category. Nothing a person or an agent chooses books to one: no
+# category picker, rule, schedule, classifier or flat-form write may name it.
+# Only Purser's own securities-trade cash does, through the holdings service.
+SYSTEM_TYPES = core.SYSTEM_ACCOUNT_TYPES
+SECURITIES_PATH = "equity.securities"
+# The subtree the system accounts live in. Nothing else may: a category under
+# equity.securities, or an ``equity`` category, would share the subtree that
+# path-based reports and filters read, and mix with trade cash there.
+SYSTEM_ROOT = "equity"
+
+
+def in_system_subtree(path: str) -> bool:
+    return path == SYSTEM_ROOT or path.startswith(SYSTEM_ROOT + ".")
+
+
+def refuse_system_path(path: str) -> None:
+    """Refuse a category or account at a path in the system subtree."""
+    if in_system_subtree(path):
+        raise LedgerError(
+            f"{path} is under {SYSTEM_ROOT}, which holds Purser's system accounts "
+            f"({SECURITIES_PATH}, the other side of a securities trade's cash); put the "
+            "category or account elsewhere"
+        )
+
+
+def is_system_account(account: Account) -> bool:
+    return account.is_virtual and account.type in SYSTEM_TYPES
+
+
+def is_category(account: Account) -> bool:
+    return account.is_virtual and account.type in CATEGORY_TYPES
+
+
+def has_system_leg(postings: "Iterable[Posting]") -> bool:
+    """A securities trade's cash row: a leg on a system account. Such a row
+    moves only with its trade, so the matcher, the transfer pool, rules and
+    schedule detection all leave it alone (decision 103)."""
+    return any(p.account is not None and is_system_account(p.account) for p in postings)
+
+
+def _system_leg_rows() -> Any:
+    """The ids of the rows with a leg on a system account: the cash of a
+    securities trade, Purser's own or a linked one, and the reversals in
+    their correction chains."""
+    return (
+        select(Posting.transaction_id.label("id"))
+        .join(Account, Account.id == Posting.account_id)
+        .where(Account.is_virtual.is_(True), Account.type.in_(SYSTEM_TYPES))
+    )
+
+
+def trade_cash_lineage_ids() -> CompoundSelect[uuid.UUID]:
+    """The ids of every row a securities trade's cash claims (decision 103): a
+    row with a leg on a system account, and every row of a correction chain
+    whose LIVE HEAD has one — the bank row a trade linked as its cash and the
+    reversal between them. Such rows move only with their trade, so no
+    merge, absorb, match, schedule detection or feed purge may take one.
+
+    A chain whose head no longer carries the system leg (the trade was
+    reversed and the bank row got its category back) is free again: only
+    the rows that themselves carry the leg stay claimed.
+
+    One recursive walk from the system-leg heads back through
+    ``reverses_id``; the set is as small as the trades are few. The transfer
+    pool that pools live chain heads (#386) needs only the head clause:
+    a head is claimed exactly when ``has_system_leg`` holds for it."""
+    system_rows = _system_leg_rows()
+    later = aliased(Transaction)
+    chain = (
+        select(Transaction.id.label("id"), Transaction.reverses_id.label("reverses_id"))
+        .where(
+            Transaction.id.in_(system_rows),
+            ~exists().where(later.reverses_id == Transaction.id),
+        )
+        .cte("trade_cash_chain", recursive=True)
+    )
+    earlier = aliased(Transaction)
+    chain = chain.union_all(
+        select(earlier.id, earlier.reverses_id).where(earlier.id == chain.c.reverses_id)
+    )
+    return select(chain.c.id).union(system_rows)
+
+
+def trade_cash_lineage_set(session: Session) -> set[uuid.UUID]:
+    """``trade_cash_lineage_ids`` read once, for a caller that filters many
+    rows in Python (the transfer pool)."""
+    return set(session.execute(trade_cash_lineage_ids()).scalars())
+
+
+def is_trade_cash_lineage(session: Session, tx: Transaction) -> bool:
+    """Whether a securities trade's cash claims ``tx`` (see
+    ``trade_cash_lineage_ids``): it carries a system leg, or the live head
+    of its correction chain does. Walks forward through ``reverses_id``; an
+    uncorrected row costs one lookup."""
+    if has_system_leg(tx.postings):
+        return True
+    head = tx
+    while True:
+        later = session.execute(
+            select(Transaction).where(Transaction.reverses_id == head.id)
+        ).scalar_one_or_none()
+        if later is None:
+            break
+        head = later
+    return head is not tx and has_system_leg(head.postings)
+
+
+def lock_transaction(
+    session: Session, tx_id: uuid.UUID, *, skip_locked: bool = False
+) -> Transaction:
+    """Lock a transaction row (FOR NO KEY UPDATE) and read it afresh, so the
+    trade-cash guards and the write that follows them act on one state: a
+    sale's link, a match, a transfer merge and a conversion of the same bank
+    row exclude each other instead of each passing its check before the
+    other commits. A posting's FK insert (KEY SHARE) is never blocked.
+
+    Explicit paths wait, then run their guard on the fresh row. An automatic
+    pass (``skip_locked``) never waits — it may already hold the balance
+    watermark, which a waiting writer needs next — and raises ``RowBusy`` for
+    a row another writer holds, or one a trade claimed after the pass read
+    its lineage set (it carries a system leg now, or a correction whose live
+    head does); it skips the row. The chain walk runs only for a corrected
+    row, so an uncorrected one costs nothing more."""
+    row = session.execute(
+        select(Transaction)
+        .where(Transaction.id == tx_id)
+        .with_for_update(key_share=True, skip_locked=skip_locked)
+        .execution_options(populate_existing=True)
+    ).scalar_one_or_none()
+    if row is None:
+        present = session.execute(select(exists().where(Transaction.id == tx_id))).scalar_one()
+        if skip_locked and present:
+            raise RowBusy(f"transaction {tx_id} is held by another writer")
+        raise NotFoundError(f"transaction {tx_id} not found")
+    if skip_locked:
+        corrected = session.execute(
+            select(exists().where(Transaction.reverses_id == tx_id))
+        ).scalar_one()
+        if has_system_leg(row.postings) or (corrected and is_trade_cash_lineage(session, row)):
+            raise RowBusy(f"transaction {tx_id} is a securities trade's cash")
+    return row
+
+
+def refuse_trade_cash_lineage(
+    session: Session, tx: Transaction, *, what: str, claimed: set[uuid.UUID] | None = None
+) -> None:
+    """Refuse a write that would part a trade's cash from its trade: merging
+    it into a transfer, converting it, settling a bill with it. ``what``
+    completes "so it cannot ...".
+
+    ``claimed`` is an automatic pass's ``trade_cash_lineage_set``, read once
+    for the whole pass: membership replaces the chain walk. Explicit paths
+    (match, confirm, convert) pass nothing and walk."""
+    found = tx.id in claimed if claimed is not None else is_trade_cash_lineage(session, tx)
+    if found:
+        raise LedgerError(
+            f"transaction {tx.id} is the cash of a securities trade (or the row a trade "
+            f"linked as its cash): it moves only with its trade, so it cannot {what}. "
+            "Reverse the trade's position event first if the trade is wrong"
+        )
+
+
+def refuse_system_account(account: Account) -> None:
+    """A user-supplied category must be a category: a system account (the
+    other side of a securities trade's cash) is refused, naming why."""
+    if is_system_account(account):
+        raise LedgerError(
+            f"{account.path} is a system account: securities trades book their cash to it, "
+            "never a category you choose"
+        )
+
+
+def securities_account(session: Session) -> Account:
+    """``equity.securities``, the account trade cash balances against.
+    Migration 0043 seeds it; if it is ever missing (a wiped test database, a
+    hand-deleted row) it is created again here, audited. The insert is
+    ``ON CONFLICT (path) DO NOTHING``: when two writers recreate it at once,
+    the one that loses reads the winner's row instead of failing on the
+    unique path."""
+    account = session.execute(
+        select(Account).where(Account.path == SECURITIES_PATH)
+    ).scalar_one_or_none()
+    created: uuid.UUID | None = None
+    if account is None:
+        created = session.execute(
+            pg_insert(Account)
+            .values(
+                name="Securities",
+                type="equity",
+                is_virtual=True,
+                path=SECURITIES_PATH,
+                description=(
+                    "System account: the other side of a securities trade's cash. Not a category."
+                ),
+            )
+            .on_conflict_do_nothing(index_elements=[Account.path])
+            .returning(Account.id)
+        ).scalar_one_or_none()
+        account = session.execute(
+            select(Account).where(Account.path == SECURITIES_PATH)
+        ).scalar_one()
+    if not is_system_account(account):
+        raise LedgerError(
+            f"{SECURITIES_PATH} is taken by a {account.type} account; trade cash needs "
+            "that path for the system securities account"
+        )
+    if created is not None:
+        audit.record(
+            session,
+            actor_token_id=None,
+            action="account.create",
+            entity_type="account",
+            entity_id=account.id,
+            after={"name": account.name, "type": account.type, "path": account.path},
+        )
+    return account
 
 
 def get_account(session: Session, account_id: uuid.UUID) -> Account:
@@ -120,6 +342,7 @@ def create_account(
             path = label
     else:
         check_path(path)
+    refuse_system_path(path)
     existing = session.execute(select(Account).where(Account.path == path)).scalar_one_or_none()
     if existing is not None:
         raise LedgerError(f"account path {path!r} already exists")
@@ -173,6 +396,7 @@ def update_category(
     account = get_account(session, category_id)
     if not account.is_virtual:
         raise LedgerError(f"{account.path} is not a category")
+    refuse_system_account(account)
     before = {"name": account.name, "description": account.description}
     if name is not None:
         account.name = name
@@ -206,6 +430,7 @@ def update_account(
     holdings_source: str | None = None,
     min_balance: Decimal | None = None,
     min_balance_set: bool = False,
+    feed_balance_is_cash: bool | None = None,
     path: str | None = None,
     actor_token_id: uuid.UUID | None,
 ) -> Account:
@@ -222,37 +447,64 @@ def update_account(
     ``holdings_source`` (§8, decision 88; None = unchanged) switches a
     brokerage account between feed and manual holdings, through
     ``holdings.service.switch_source``; what the switch did joins the audit
-    row. ``path`` moves the account and its subtree (``move_account``,
-    decision 72); None = unchanged. ``min_balance`` (§3.4, #466), the floor
-    the nightly forecast.shortfall scan checks, applies only when
-    ``min_balance_set`` (None clears it, like ``feed_start``) and passes
+    row. ``feed_balance_is_cash`` (§7.3, decision 103; None = unchanged) says
+    a manually tracked brokerage account's feed balance is its cash, which
+    puts it in the drift check (and lets it take a drift-basis pin); turning
+    it off clears such a pin. ``path`` moves the account and its subtree
+    (``move_account``, decision 72); None = unchanged. ``min_balance`` (§3.4,
+    #466), the floor the nightly forecast.shortfall scan checks, applies only
+    when ``min_balance_set`` (None clears it, like ``feed_start``) and passes
     ``check_min_balance``."""
     account = get_account(session, account_id)
+    if is_system_account(account):
+        raise LedgerError(
+            f"{account.path} is a system account, the other side of securities trades' cash; "
+            "Purser keeps it as it is"
+        )
     if account.is_virtual:
         raise LedgerError(f"{account.path} is a category; use PATCH /categories")
     if min_balance_set:
         check_min_balance(account.type, min_balance)
-    if holdings_source is not None:
+    if holdings_source is not None or feed_balance_is_cash is not None:
         # Function-local: purser.holdings imports the ledger package.
         from purser.holdings import projection as holdings_projection
 
-        if account.type != "brokerage":
+        if holdings_source is not None and account.type != "brokerage":
             raise LedgerError(
                 f"{account.path} is a {account.type} account; holdings_source applies only "
                 "to brokerage accounts"
             )
         # Lock before any change: the lock reads the row fresh, which would
-        # overwrite edits made to the object first.
+        # overwrite edits made to the object first. The cash opt-in is
+        # validated against holdings_source, so it reads that under the
+        # lock too: a switch to the feed committed meanwhile refuses it (422)
+        # instead of letting it hit the CHECK.
         account = holdings_projection.lock_account(session, account.id)
+    resulting_source = holdings_source or account.holdings_source
+    resulting_cash = (
+        feed_balance_is_cash if feed_balance_is_cash is not None else account.feed_balance_is_cash
+    )
+    if resulting_source != "manual":
+        # Switching back to the feed ends the opt-in (switch_source clears it).
+        resulting_cash = False
+    if feed_balance_is_cash and (account.type != "brokerage" or resulting_source != "manual"):
+        raise LedgerError(
+            f"{account.path}: feed_balance_is_cash applies only to a brokerage account "
+            "whose holdings are tracked by hand (holdings_source 'manual'); other "
+            "accounts' feed balances are already compared as cash, or are market value"
+        )
     if drift_basis_override_set:
         if drift_basis_override is not None and drift_basis_override not in drift.BASES:
             raise LedgerError(
                 f"drift_basis_override must be one of {', '.join(drift.BASES)} or null"
             )
-        if drift_basis_override is not None and account.type not in drift.ELIGIBLE_TYPES:
+        if drift_basis_override is not None and not drift.checked_type(
+            account.type, feed_balance_is_cash=resulting_cash
+        ):
             raise LedgerError(
                 f"{account.path} is a {account.type} account; the drift check (and its basis "
-                f"pin) runs only on {', '.join(sorted(drift.ELIGIBLE_TYPES))} accounts"
+                f"pin) runs only on {', '.join(sorted(drift.ELIGIBLE_TYPES))} accounts, and on "
+                "a brokerage account tracked by hand whose feed_balance_is_cash is on"
             )
     if path is not None:
         move_account(session, account_id=account.id, path=path, actor_token_id=actor_token_id)
@@ -265,6 +517,7 @@ def update_account(
         "drift_basis_override": account.drift_basis_override,
         "holdings_source": account.holdings_source,
         "min_balance": _money(account.min_balance),
+        "feed_balance_is_cash": account.feed_balance_is_cash,
     }
     if name is not None:
         account.name = name
@@ -290,6 +543,16 @@ def update_account(
         from purser.holdings import service as holdings_service
 
         switched = holdings_service.switch_source(session, account, holdings_source)
+    if feed_balance_is_cash is not None and account.holdings_source == "manual":
+        account.feed_balance_is_cash = feed_balance_is_cash
+        if (
+            not feed_balance_is_cash
+            and not drift_basis_override_set
+            and not drift.checked_type(account.type, feed_balance_is_cash=False)
+        ):
+            # Off the drift check, a basis pin has nothing to pin (decision 83).
+            account.drift_basis_override = None
+        session.flush()
     audit.record(
         session,
         actor_token_id=actor_token_id,
@@ -306,6 +569,7 @@ def update_account(
             "drift_basis_override": account.drift_basis_override,
             "holdings_source": account.holdings_source,
             "min_balance": _money(account.min_balance),
+            "feed_balance_is_cash": account.feed_balance_is_cash,
             **switched,
         },
     )
@@ -343,6 +607,7 @@ def move_account(
     old = account.path
     if new == old:
         return account
+    refuse_system_path(new)
     if new.startswith(old + "."):
         raise LedgerError(f"cannot move {old} under itself ({new})")
 
@@ -461,10 +726,13 @@ def _repoint_suggestion_drafts(
     *,
     actor_token_id: uuid.UUID | None,
 ) -> int:
-    """Open schedule suggestions carry their accounts as PATHS in the typed
-    draft accept applies (decision 57), so a move re-points them; otherwise
-    accepting one would miss the account — or find whatever later took its
-    old path. Decided suggestions are history and stay as they were."""
+    """Open suggestions carry their accounts as PATHS in the typed draft
+    (decision 57): a schedule's ``account``/``counterparty_account``, a
+    transfer link's and a transfer pair's ``from_account``/``to_account``
+    (#386 review). A move re-points them; otherwise accepting a schedule or
+    a transfer link would miss the account — or find whatever later took
+    its old path — and a card would show a path that no longer exists.
+    Decided suggestions are history and stay as they were."""
     repointed = 0
     rows = session.execute(
         select(Suggestion).where(
@@ -477,7 +745,11 @@ def _repoint_suggestion_drafts(
     ).scalars()
     for row in rows:
         draft = dict(row.draft)
-        before = {key: draft.get(key) for key in ("account", "counterparty_account")}
+        before: dict[str, Any] = {
+            key: draft.get(key)
+            for key in ("account", "counterparty_account", "from_account", "to_account")
+            if key in draft
+        }
         for key, value in before.items():
             if value in renames:
                 draft[key] = renames[value]
@@ -505,29 +777,37 @@ def ensure_category_path(
 ) -> Account:
     """Resolve a category ltree path, auto-creating any missing ancestors
     along the way (``income.*`` -> category_income, else category_expense).
-    Mirrors the QIF importer's category ensure (purser/qif_import.py)."""
+    Mirrors the QIF importer's category ensure (purser/qif_import.py). A
+    system account is never a category, so the system subtree (``equity``
+    and everything under it) is refused, found or not."""
+    check_path(path)
+    refuse_system_path(path)
     try:
-        return account_by_path(session, path)
+        found = account_by_path(session, path)
     except NotFoundError:
-        parts = path.split(".")
-        parent_id: uuid.UUID | None = None
-        account: Account | None = None
-        for depth in range(1, len(parts) + 1):
-            subpath = ".".join(parts[:depth])
-            try:
-                account = account_by_path(session, subpath)
-            except NotFoundError:
-                account = create_account(
-                    session,
-                    name=parts[depth - 1].replace("_", " ").title(),
-                    type_="category_income" if parts[0] == "income" else "category_expense",
-                    parent_id=parent_id,
-                    path=subpath,
-                    actor_token_id=actor_token_id,
-                )
-            parent_id = account.id
-        assert account is not None
-        return account
+        found = None
+    if found is not None:
+        refuse_system_account(found)
+        return found
+    parts = path.split(".")
+    parent_id: uuid.UUID | None = None
+    account: Account | None = None
+    for depth in range(1, len(parts) + 1):
+        subpath = ".".join(parts[:depth])
+        try:
+            account = account_by_path(session, subpath)
+        except NotFoundError:
+            account = create_account(
+                session,
+                name=parts[depth - 1].replace("_", " ").title(),
+                type_="category_income" if parts[0] == "income" else "category_expense",
+                parent_id=parent_id,
+                path=subpath,
+                actor_token_id=actor_token_id,
+            )
+        parent_id = account.id
+    assert account is not None
+    return account
 
 
 def _assert_accounts_open(session: Session, account_ids: set[uuid.UUID]) -> None:
@@ -559,6 +839,7 @@ def delete_category(
     account = get_account(session, category_id)
     if not account.is_virtual:
         raise LedgerError(f"{account.path} is not a category")
+    refuse_system_account(account)
     child = session.execute(
         select(Account.id).where(Account.parent_id == account.id).limit(1)
     ).scalar_one_or_none()

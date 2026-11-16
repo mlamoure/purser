@@ -1,27 +1,37 @@
 ---
 title: API-first design
-description: Why computation lives on the server, judgment lives in the client, and the web UI is only for administration.
+description: Mostly headless operation through your AI agent, with server-side calculations and an administrative UI.
 ---
 
-Purser is an agent's backend first and a web app second. MCP and REST are the
-primary interfaces; the admin SPA is a thin operator console over the *same*
-public API an agent uses. There are no private admin endpoints — which is exactly
-why an agent can do anything the UI can. The one deliberate exception is the
-page an agent's `present` link opens: it shows you rows in full and is for a
-signed-in person only.
+Purser is a privately hosted finance back-end designed for your personal AI
+agent. It is mostly headless: day-to-day work happens through the agent over
+MCP or REST. The web UI provides administrative controls and record inspection.
+Its operations use the public API and require the corresponding scopes;
+a normal agent token cannot manage tokens or configuration.
+
+Purser is an AI enablement engine. It stores records, performs financial
+calculations and supplies tools and context to an external agent. It is not
+an AI and requires no AI subscription. Optional model integrations are
+described below.
+
+An agent's `present` link opens selected records in full detail for a signed-in
+person, without including those records in the tool response.
 
 ## Computation server-side, judgment client-side
 
-The dividing line is deliberate. **Financial computation happens on the server; the agent normally
-provides interpretation and advice.** An agent should never page rows and sum them in
-context to answer "how much did I spend on dining this quarter?" — that is slow,
-expensive, and error-prone. Instead every aggregate question has a dedicated tool
-that computes the answer in one call: `spending_summary`, `net_worth`,
+Purser computes financial results; your agent interprets them. Aggregate tools
+return answers without requiring the agent to retrieve and sum transactions:
+`spending_summary`, `net_worth`,
 `balance_history`, `forecast_balance`, `list_recurring`, `list_unmatched`. The
 agent decides what to ask and how to narrate it; Purser does the arithmetic.
-Optional server-side AI categorization and review are exceptions to the default:
-they use the configured provider and documented review controls. The core works
-with AI disabled.
+
+## Optional model integrations
+
+Purser can call a separately configured model for categorization and transaction
+review. These integrations are off by default and use the provider, endpoint
+and credentials you supply. They can use a local or hosted model; any provider
+charges or subscription belong to that service. The finance engine works with
+these integrations disabled. See [Configuration](../../reference/configuration/).
 
 ## Token budgets
 
@@ -51,17 +61,17 @@ rebuilds results from their text blocks never loses a "nothing found" answer.
 
 ## Describe first
 
-Because the interface is the product, orientation is a single call. In every
-fresh session an agent calls [`describe`](../../how-to/connect-an-agent/) first: one
-round-trip returns the data model, amount conventions, the caller's token scopes,
+In every fresh session an agent calls
+[`describe`](../../how-to/connect-an-agent/) first. One call returns the data model, amount conventions, the caller's token scopes,
 the category tree, and the account list. The same guide is served unauthenticated
 at `GET /llms.txt`, and the [`search_docs`](../../reference/mcp-tools/) tool answers
 questions about operating Purser from this documentation.
 
 ## Why the UI is admin-only
 
-The SPA provides account registers, schedules, positions, and an embedded
-forecast chart alongside setup, tokens, feed mapping, and review controls.
+The web UI covers setup, connections, settings, tokens and auditing. It also
+provides account registers, schedules, positions and a forecast chart for
+direct inspection. Your agent is the intended interface for day-to-day work.
 [Grafana](../../how-to/grafana/) supplies broader dashboards over the stable read
 schema. Both use the same underlying financial data and public interfaces.
 

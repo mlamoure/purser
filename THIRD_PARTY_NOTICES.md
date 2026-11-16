@@ -18,9 +18,9 @@ HTML comment.
 
 | Licence | Components |
 | --- | --- |
-| MIT | 81 |
-| BSD-3-Clause | 17 |
-| Apache-2.0 | 13 |
+| MIT | 74 |
+| BSD-3-Clause | 16 |
+| Apache-2.0 | 14 |
 | ISC | 5 |
 | LGPL-3.0-only | 2 |
 | MIT OR Apache-2.0 | 2 |
@@ -60,95 +60,88 @@ Native code bundled inside these wheels:
 | Package | Version | Licence | Source |
 | --- | --- | --- | --- |
 | aiofile | 3.12.3 | Apache-2.0 | https://github.com/mosquito/aiofile |
-| alembic | 1.20.0 | MIT | https://github.com/sqlalchemy/alembic/ |
+| alembic | 1.20.1 | MIT | https://github.com/sqlalchemy/alembic/ |
 | annotated-doc | 0.0.5 | MIT | https://github.com/fastapi/annotated-doc |
 | annotated-types | 0.8.0 | MIT | https://github.com/annotated-types/annotated-types |
-| anyio | 4.15.1 | MIT | https://github.com/agronholm/anyio |
+| anyio | 4.16.0 | MIT | https://github.com/agronholm/anyio |
 | apscheduler | 3.11.3 | MIT | https://github.com/agronholm/apscheduler |
 | argon2-cffi | 25.1.0 | MIT | https://github.com/hynek/argon2-cffi |
 | argon2-cffi-bindings | 26.1.0 | MIT | https://github.com/hynek/argon2-cffi-bindings |
 | attrs | 26.1.0 | MIT | https://github.com/python-attrs/attrs |
-| authlib | 1.9.1 | BSD-3-Clause | https://github.com/authlib/authlib |
+| authlib | 1.9.2 | BSD-3-Clause | https://github.com/authlib/authlib |
 | beartype | 0.23.1 | MIT | https://github.com/beartype/beartype |
-| cachetools | 7.2.3 | MIT | https://github.com/tkem/cachetools/ |
-| caio | 0.12.9 | Apache-2.0 | https://github.com/mosquito/caio/ |
-| certifi | 2026.10.19 | MPL-2.0 | https://github.com/certifi/python-certifi |
+| cachetools | 7.2.8 | MIT | https://github.com/tkem/cachetools/ |
+| caio | 0.12.10 | Apache-2.0 | https://github.com/mosquito/caio/ |
+| certifi | 2026.10.23 | MPL-2.0 | https://github.com/certifi/python-certifi |
 | cffi | 2.1.1 | MIT-0 | https://github.com/python-cffi/cffi |
 | click | 8.5.0 | BSD-3-Clause | https://github.com/pallets/click/ |
 | cryptography | 50.0.2 | Apache-2.0 OR BSD-3-Clause | https://github.com/pyca/cryptography/ |
-| cyclopts | 5.2.0 | Apache-2.0 | https://github.com/BrianPugh/cyclopts |
-| dnspython | 2.9.0 | ISC | https://github.com/rthalley/dnspython |
+| cyclopts | 5.3.3 | Apache-2.0 | https://github.com/BrianPugh/cyclopts |
+| dnspython | 2.9.2 | ISC | https://github.com/rthalley/dnspython |
 | docstring-parser | 0.18.0 | MIT | https://github.com/rr-/docstring_parser |
 | email-validator | 2.3.0 | Unlicense | https://github.com/JoshData/python-email-validator |
 | exceptiongroup | 1.3.1 | MIT | https://github.com/agronholm/exceptiongroup |
-| fastapi | 0.146.0 | MIT | https://github.com/fastapi/fastapi |
-| fastmcp | 4.1.3 | Apache-2.0 | https://github.com/PrefectHQ/fastmcp |
-| fastmcp-slim | 4.1.3 | Apache-2.0 | https://github.com/PrefectHQ/fastmcp |
-| griffelib | 2.3.2 | ISC | https://pypi.org/project/griffelib/ |
+| fastapi | 0.162.0 | MIT | https://github.com/fastapi/fastapi |
+| fastmcp | 4.1.5 | Apache-2.0 | https://github.com/PrefectHQ/fastmcp |
+| fastmcp-slim | 4.1.5 | Apache-2.0 | https://github.com/PrefectHQ/fastmcp |
+| griffelib | 2.4.1 | ISC | https://github.com/mkdocstrings/griffe |
 | h11 | 0.16.0 | MIT | https://github.com/python-hyper/h11 |
 | httpcore | 1.0.9 | BSD-3-Clause | https://github.com/encode/httpcore |
-| httpcore2 | 2.14.0 | BSD-3-Clause | https://github.com/pydantic/httpx2/blob/main/src/httpcore2 |
+| httpcore2 | 2.16.0 | BSD-3-Clause | https://github.com/pydantic/httpx2/blob/main/src/httpcore2 |
 | httptools | 0.9.0 | MIT | https://github.com/MagicStack/httptools |
 | httpx | 0.28.1 | BSD-3-Clause | https://github.com/encode/httpx |
-| httpx2 | 2.14.0 | BSD-3-Clause | https://github.com/pydantic/httpx2 |
+| httpx2 | 2.16.0 | BSD-3-Clause | https://github.com/pydantic/httpx2 |
 | idna | 3.20 | BSD-3-Clause | https://github.com/kjd/idna |
-| jaraco-classes | 3.4.0 | MIT | https://github.com/jaraco/jaraco.classes |
-| jaraco-context | 6.1.2 | MIT | https://github.com/jaraco/jaraco.context |
-| jaraco-functools | 4.6.0 | MIT | https://github.com/jaraco/jaraco.functools |
-| jeepney | 0.9.0 | MIT | https://gitlab.com/takluyver/jeepney |
 | joserfc | 1.7.7 | BSD-3-Clause | https://github.com/authlib/joserfc |
 | jsonref | 1.1.0 | MIT | https://github.com/gazpachoking/jsonref |
 | jsonschema | 4.26.0 | MIT | https://github.com/python-jsonschema/jsonschema |
 | jsonschema-path | 0.5.0 | Apache-2.0 | https://github.com/p1c2u/jsonschema-path |
 | jsonschema-specifications | 2025.9.1 | MIT | https://github.com/python-jsonschema/jsonschema-specifications |
-| keyring | 25.7.0 | MIT | https://github.com/jaraco/keyring |
 | mako | 1.4.3 | MIT | https://www.makotemplates.org/ |
 | markdown-it-py | 4.2.0 | MIT | https://github.com/executablebooks/markdown-it-py |
 | markupsafe | 3.0.4 | BSD-3-Clause | https://github.com/pallets/markupsafe/ |
 | mcp | 2.3.0 | MIT | https://github.com/modelcontextprotocol/python-sdk |
 | mcp-types | 2.3.0 | MIT | https://github.com/modelcontextprotocol/python-sdk |
 | mdurl | 0.1.2 | MIT | https://github.com/executablebooks/mdurl |
-| more-itertools | 11.2.1 | MIT | https://github.com/more-itertools/more-itertools |
 | openapi-pydantic | 0.6.0 | MIT | https://github.com/mike-oakley/openapi-pydantic |
-| opentelemetry-api | 1.45.1 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python |
+| opentelemetry-api | 1.45.2 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python |
 | packaging | 26.3 | Apache-2.0 OR BSD-2-Clause | https://github.com/pypa/packaging |
 | pathable | 0.6.0 | Apache-2.0 | https://github.com/p1c2u/pathable |
-| platformdirs | 4.13.5 | MIT | https://github.com/tox-dev/platformdirs |
+| platformdirs | 4.14.3 | MIT | https://github.com/tox-dev/platformdirs |
 | psycopg | 3.3.6 | LGPL-3.0-only | https://github.com/psycopg/psycopg |
 | psycopg-binary | 3.3.6 | LGPL-3.0-only | https://github.com/psycopg/psycopg |
 | py-key-value-aio | 0.4.6 | Apache-2.0 | https://pypi.org/project/py-key-value-aio/ |
-| pycparser | 3.11 | BSD-3-Clause | https://github.com/eliben/pycparser |
-| pydantic | 2.14.1 | MIT | https://github.com/pydantic/pydantic |
-| pydantic-core | 2.50.1 | MIT | https://github.com/pydantic/pydantic/tree/main/pydantic-core |
-| pydantic-settings | 2.16.0 | MIT | https://github.com/pydantic/pydantic-settings |
+| pycparser | 3.12 | BSD-3-Clause | https://github.com/eliben/pycparser |
+| pydantic | 2.14.2 | MIT | https://github.com/pydantic/pydantic |
+| pydantic-core | 2.50.2 | MIT | https://github.com/pydantic/pydantic/tree/main/pydantic-core |
+| pydantic-settings | 2.16.2 | MIT | https://github.com/pydantic/pydantic-settings |
 | pygments | 2.21.0 | BSD-2-Clause | https://github.com/pygments/pygments |
 | pyjwt | 2.15.1 | MIT | https://github.com/jpadilla/pyjwt |
 | pyperclip | 1.11.0 | BSD-3-Clause | https://github.com/asweigart/pyperclip |
-| python-dateutil | 2.9.0.post0 | Apache-2.0 AND BSD-3-Clause | https://github.com/dateutil/dateutil |
+| python-dateutil | 4.0.0 | Apache-2.0 AND BSD-3-Clause | https://github.com/dateutil/dateutil |
 | python-dotenv | 1.2.4 | BSD-3-Clause | https://github.com/theskumar/python-dotenv |
-| python-multipart | 0.0.32 | Apache-2.0 | https://github.com/Kludex/python-multipart |
+| python-multipart | 0.0.33 | Apache-2.0 | https://github.com/Kludex/python-multipart |
 | pyyaml | 6.0.3 | MIT | https://github.com/yaml/pyyaml |
 | referencing | 0.37.0 | MIT | https://github.com/python-jsonschema/referencing |
 | rich | 15.0.0 | MIT | https://github.com/Textualize/rich |
 | rich-rst | 2.2.0 | MIT | https://github.com/wasi-master/rich-rst |
 | rpds-py | 2026.9.1 | MIT | https://github.com/crate-py/rpds |
-| secretstorage | 3.5.0 | BSD-3-Clause | https://github.com/mitya57/secretstorage |
 | shellingham | 1.5.4 | ISC | https://github.com/sarugaku/shellingham |
-| six | 1.17.0 | MIT | https://github.com/benjaminp/six |
-| sqlalchemy | 2.1.5 | MIT | https://github.com/sqlalchemy/sqlalchemy |
-| sse-starlette | 3.5.0 | BSD-3-Clause | https://github.com/sysid/sse-starlette |
-| starlette | 1.9.0 | BSD-3-Clause | https://github.com/Kludex/starlette |
+| sqlalchemy | 2.1.6 | MIT | https://github.com/sqlalchemy/sqlalchemy |
+| sse-starlette | 3.6.0 | BSD-3-Clause | https://github.com/sysid/sse-starlette |
+| starlette | 1.10.0 | BSD-3-Clause | https://github.com/Kludex/starlette |
 | structlog | 26.1.0 | MIT OR Apache-2.0 | https://github.com/hynek/structlog |
 | truststore | 0.10.5 | MIT | https://github.com/sethmlarson/truststore |
 | typer | 0.27.3 | MIT | https://github.com/fastapi/typer |
 | typing-extensions | 4.16.0 | PSF-2.0 | https://github.com/python/typing_extensions |
 | typing-inspection | 0.4.4 | MIT | https://github.com/pydantic/typing-inspection |
-| tzlocal | 5.4.4 | MIT | https://github.com/regebro/tzlocal |
+| tzdata | 2026.6 | Apache-2.0 | https://github.com/python/tzdata |
+| tzlocal | 5.4.5 | MIT | https://github.com/regebro/tzlocal |
 | uncalled-for | 0.4.1 | MIT | https://github.com/chrisguidry/uncalled-for |
 | uvicorn | 0.54.0 | BSD-3-Clause | https://github.com/Kludex/uvicorn |
 | uvloop | 0.23.0 | MIT OR Apache-2.0 | https://github.com/MagicStack/uvloop |
 | watchfiles | 1.3.0 | MIT | https://github.com/samuelcolvin/watchfiles |
-| websockets | 17.2 | BSD-3-Clause | https://github.com/python-websockets/websockets |
+| websockets | 17.4 | BSD-3-Clause | https://github.com/python-websockets/websockets |
 
 ## Web UI and MCP Apps widget bundles
 
@@ -161,12 +154,12 @@ because the lockfile marks them as production dependencies.
 
 | Package | Version | Licence | Source |
 | --- | --- | --- | --- |
-| @modelcontextprotocol/client | 2.3.1 | Apache-2.0 | https://github.com/modelcontextprotocol/typescript-sdk |
-| @modelcontextprotocol/core | 2.3.1 | Apache-2.0 | https://github.com/modelcontextprotocol/typescript-sdk |
-| @modelcontextprotocol/ext-apps | 2.0.3 | MIT | https://github.com/modelcontextprotocol/ext-apps |
+| @modelcontextprotocol/client | 2.4.0 | Apache-2.0 | https://github.com/modelcontextprotocol/typescript-sdk |
+| @modelcontextprotocol/core | 2.4.0 | Apache-2.0 | https://github.com/modelcontextprotocol/typescript-sdk |
+| @modelcontextprotocol/ext-apps | 2.0.4 | MIT | https://github.com/modelcontextprotocol/ext-apps |
 | @standard-schema/spec | 1.1.0 | MIT | https://github.com/standard-schema/standard-schema |
-| @tanstack/query-core | 5.104.4 | MIT | https://github.com/TanStack/query |
-| @tanstack/react-query | 5.104.4 | MIT | https://github.com/TanStack/query |
+| @tanstack/query-core | 5.105.3 | MIT | https://github.com/TanStack/query |
+| @tanstack/react-query | 5.105.3 | MIT | https://github.com/TanStack/query |
 | class-variance-authority | 0.7.1 | Apache-2.0 | https://github.com/joe-bell/cva |
 | clsx | 2.1.1 | MIT | https://github.com/lukeed/clsx |
 | cookie | 1.1.1 | MIT | https://github.com/jshttp/cookie |
@@ -174,21 +167,21 @@ because the lockfile marks them as production dependencies.
 | eventsource | 3.0.7 | MIT | https://github.com/EventSource/eventsource |
 | eventsource-parser | 3.1.1 | MIT | https://github.com/rexxars/eventsource-parser |
 | isexe | 2.0.0 | ISC | https://github.com/isaacs/isexe |
-| jose | 6.2.12 | MIT | https://github.com/panva/jose |
+| jose | 6.2.15 | MIT | https://github.com/panva/jose |
 | openapi-fetch | 0.17.0 | MIT | https://github.com/openapi-ts/openapi-typescript |
 | openapi-typescript-helpers | 0.1.0 | MIT | https://github.com/openapi-ts/openapi-typescript |
 | path-key | 3.1.1 | MIT | https://github.com/sindresorhus/path-key |
 | pkce-challenge | 5.0.1 | MIT | https://github.com/crouchcd/pkce-challenge |
 | react | 19.3.1 | MIT | https://github.com/react/react |
 | react-dom | 19.3.1 | MIT | https://github.com/react/react |
-| react-router | 7.18.4 | MIT | https://github.com/remix-run/react-router |
-| react-router-dom | 7.18.4 | MIT | https://github.com/remix-run/react-router |
+| react-router | 7.18.5 | MIT | https://github.com/remix-run/react-router |
+| react-router-dom | 7.18.5 | MIT | https://github.com/remix-run/react-router |
 | scheduler | 0.28.0 | MIT | https://github.com/react/react |
-| set-cookie-parser | 2.7.2 | MIT | https://github.com/nfriedly/set-cookie-parser |
+| set-cookie-parser | 2.7.3 | MIT | https://github.com/nfriedly/set-cookie-parser |
 | shebang-command | 2.0.0 | MIT | https://github.com/kevva/shebang-command |
 | shebang-regex | 3.0.0 | MIT | https://github.com/sindresorhus/shebang-regex |
 | tailwind-merge | 3.7.0 | MIT | https://github.com/dcastil/tailwind-merge |
-| tailwindcss | 4.3.3 | MIT | https://github.com/tailwindlabs/tailwindcss |
+| tailwindcss | 4.3.4 | MIT | https://github.com/tailwindlabs/tailwindcss |
 | which | 2.0.2 | ISC | https://github.com/isaacs/node-which |
 | zod | 4.6.7 | MIT | https://github.com/colinhacks/zod |
 
@@ -199,14 +192,14 @@ Client-side code emitted into the static docs site (`docs/dist`). The rest of
 
 | Package | Version | Licence | Source |
 | --- | --- | --- | --- |
-| @astrojs/starlight | 0.42.6 | MIT | https://github.com/withastro/starlight |
+| @astrojs/starlight | 0.43.1 | MIT | https://github.com/withastro/starlight |
 | @expressive-code/core | 0.44.3 | MIT | https://github.com/expressive-code/expressive-code |
-| @expressive-code/plugin-frames | 0.44.2 | MIT | https://github.com/expressive-code/expressive-code |
-| @expressive-code/plugin-text-markers | 0.44.2 | MIT | https://github.com/expressive-code/expressive-code |
-| @pagefind/default-ui | 1.5.2 | MIT | https://github.com/Pagefind/pagefind |
-| astro | 7.4.0 | MIT | https://github.com/withastro/astro |
-| astro-expressive-code | 0.44.2 | MIT | https://github.com/expressive-code/expressive-code |
-| pagefind | 1.5.2 | MIT | https://github.com/Pagefind/pagefind |
+| @expressive-code/plugin-frames | 0.44.3 | MIT | https://github.com/expressive-code/expressive-code |
+| @expressive-code/plugin-text-markers | 0.44.3 | MIT | https://github.com/expressive-code/expressive-code |
+| @pagefind/default-ui | 1.6.0 | MIT | https://github.com/Pagefind/pagefind |
+| astro | 7.4.12 | MIT | https://github.com/withastro/astro |
+| astro-expressive-code | 0.44.3 | MIT | https://github.com/expressive-code/expressive-code |
+| pagefind | 1.6.0 | MIT | https://github.com/Pagefind/pagefind |
 
 ## Container base image
 
@@ -239,11 +232,11 @@ descriptions are not Plaid's: Purser wrote its own, for its classifier.
 ## Licence and notice texts
 
 These packages publish no licence file in the artifact Purser installs:
-@pagefind/default-ui 1.5.2, dnspython 2.9.0, fastmcp-slim 4.1.3. Their licence
-is the one in the tables above; the full text with its copyright lines is in the
-upstream source repository linked there.
+@pagefind/default-ui 1.6.0, fastmcp-slim 4.1.5. Their licence is the one in the
+tables above; the full text with its copyright lines is in the upstream source
+repository linked there.
 
-### @astrojs/starlight 0.42.6 (LICENSE)
+### @astrojs/starlight 0.43.1 (LICENSE)
 
 ```text
 MIT License
@@ -271,7 +264,7 @@ SOFTWARE.
 
 ### @expressive-code/core 0.44.3 (LICENSE)
 
-Also: @expressive-code/plugin-frames 0.44.2 (LICENSE); @expressive-code/plugin-text-markers 0.44.2 (LICENSE); astro-expressive-code 0.44.2 (LICENSE).
+Also: @expressive-code/plugin-frames 0.44.3 (LICENSE); @expressive-code/plugin-text-markers 0.44.3 (LICENSE); astro-expressive-code 0.44.3 (LICENSE).
 
 ```text
 MIT License
@@ -297,9 +290,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### @modelcontextprotocol/client 2.3.1 (LICENSE)
+### @modelcontextprotocol/client 2.4.0 (LICENSE)
 
-Also: @modelcontextprotocol/core 2.3.1 (LICENSE); @modelcontextprotocol/ext-apps 2.0.3 (LICENSE).
+Also: @modelcontextprotocol/core 2.4.0 (LICENSE); @modelcontextprotocol/ext-apps 2.0.4 (LICENSE).
 
 ```text
 The MCP project is undergoing a licensing transition from the MIT License to the Apache License, Version 2.0 ("Apache-2.0"). All new code and specification contributions to the project are licensed under Apache-2.0. Documentation contributions (excluding specifications) are licensed under CC-BY-4.0.
@@ -546,9 +539,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### @tanstack/query-core 5.104.4 (LICENSE)
+### @tanstack/query-core 5.105.3 (LICENSE)
 
-Also: @tanstack/react-query 5.104.4 (LICENSE).
+Also: @tanstack/react-query 5.105.3 (LICENSE).
 
 ```text
 MIT License
@@ -775,7 +768,7 @@ third-party archives.
     limitations under the License.
 ```
 
-### alembic 1.20.0 (LICENSE)
+### alembic 1.20.1 (LICENSE)
 
 ```text
 Copyright 2009-2026 Michael Bayer.
@@ -851,7 +844,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### anyio 4.15.1 (LICENSE)
+### anyio 4.16.0 (LICENSE)
 
 ```text
 The MIT License (MIT)
@@ -952,7 +945,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### astro 7.4.0 (LICENSE)
+### astro 7.4.12 (LICENSE)
 
 ```text
 MIT License
@@ -1042,7 +1035,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### authlib 1.9.1 (LICENSE)
+### authlib 1.9.2 (LICENSE)
 
 ```text
 BSD 3-Clause License
@@ -1102,7 +1095,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### cachetools 7.2.3 (LICENSE)
+### cachetools 7.2.8 (LICENSE)
 
 ```text
 The MIT License (MIT)
@@ -1127,7 +1120,7 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
-### caio 0.12.9 (COPYING)
+### caio 0.12.10 (COPYING)
 
 ```text
                                  Apache License
@@ -1333,7 +1326,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
    limitations under the License.
 ```
 
-### certifi 2026.10.19 (LICENSE)
+### certifi 2026.10.23 (LICENSE)
 
 ```text
 This package contains a modified version of ca-bundle.crt:
@@ -1928,7 +1921,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### cyclopts 5.2.0 (LICENSE)
+### cyclopts 5.3.3 (LICENSE)
 
 ```text
                                  Apache License
@@ -2134,6 +2127,46 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
    limitations under the License.
 ```
 
+### dnspython 2.9.2 (LICENSE)
+
+```text
+ISC License
+
+Copyright (C) Dnspython Contributors
+
+Permission to use, copy, modify, and/or distribute this software for
+any purpose with or without fee is hereby granted, provided that the
+above copyright notice and this permission notice appear in all
+copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL
+WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE
+AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL
+DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR
+PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER
+TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.
+
+
+
+Copyright (C) 2001-2017 Nominum, Inc.
+Copyright (C) Google Inc.
+
+Permission to use, copy, modify, and distribute this software and its
+documentation for any purpose with or without fee is hereby granted,
+provided that the above copyright notice and this permission notice
+appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND NOMINUM DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL NOMINUM BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
+OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+```
+
 ### docstring-parser 0.18.0 (LICENSE.md)
 
 ```text
@@ -2323,7 +2356,7 @@ agrees to be bound by the terms and conditions of this License
 Agreement.
 ```
 
-### fastapi 0.146.0 (LICENSE)
+### fastapi 0.162.0 (LICENSE)
 
 ```text
 The MIT License (MIT)
@@ -2349,9 +2382,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### fastmcp 4.1.3 (LICENSE)
+### fastmcp 4.1.5 (LICENSE)
 
-Also: jsonschema-path 0.5.0 (LICENSE); opentelemetry-api 1.45.1 (LICENSE); pathable 0.6.0 (LICENSE); python-multipart 0.0.32 (LICENSE.txt).
+Also: jsonschema-path 0.5.0 (LICENSE); opentelemetry-api 1.45.2 (LICENSE); pathable 0.6.0 (LICENSE); python-multipart 0.0.33 (LICENSE.txt); tzdata 2026.6 (LICENSE_APACHE).
 
 ```text
                                  Apache License
@@ -2557,7 +2590,7 @@ Also: jsonschema-path 0.5.0 (LICENSE); opentelemetry-api 1.45.1 (LICENSE); patha
    limitations under the License.
 ```
 
-### griffelib 2.3.2 (LICENSE)
+### griffelib 2.4.1 (LICENSE)
 
 ```text
 ISC License
@@ -2636,7 +2669,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### httpcore2 2.14.0 (LICENSE.md)
+### httpcore2 2.16.0 (LICENSE.md)
 
 ```text
 Copyright © 2026 to present Pydantic Services Inc. and individual contributors.
@@ -2763,7 +2796,7 @@ Redistribution and use in source and binary forms, with or without modification,
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### httpx2 2.14.0 (LICENSE.md)
+### httpx2 2.16.0 (LICENSE.md)
 
 ```text
 Copyright © 2026 to present Pydantic Services Inc. and individual contributors.
@@ -2839,80 +2872,7 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR
 IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
-### jaraco-classes 3.4.0 (LICENSE)
-
-```text
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to
-deal in the Software without restriction, including without limitation the
-rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
-sell copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
-IN THE SOFTWARE.
-```
-
-### jaraco-context 6.1.2 (LICENSE)
-
-Also: jaraco-functools 4.6.0 (LICENSE).
-
-```text
-MIT License
-
-Copyright (c) 2026 <copyright holders>
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
-associated documentation files (the "Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
-following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial
-portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
-LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
-EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
-IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
-USE OR OTHER DEALINGS IN THE SOFTWARE.
-```
-
-### jeepney 0.9.0 (LICENSE)
-
-```text
-The MIT License (MIT)
-
-Copyright (c) 2017 Thomas Kluyver
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-```
-
-### jose 6.2.12 (LICENSE.md)
+### jose 6.2.15 (LICENSE.md)
 
 ```text
 The MIT License (MIT)
@@ -3045,29 +3005,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
-```
-
-### keyring 25.7.0 (LICENSE)
-
-```text
-MIT License
-
-Copyright (c) 2025 <copyright holders>
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
-associated documentation files (the "Software"), to deal in the Software without restriction, including
-without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
-following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial
-portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
-LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
-EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
-IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
-USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 ### mako 1.4.3 (LICENSE)
@@ -3257,30 +3194,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 IN THE SOFTWARE.
-```
-
-### more-itertools 11.2.1 (LICENSE)
-
-```text
-Copyright (c) 2012 Erik Rose
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
-of the Software, and to permit persons to whom the Software is furnished to do
-so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
 ```
 
 ### openapi-fetch 0.17.0 (LICENSE)
@@ -3576,7 +3489,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### pagefind 1.5.2 (LICENSE/LICENSE)
+### pagefind 1.6.0 (LICENSE/LICENSE)
 
 ```text
 pagefind
@@ -3597,7 +3510,7 @@ Includes other software related under the MIT license:
 - vscode-ripgrep, Copyright Microsoft Corporation. For licensing see /LICENSE/LICENSE-vscode-ripgrep
 ```
 
-### pagefind 1.5.2 (LICENSE/LICENSE-vscode-ripgrep)
+### pagefind 1.6.0 (LICENSE/LICENSE-vscode-ripgrep)
 
 ```text
 vscode-ripgrep
@@ -3657,7 +3570,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### platformdirs 4.13.5 (LICENSE)
+### platformdirs 4.14.3 (LICENSE)
 
 ```text
 MIT License
@@ -4061,7 +3974,7 @@ Library.
    limitations under the License.
 ```
 
-### pycparser 3.11 (LICENSE)
+### pycparser 3.12 (LICENSE)
 
 ```text
 pycparser -- A C parser in Python
@@ -4093,7 +4006,7 @@ LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### pydantic 2.14.1 (LICENSE)
+### pydantic 2.14.2 (LICENSE)
 
 ```text
 The MIT License (MIT)
@@ -4119,7 +4032,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### pydantic-core 2.50.1 (LICENSE)
+### pydantic-core 2.50.2 (LICENSE)
 
 ```text
 The MIT License (MIT)
@@ -4145,7 +4058,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### pydantic-settings 2.16.0 (LICENSE)
+### pydantic-settings 2.16.2 (LICENSE)
 
 ```text
 The MIT License (MIT)
@@ -4634,7 +4547,154 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### python-dateutil 2.9.0.post0 (LICENSE)
+### python-dateutil 4.0.0 (AUTHORS.md)
+
+```text
+This is a (possibly incomplete) list of all the contributors to python-dateutil,
+initially generated from the git author metadata. The details of their specific
+contributions can be found in the git history.
+
+Prior to 2017-12-01, the library was licensed solely under the BSD 3-clause
+license, all contributions on or after 2017-12-01 are dual-licensed between
+Apache 2.0 and BSD 3-clause. In the list below, anyone whose name is marked with
+**R** has agreed to re-license their previously submitted code under Apache 2.0.
+Anyone whose name is marked with a **D** has only made contributions since the
+switch, and thus all their contributions are dual-licensed.
+
+## Contributors (alphabetical order)
+
+- Aarni Koskela <akx@iki.fi> **D**
+- Adam Chainz <adam@MASKED>
+- Adrien Cossa <cossa@MASKED>
+- Alec Nikolas Reiter <alecreiter@MASKED>
+- Alec Reiter <areiter@MASKED>
+- Aleksei Strizhak <alexei.mifrill.strizhak@MASKED> (gh: @Mifrill)
+- Alex Chamberlain (gh: @alexchamberlain) **D**
+- Alex Verdyan <verdyan@MASKED>
+- Alex Willmer <alex@moreati.org.uk> (gh: @moreati) **R**
+- Alexander Brugh <alexander.brugh@MASKED> (gh: @abrugh)
+- Alexander Shadchin <alexandr.shadchin@gmail.com> (gh: @shadchin) **D**
+- Alistair McMaster <alistair@MASKED> (gh: @alimcmaster1 ) **D**
+- Allison Quinlan <aquinlan82@gmail.com> (gh: @aquinlan) **D**
+- Andrew Bennett (gh: @andrewcbennett) **D**
+- Andrew Murray <radarhere@MASKED>
+- Arclight <arclight@MASKED> (gh: @arclightslavik)
+- Aritro Nandi <gurgenz221@gmail.com> (gh: @gurgenz221) **D**
+- Bernat Gabor <bgabor8@bloomberg.net> (gh: @gaborbernat) **D**
+- Bradlee Speice <bradlee@speice.io> (gh: @bspeice) **D**
+- Brandon W Maister <quodlibetor@MASKED>
+- Brock Mendel <jbrockmendel@MASKED> (gh: @jbrockmendel) **R**
+- Brook Li (gh: @absreim) **D**
+- Carlos <carlosxl@MASKED>
+- Cheuk Ting Ho <cheukting.ho@gmail.com> (gh: @cheukting) **D**
+- Chris van den Berg (gh: bergvca) **D**
+- Christopher Cordero <ccordero@pm.me> (gh: cs-cordero) **D**
+- Christopher Corley <cscorley@MASKED>
+- Claudio Canepa <ccanepacc@MASKED>
+- Corey Girard <corey.r.girard@gmail.com> (gh: @coreygirard) **D**
+- Cosimo Lupo <cosimo@anthrotype.com> (gh: @anthrotype) **D**
+- Daniel Lemm (gh: @ffe4) **D**
+- Daniel Lepage <dplepage@MASKED>
+- David Lehrian <david@MASKED>
+- Dean Allsopp (gh: @daplantagenet) **D**
+- Dominik Kozaczko <dominik@MASKED>
+- Elliot Hughes <elliot.hughes@gmail.com> (gh: @ElliotJH) **D**
+- Elvis Pranskevichus <el@MASKED>
+- Fan Huang <fanhuang.scb@gmail.com>(gh: @fhuang5) **D**
+- Florian Rathgeber (gh: @kynan) **D**
+- Gabriel Bianconi <gabriel@MASKED> (gh: @GabrielBianconi) **D**
+- Gabriel Poesia <gabriel.poesia@MASKED>
+- Gökçen Nurlu <gnurlu1@bloomberg.net> (gh: @gokcennurlu) **D**
+- Grant Garrett-Grossman <grantlycee@gmail.com> (gh: @FakeNameSE) **D**
+- Gustavo Niemeyer <gustavo@niemeyer.net> (gh: @niemeyer)
+- Holger Joukl <holger.joukl@MASKED> (gh: @hjoukl)
+- Hugo van Kemenade (gh: @hugovk) **D**
+- Igor <mrigor83@MASKED>
+- Ionuț Ciocîrlan <jdxlark@MASKED>
+- Jacqueline Chen <jacqueline415@outlook.com> (gh: @jachen20) **D**
+- Jairo Llopis (gh: @yajo) **D**
+- Jake Chorley (gh: @jakec-github) **D**
+- Jakub Kulík (gh: @kulikjak) **D**
+- Jan Studený <jendas1@MASKED>
+- JAY (gh: @Jay1023CN) **D**
+- Jay Weisskopf <jay@jayschwa.net> (gh: @jayschwa) **D**
+- Jitesh <jitesh@MASKED>
+- John Purviance <jpurviance@MASKED> (gh @jpurviance) **D**
+- Jon Dufresne <jon.dufresne@MASKED> (gh: @jdufresne) **R**
+- Jonas Neubert <jonas@MASKED> (gh: @jonemo) **R**
+- Jordi Masip <jordi@MASKED> (gh: @masipcat)
+- Juan Arias <jdarias3@gmail.com> (gh: @jdarias3) **D**
+- Kevin Nguyen <kvn219@MASKED> **D**
+- Kirit Thadaka <kirit.thadaka@gmail.com> (gh: @kirit93) **D**
+- Kubilay Kocak <koobs@MASKED>
+- Laszlo Kiss Kollar <kiss.kollar.laszlo@MASKED> (gh: @lkollar) **D**
+- Lauren Oldja <oldja@MASKED> (gh: @loldja) **D**
+- Luca Ferocino <luca.ferox@MASKED> (gh: @lucaferocino) **D**
+- Mario Corchero <mcorcherojim@MASKED> (gh: @mariocj89) **R**
+- Mark Bailey <msb@MASKED> **D**
+- Mateusz Dziedzic (gh: @m-dz) **D**
+- Matt Cooper <vtbassmatt@MASKED> (gh: @vtbassmatt) **D**
+- Matthew Schinckel <matt@MASKED>
+- Max Shenfield <shenfieldmax@MASKED>
+- Maxime Lorant <maxime.lorant@MASKED>
+- Michael Aquilina <michaelaquilina@MASKED> (gh: @MichaelAquilina)
+- Michael J. Schultz <mjschultz@MASKED>
+- Michael Käufl (gh: @michael-k)
+- Mike Gilbert <floppym@MASKED>
+- Nicholas Herrriot <Nicholas.Herriot@gmail.com> **D**
+- Nicolas Évrard (gh: @nicoe) **D**
+- Nick Smith <nick.smith@MASKED>
+- Nor.na (gh: @Master-Norna) **D**
+- Orson Adams <orson.network@MASKED> (gh: @parsethis) **D**
+- Paul Brown (gh: @pawl) **D**
+- Paul Dickson (gh @prdickson) **D**
+- Paul Ganssle <paul@ganssle.io> (gh: @pganssle) **R**
+- Pascal van Kooten <kootenpv@MASKED> (gh: @kootenpv) **R**
+- Pavel Ponomarev <comrad.awsum@MASKED>
+- Peter Bieringer <pb@MASKED>
+- Pierre Gergondet <pierre.gergondet@MASKED> (gh: @gergondet) **D**
+- Quentin Pradet <quentin@MASKED>
+- Raymond Cha (gh: @weatherpattern) **D**
+- Ridhi Mahajan <ridhikmahajan@MASKED> **D**
+- Robin Henriksson Törnström <gh: @MrRawbin> **D**
+- Rowan Walsh (gh: @rowan-walsh) **D**
+- Roy Williams <rwilliams@MASKED>
+- Rustem Saiargaliev (gh: @amureki) **D**
+- Satyabrat Bhol <satyabrat35@MASKED> (gh: @Satyabrat35) **D**
+- Savraj <savraj@MASKED>
+- Sergey Vishnikin <armicron@MASKED>
+- Sherry Zhou (gh: @cssherry) **D**
+- Siping Meng (gh: @smeng10) **D**
+- Stefan Bonchev **D**
+- Thierry Bastian <thierryb@MASKED>
+- Thomas A Caswell <tcaswell@MASKED> (gh: @tacaswell) **R**
+- Thomas Achtemichuk <tom@MASKED>
+- Thomas Grainger <tagrain@gmail.com> (gh: @graingert) **D**
+- Thomas Kluyver <takowl@MASKED> (gh: @takluyver)
+- Tim Gates <tim.gates@iress.com> (gh: timgates42)
+- Tomasz Kluczkowski (gh: @Tomasz-Kluczkowski) **D**
+- Tomi Pieviläinen <tomi.pievilainen@iki.fi>
+- Unrud <Unrud@MASKED> (gh: @unrud)
+- varun netrakar <varun@security.bugqore.com> (gh: @varun3257) **D**
+- Xavier Lapointe <lapointe.xavier@MASKED> (gh: @lapointexavier) **D**
+- X O <xo@MASKED>
+- Yaron de Leeuw <me@jarondl.net> (gh: @jarondl)
+- Yoney <alper_yoney@hotmail.com> **D**
+- Yuan Huang <huangy22@gmail.com> (gh: @huangy22) **D**
+- Zbigniew Jędrzejewski-Szmek <zbyszek@MASKED>
+- bachmann <bachmann.matt@MASKED>
+- bjv <brandon.vanvaerenbergh@MASKED> (@bjamesvERT)
+- friskysaga (gh: @kevinkt1) **D**
+- gl <gl@MASKED>
+- gfyoung <gfyoung17@gmail.com> **D**
+- Labrys <labrys.git@gmail.com> (gh: @labrys) **R**
+- ms-boom <ms-boom@MASKED>
+- ryanss <ryanssdev@MASKED> (gh: @ryanss) **R**
+
+Unless someone has deliberately given permission to publish their e-mail, I have masked the domain names. If you are not on this list and believe you should be, or you *are* on this list and your information is inaccurate, please e-mail the current maintainer or the mailing list (dateutil@python.org) with your name, e-mail (if desired) and GitHub (if desired / applicable), as you would like them displayed. Additionally, please indicate if you are willing to dual license your old contributions under Apache 2.0.
+```
+
+### python-dateutil 4.0.0 (LICENSE)
 
 ```text
 Copyright 2017- Paul Ganssle <paul@ganssle.io>
@@ -4778,9 +4838,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### react-router 7.18.4 (LICENSE.md)
+### react-router 7.18.5 (LICENSE.md)
 
-Also: react-router-dom 7.18.4 (LICENSE.md).
+Also: react-router-dom 7.18.5 (LICENSE.md).
 
 ```text
 MIT License
@@ -5104,37 +5164,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### secretstorage 3.5.0 (LICENSE)
-
-```text
-Copyright 2012-2025 Dmitry Shachnev <mitya57@gmail.com>
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
-1. Redistributions of source code must retain the above copyright notice, this
-   list of conditions and the following disclaimer.
-2. Redistributions in binary form must reproduce the above copyright notice,
-   this list of conditions and the following disclaimer in the documentation
-   and/or other materials provided with the distribution.
-3. Neither the name of the University nor the names of its contributors may be
-   used to endorse or promote products derived from this software without
-   specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE FOR ANY
-DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
-ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-```
-
-### set-cookie-parser 2.7.2 (LICENSE)
+### set-cookie-parser 2.7.3 (LICENSE)
 
 ```text
 The MIT License (MIT)
@@ -5192,30 +5222,7 @@ ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
-### six 1.17.0 (LICENSE)
-
-```text
-Copyright (c) 2010-2024 Benjamin Peterson
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of
-this software and associated documentation files (the "Software"), to deal in
-the Software without restriction, including without limitation the rights to
-use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software is furnished to do so,
-subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
-FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
-COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
-IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
-CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-```
-
-### sqlalchemy 2.1.5 (AUTHORS)
+### sqlalchemy 2.1.6 (AUTHORS)
 
 ```text
 SQLAlchemy was created by Michael Bayer.
@@ -5250,7 +5257,7 @@ Major contributing authors include:
 - Rodrigo Menezes
 ```
 
-### sqlalchemy 2.1.5 (LICENSE)
+### sqlalchemy 2.1.6 (LICENSE)
 
 ```text
 Copyright 2005-2026 SQLAlchemy authors and contributors <see AUTHORS file>.
@@ -5274,7 +5281,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### sse-starlette 3.5.0 (AUTHORS)
+### sse-starlette 3.6.0 (AUTHORS)
 
 ```text
 sysid <sysid@gmx.de>
@@ -5289,7 +5296,7 @@ issmirnov <smirnov_i@tass.ru>
 Cyprien <courtot.c@gmail.com>
 ```
 
-### sse-starlette 3.5.0 (LICENSE)
+### sse-starlette 3.6.0 (LICENSE)
 
 ```text
 Copyright © 2020, [sysid](https://sysid.github.io/).
@@ -5321,7 +5328,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### starlette 1.9.0 (LICENSE.md)
+### starlette 1.10.0 (LICENSE.md)
 
 ```text
 Copyright © 2018, [Encode OSS Ltd](https://www.encode.io/).
@@ -5412,7 +5419,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### tailwindcss 4.3.3 (LICENSE)
+### tailwindcss 4.3.4 (LICENSE)
 
 ```text
 MIT License
@@ -5800,7 +5807,28 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### tzlocal 5.4.4 (LICENSE.txt)
+### tzdata 2026.6 (LICENSE)
+
+```text
+Apache Software License 2.0
+
+Copyright (c) 2020, Paul Ganssle (Google)
+Copyright (c) 2026, Stan Ulbrych
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+### tzlocal 5.4.5 (LICENSE.txt)
 
 ```text
 Copyright 2011-2017 Lennart Regebro
@@ -6130,7 +6158,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### websockets 17.2 (LICENSE)
+### websockets 17.4 (LICENSE)
 
 ```text
 Copyright (c) Aymeric Augustin and contributors

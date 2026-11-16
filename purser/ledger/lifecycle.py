@@ -3,16 +3,20 @@ close posts its balancing adjustment through tx_create."""
 
 import uuid
 from datetime import UTC, datetime
-from datetime import date as date_type
 from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from purser import audit, balances, events, locks
+from purser import audit, balances, clock, events, locks
 from purser.core import ledger as core
-from purser.ledger.accounts import ensure_category_path, get_account
+from purser.ledger.accounts import (
+    ensure_category_path,
+    get_account,
+    refuse_system_account,
+    refuse_system_path,
+)
 from purser.ledger.errors import LedgerError
 from purser.ledger.reporting import account_balances
 from purser.ledger.tx_create import create_flat_transaction
@@ -33,6 +37,8 @@ def _resolve_adjustment_category(
         category = get_account(session, uuid.UUID(ref))
     if not category.is_virtual:
         raise LedgerError(f"{category.path} is not a category (virtual account)")
+    refuse_system_account(category)
+    refuse_system_path(category.path)
     return category
 
 
@@ -137,7 +143,7 @@ def close_account(
             account_ref=str(account.id),
             category_ref=str(category.id),
             amount=-balance,
-            date=date_type.today(),
+            date=clock.ledger_today(),
             description="Closing adjustment",
             requested_status=core.Status.POSTED,
             token=token,
@@ -181,7 +187,7 @@ def close_account(
     # Net-worth inclusion flips at the close date (valuations/holdings are
     # suppressed from it onward); postings were zeroed via the funnel-marked
     # adjustment, so only the networth cursor needs the close date.
-    balances.mark_dirty(session, account.closed_at.date(), networth_only=True)
+    balances.mark_dirty(session, clock.ledger_date(account.closed_at), networth_only=True)
     audit.record(
         session,
         actor_token_id=token.id,
@@ -213,7 +219,7 @@ def reopen_account(session: Session, *, account_id: uuid.UUID, token: ApiToken) 
     if account.closed_at is None:
         raise LedgerError(f"{account.path} is not closed")
     before = {"closed_at": account.closed_at.isoformat()}
-    reopened_from = account.closed_at.date()
+    reopened_from = clock.ledger_date(account.closed_at)
     account.closed_at = None
     session.flush()
     # Valuations/holdings re-enter net worth from the old close date onward.

@@ -16,6 +16,11 @@ from uuid import UUID
 
 QUANT = Decimal("0.0001")
 
+# Account types of SYSTEM virtual accounts (#390 phase 1b, decision 103):
+# virtual like a category, but never a category anyone chooses. One today:
+# ``equity`` (``equity.securities``, the other side of a trade's cash).
+SYSTEM_ACCOUNT_TYPES: frozenset[str] = frozenset({"equity"})
+
 
 class Status(StrEnum):
     EXPECTED = "expected"

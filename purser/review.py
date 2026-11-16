@@ -39,10 +39,10 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import Select, and_, or_, select
+from sqlalchemy import Select, and_, func, or_, select
 from sqlalchemy.orm import Session
 
-from purser import audit
+from purser import audit, clock
 from purser.logging import get_logger
 from purser.models import Account, ApiToken, Posting, Transaction, TransactionReview
 
@@ -139,7 +139,7 @@ def oldest_unreviewed_days(session: Session) -> int | None:
     ).scalar_one_or_none()
     if row is None:
         return None
-    return (datetime.now(UTC).date() - row).days
+    return (clock.ledger_today() - row).days
 
 
 def is_reviewed(session: Session, tx_id: uuid.UUID) -> bool:
@@ -330,7 +330,7 @@ def aged_sweep(session: Session, *, max_age_days: int) -> int:
     rather than clearing silently — papering over the problem the sweep exists
     to bound would defeat it.
     """
-    cutoff = datetime.now(UTC).date() - timedelta(days=max_age_days)
+    cutoff = clock.ledger_today() - timedelta(days=max_age_days)
     stale = list(
         session.execute(
             select(Transaction.id)
@@ -429,20 +429,78 @@ def batch(
         ).scalars()
     )
 
+    # A securities trade's cash and the bank row it linked (decision 103): read
+    # once, so a corrected original escalated before its link is locked too.
+    claimed = ledger_service.trade_cash_lineage_set(session)
     payload: dict[str, Any] = {
         "unreviewed_total": total,
         "oldest_days": oldest_unreviewed_days(session),
         "context": _context_map(session),
-        "escalated": [_row_payload(session, tx, flagged=True) for tx in escalated],
-        "rows": [_row_payload(session, tx) for tx in rows],
+        "escalated": [_row_payload(session, tx, flagged=True, claimed=claimed) for tx in escalated],
+        "rows": [_row_payload(session, tx, claimed=claimed) for tx in rows],
         "remaining": max(0, total - len(rows)),
     }
     if include_guidance:
-        payload["guidance"] = appsettings.review_guidance()
+        payload["guidance"] = [*appsettings.review_guidance(), LOCKED_GUIDANCE]
     return payload
 
 
-def _row_payload(session: Session, tx: Transaction, *, flagged: bool = False) -> dict[str, Any]:
+# Shipped with every batch that carries guidance, after the user's checklist
+# (which the user may replace): what a `locked` row means.
+LOCKED_GUIDANCE = (
+    "A row flagged securities_trade (it carries locked) is a securities trade's cash, or the "
+    "bank row a trade linked as its cash: it moves only with the trade. mark_reviewed it if "
+    "the trade is right; if not, reverse_position_event(locked.event_id) — reopen_position"
+    "(locked.position_id) first when the position is closed — and record the trade again. "
+    "Never update_transaction or confirm_transfer it."
+)
+
+
+def _trade_of(session: Session, tx: Transaction) -> dict[str, str | None]:
+    """The trade holding ``tx`` as its cash: the standing (non-reversal)
+    event naming a row of ``tx``'s correction chain, newest first."""
+    from purser.models import PositionEvent
+
+    ids = {tx.id}
+    current: Transaction | None = tx
+    while current is not None and current.reverses_id is not None:  # back to the bank's row
+        ids.add(current.reverses_id)
+        current = session.get(Transaction, current.reverses_id)
+    current = tx
+    while current is not None:  # forward to the live head
+        current = session.execute(
+            select(Transaction).where(Transaction.reverses_id == current.id)
+        ).scalar_one_or_none()
+        if current is not None:
+            ids.add(current.id)
+    # Purser's own cash row, voided into the broker's row that took it over
+    # at import (#408): the trade still names Purser's row.
+    ids |= set(
+        session.execute(
+            select(Transaction.id).where(
+                Transaction.superseded_by.in_(ids), Transaction.status == "void"
+            )
+        ).scalars()
+    )
+    event = session.execute(
+        select(PositionEvent)
+        .where(PositionEvent.transaction_id.in_(ids), PositionEvent.reverses_id.is_(None))
+        .order_by(PositionEvent.created_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    return {
+        "event_id": str(event.id) if event is not None else None,
+        "position_id": str(event.position_id) if event is not None else None,
+    }
+
+
+def _row_payload(
+    session: Session,
+    tx: Transaction,
+    *,
+    flagged: bool = False,
+    claimed: set[uuid.UUID] | None = None,
+) -> dict[str, Any]:
     real = next((p for p in tx.postings if not p.account.is_virtual), None)
     virtual = next((p for p in tx.postings if p.account.is_virtual), None)
     other_real = next((p for p in tx.postings if not p.account.is_virtual and p is not real), None)
@@ -453,6 +511,19 @@ def _row_payload(session: Session, tx: Transaction, *, flagged: bool = False) ->
         flags.append("no_payee")
     if other_real is not None:
         flags.append("transfer")
+    from purser import ledger as ledger_service
+
+    # A securities trade's cash (decision 103) moves only with its trade: the
+    # fixes this loop steers to (update_transaction, confirm_transfer) are
+    # refused or wrong for it, so the row says which trade holds it (the
+    # guidance says how it IS corrected).
+    locked = (
+        tx.id in claimed
+        if claimed is not None
+        else ledger_service.is_trade_cash_lineage(session, tx)
+    )
+    if locked:
+        flags.append("securities_trade")
 
     automation: list[dict[str, Any]] = []
     source = _category_source(session, tx.id)
@@ -476,6 +547,7 @@ def _row_payload(session: Session, tx: Transaction, *, flagged: bool = False) ->
         "flags": flags,
         "automation": automation,
         "memories": _relevant_memories(session, real, tx),
+        **({"locked": _trade_of(session, tx)} if locked else {}),
         **({"escalated": True} if flagged else {}),
     }
 
@@ -594,3 +666,56 @@ def ai_review_pass(session: Session, *, client: Any = None) -> dict[str, int]:
     if stats["reviewed"] or stats["escalated"]:
         log.info("review.ai_pass", **stats)
     return stats
+
+
+def summary(session: Session) -> dict[str, Any]:
+    """Distinct review rows globally; per-account counts include each transfer leg.
+
+    No monetary or merchant data is needed to route a user to a register.
+    Agent drafts are separate from the canonical unreviewed set.
+    """
+    pending = and_(
+        Transaction.origin == "agent",
+        Transaction.status == "pending",
+        Transaction.superseded_by.is_(None),
+    )
+    totals = session.execute(
+        select(func.count(), func.min(Transaction.date)).where(unreviewed_clause())
+    ).one()
+    accounts = session.execute(
+        select(
+            Account.id,
+            Account.path,
+            Account.name,
+            func.count(func.distinct(Transaction.id)).filter(unreviewed_clause()),
+            func.count(func.distinct(Transaction.id)).filter(
+                and_(unreviewed_clause(), Transaction.status == "pending")
+            ),
+            func.count(func.distinct(Transaction.id)).filter(pending),
+        )
+        .select_from(Transaction)
+        .join(Posting)
+        .join(Account)
+        .where(Account.is_virtual.is_(False), or_(unreviewed_clause(), pending))
+        .group_by(Account.id)
+        .order_by(Account.name, Account.id)
+    ).all()
+    return {
+        "total": totals[0],
+        "oldest_date": totals[1],
+        "pending": session.scalar(
+            select(func.count()).where(unreviewed_clause(), Transaction.status == "pending")
+        ),
+        "agent_pending": session.scalar(select(func.count()).where(pending)),
+        "accounts": [
+            {
+                "account_id": a,
+                "path": path,
+                "name": name,
+                "total": total,
+                "pending": pend,
+                "agent_pending": agent,
+            }
+            for a, path, name, total, pend, agent in accounts
+        ],
+    }

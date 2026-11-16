@@ -1,7 +1,7 @@
 [
   {
     "name": "account_balance",
-    "description": "Point-in-time balance of one real account (UUID or path). Open\nloan/property accounts answer with their latest valuation at or before\nas_of (method 'valuation'); open brokerage accounts add their latest\nholdings market value on top of the postings basis (method\n'postings+holdings'); everything else answers from the STORED running\nbalances alone (method 'postings'; register semantics: chain-head\npending+posted rows). as_of is an ISO date, default today; 0 before the\naccount's first activity; closed accounts answer their whole history.\nFor a balance over TIME, call balance_history instead of looping this.",
+    "description": "Point-in-time balance of one real account (UUID or path). Open\nloan/property accounts answer with their latest valuation at or before\nas_of (method 'valuation'); open brokerage accounts add their latest\nholdings market value on top of the postings basis (method\n'postings+holdings'); everything else answers from the STORED running\nbalances alone (method 'postings'; register semantics: chain-head\npending+posted rows). as_of is an ISO date, default today; 0 before the\naccount's first activity; closed accounts answer their whole history.\nbank_snapshot carries the latest bank-reported and available balances,\ntheir currency, source timestamp/precision, ingestion time and freshness,\nunder the same read scope. Available balance is separate (e.g. remaining\ncredit on a card). Its comparison reports live posted and pending-inclusive\ntotals over ALL recorded dates, the effective/learned/pinned basis and exact\nbank-minus-ledger difference; matches_either_basis is the separate alert\npolicy. Null means unknown/unavailable, never zero. Even with as_of, this\nsnapshot is LATEST, not historical bank truth. For a balance over TIME,\ncall balance_history instead of looping this.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -100,7 +100,7 @@
   },
   {
     "name": "confirm_transfer",
-    "description": "Merge an opposite-amount pair into one transfer (write scope).\nPosted cross-account pairs within 3 days that carry a transfer signal\n(a transfer keyword, the counterparty account's name, a transfer_link\nrule, or an instance of an active transfer schedule) auto-link at import\nand in the nightly sweep; pairs WITHOUT a signal stay candidates and need\nthis explicit confirm. A row already matched to an expected transfer\nstill pairs with that transfer's other side, and the match moves onto\nthe merged transfer.\n\nSplit loan payment: when the cash leg pays more than the principal leg\nthe loan account shows (the rest is interest or fees), pass\nremainder_category = the expense category for that part (e.g.\nexpenses.fees.interest). Both bank legs keep their exact amounts, the\ndifference becomes one posting to that category, and no full-payment\nloan leg is invented. The incoming (principal) amount must be positive\nand smaller than the outgoing (cash) amount; the result then also\ncarries remainder and remainder_category. Never automatic; unlinking\nthe transfer restores both bank rows.\n\nAn ordinary confirm also proposes a transfer_link rule for this account\npair, scoped to the payee, in the suggestions inbox (suggestion_id in the\nresult; repeat confirms refresh the same one). It links nothing until a\nhuman accepts it with decide_suggestion and confirms its projected link\ncount when activating the rule; reject it to never see it again.",
+    "description": "Merge an opposite-amount pair into one transfer (write scope).\nPosted cross-account pairs within 3 days that carry a transfer signal\n(a transfer keyword, the counterparty account's name, a transfer_link\nrule, or an instance of an active transfer schedule) auto-link at import\nand in the nightly sweep; pairs WITHOUT a signal stay candidates and need\nthis explicit confirm (a recent pair of POSTED rows also waits in\nlist_suggestions as a kind='transfer_pair' card, which decide_suggestion\naccepts the same way or rejects as not a transfer; confirming the pair\nhere accepts its card \u2014 a pair with a pending row has no card). A row\nalready matched to an expected transfer still pairs with that transfer's\nother side, and the match moves onto the merged transfer. An id of a row\ncorrected since you read it (the categorize pass corrects uncategorized\nposted rows) is followed to its replacement, the same bank line.\n\nSplit loan payment: when the cash leg pays more than the principal leg\nthe loan account shows (the rest is interest or fees), pass\nremainder_category = the expense category for that part (e.g.\nexpenses.fees.interest). Both bank legs keep their exact amounts, the\ndifference becomes one posting to that category, and no full-payment\nloan leg is invented. The incoming (principal) amount must be positive\nand smaller than the outgoing (cash) amount; the result then also\ncarries remainder and remainder_category. Never automatic; unlinking\nthe transfer restores both bank rows.\n\nAn ordinary confirm also proposes a transfer_link rule for this account\npair, scoped to the payee, in the suggestions inbox (suggestion_id in the\nresult; repeat confirms refresh the same one). It links nothing until a\nhuman accepts it with decide_suggestion and confirms its projected link\ncount when activating the rule; reject it to never see it again.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -125,6 +125,55 @@
       "required": [
         "outgoing_id",
         "incoming_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "correct_lot_basis",
+    "description": "Set or correct a lot's basis (write scope): per share, total for the\nlot's quantity, or both agreeing; neither sets it back to unknown.\nRefused while a disposition drew on the lot (its basis came from it):\nreverse those, correct, record them again.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "lot_id": {
+          "type": "string"
+        },
+        "basis_per_share": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cost_basis": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "lot_id"
       ],
       "type": "object"
     }
@@ -156,6 +205,10 @@
           "default": null
         },
         "amount_type": {
+          "default": "fixed",
+          "type": "string"
+        },
+        "date_mode": {
           "default": "fixed",
           "type": "string"
         },
@@ -298,7 +351,7 @@
   },
   {
     "name": "decide_suggestion",
-    "description": "Decide a suggestion (write scope). accept applies the draft exactly\nas shown: a schedule suggestion becomes an active, materialized schedule;\na transfer_link suggestion becomes a DRAFT rule (rule.projected_links is\nhow many past pairs it would link) that links nothing until a human\nactivates it on the Rules page, confirming that count. edit_then_accept\napplies it with `edits` (schedule draft fields: name, rrule, dtstart,\namount, amount_type, estimate_basis, payee, category,\ncounterparty_account, autopost_policy; transfer_link: amount_exact as a\ndecimal string, window_days 0 to 14, effective_from YYYY-MM-DD). A match\nsuggestion: accept confirms the proposal (match{id,state,variance} in\nthe result) and reject rejects it for good \u2014 the matcher never proposes\nthat pair again; it has nothing to edit, and a proposal already gone\nwithdraws the suggestion with an error. reject is durable \u2014\nreject_scope=counterparty means never suggest this payee/counterparty on\nthis account again (for a transfer_link: this account pair, any payee;\na match rejects exactly); snooze hides it until snooze_until\n(YYYY-MM-DD, default 30 days). Nothing auto-accepts.\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
+    "description": "Decide a suggestion (write scope). accept applies the draft exactly\nas shown: a schedule suggestion becomes an active, materialized schedule;\na transfer_link suggestion becomes a DRAFT rule (rule.projected_links is\nhow many past pairs it would link) that links nothing until a human\nactivates it on the Rules page, confirming that count. edit_then_accept\napplies it with `edits` (schedule draft fields: name, rrule, dtstart,\namount, amount_type, estimate_basis, payee, category,\ncounterparty_account, autopost_policy; transfer_link: amount_exact as a\ndecimal string, window_days 0 to 14, effective_from YYYY-MM-DD). A match\nsuggestion: accept confirms the proposal (match{id,state,variance} in\nthe result) and reject rejects it for good \u2014 the matcher never proposes\nthat pair again; it has nothing to edit, and a proposal already gone\nwithdraws the suggestion with an error. A transfer_pair suggestion:\naccept merges the two rows into one transfer, as confirm_transfer does\n(transfer{merged_transaction_id, suggestion_id} \u2014 the transfer_link rule\nthe confirm proposed, when it proposed one), and reject means \"not a\ntransfer\": nothing ever links that pair automatically; it has nothing to\nedit, and a pair whose rows moved on withdraws it with an error. reject\nis durable \u2014 reject_scope=counterparty means never suggest this\npayee/counterparty on this account again (for a transfer_link: this\naccount pair, any payee; a match or transfer_pair rejects exactly);\nsnooze hides it until snooze_until (YYYY-MM-DD, default 30 days).\nNothing auto-accepts.\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -448,8 +501,17 @@
     }
   },
   {
+    "name": "feed_status",
+    "description": "Bank feed health in one look: one line per bank login (status ok,\nneeds_login \u2014 log in again at the bank through SimpleFIN Bridge \u2014 or\nerror, with how many accounts it delivers and how many feed a ledger\naccount), then only the accounts that need attention: not_connected (a\nfeed account no ledger account takes, e.g. a newly opened one), stale Nd\n(the bank balance has not updated for N days), an act.* code (the bank\nfailed to deliver it), ambiguous_id. Account numbers are never shown.\nUse it for \"did a new account show up?\" or \"which bank needs me?\".",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    }
+  },
+  {
     "name": "forecast_balance",
-    "description": "Deterministic balance projection with every move explained. The\nevents array IS the chart: each entry carries the running balance_after,\nso the step line and the narration come from the same data. low is the\nprojected minimum and end_balance the balance on the last day;\nmin_balance is the account floor (null when unset). coverage says what\nthe line is made of \u2014 schedules_active == 0 means a flat line by\nconstruction, not a quiet month, and suggestions_open how many candidate\nschedules await a decision (list_suggestions), and matches_pending how\nmany instances are left out as already paid: an open match proposal\nnames a bank row that is in the balance (matches_pending_net, their net,\nonly when nonzero; list_unmatched names each one's proposed_posted_id\nand match on that pair confirms it). Events flagged projected are rule\noccurrences past the materialized horizon (no instance row yet);\noverdue ones are still due and land today. An event with basis\n'statement' carries a card statement balance someone recorded\n(record_statement_balance) and one with 'override' an amount the user\nset; without basis the amount is the schedule's own (fixed or an\nestimate \u2014 a card payment's default is the card's current balance,\nnot its statement). An estimated event may carry range {low, high}: the\nmin and max of its schedule's newest six settled amounts and its own;\nlow.range {low, high, low_date} is the projected low with every ranged\nevent at its worst and at its best, and the headline names what could\ntake the account under its floor. days is 1..365. events lists\nthe largest movements that fit the response budget, always including\nthe one that makes the low; materiality (a decimal string) lists only\nmovements at least that large. omitted {count, net} accounts for every\nmovement not listed, so start_balance + the listed amounts +\nomitted.net = end_balance; truncated is true when the budget, not\nmateriality, left one out. daily_uri is the full daily series:\nresources/read, or read_series where only tools are forwarded. Renders\nas the forecast widget in MCP Apps hosts. Looking BACKWARD is\nbalance_history(account, period).\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
+    "description": "Deterministic balance projection with every move explained. The\nevents array IS the chart: each entry carries the running balance_after,\nso the step line and the narration come from the same data. low is the\nprojected minimum and end_balance the balance on the last day;\nmin_balance is the account floor (null when unset). coverage says what\nthe line is made of \u2014 schedules_active == 0 means a flat line by\nconstruction, not a quiet month, and suggestions_open how many candidate\nschedules await a decision (list_suggestions), and matches_pending how\nmany instances are left out as already paid: an open match proposal\nnames a bank row that is in the balance (matches_pending_net, their net,\nonly when nonzero; list_unmatched names each one's proposed_posted_id\nand match on that pair confirms it). Events flagged projected are rule\noccurrences past the materialized horizon (no instance row yet);\noverdue ones are still due and land today. Schedule events carry certainty\nstatus and true-only amount_estimated/date_estimated flags (omitted flags\nmean false); the daily resource carries full evidence and original values.\nAn event with basis\n'statement' carries a card statement balance someone recorded\n(record_statement_balance) and one with 'override' an amount the user\nset; without basis the amount is the schedule's own (fixed or an\nestimate \u2014 a card payment's default is the card's current balance,\nnot its statement). An estimated event may carry range {low, high}: the\nmin and max of its schedule's newest six settled amounts and its own;\nlow.range {low, high, low_date} is the projected low with every ranged\nevent at its worst and at its best, and the headline names what could\ntake the account under its floor. days is 1..365. events lists\nthe largest movements that fit the response budget, always including\nthe one that makes the low; materiality (a decimal string) lists only\nmovements at least that large. omitted {count, net} accounts for every\nmovement not listed, so start_balance + the listed amounts +\nomitted.net = end_balance; truncated is true when the budget, not\nmateriality, left one out. daily_uri is the full daily series:\nresources/read, or read_series where only tools are forwarded. Renders\nas the forecast widget in MCP Apps hosts. Looking BACKWARD is\nbalance_history(account, period).\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -493,6 +555,63 @@
     }
   },
   {
+    "name": "get_schedule_occurrence",
+    "description": "Read one occurrence's independent amount/date certainty, evidence,\nimmutable original estimate and actual link with amount/timing variance.\nAddress it by transaction_id (search_transactions), or by schedule_id\n(list_schedules) plus occurrence_date for a projected slot with no\ninstance yet (slot.projected). The first evidence write retains its original\nprojection; untouched projections have original null. confirmed means an upcoming\nobligation, never posted cash. pending_review means a proposed match,\nnot a confirmation. A backfilled original is the first retained snapshot,\nnot a reconstructed historical estimate. No bank fetch or writes.\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "transaction_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "schedule_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "occurrence_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "include": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
     "name": "get_transaction",
     "description": "Full detail for one transaction: postings and provenance links.\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
     "inputSchema": {
@@ -524,7 +643,7 @@
   },
   {
     "name": "list_accounts",
-    "description": "Real accounts with current balances (pending+posted). Loan/property\naccounts report their latest valuation instead of the postings sum\n(marked balance_method='valuation'); brokerage accounts add their latest\nholdings market value on top of it (balance_method='postings+holdings').\nBoth carry the overlay's balance_as_of date. A reconciled account carries\n`reconciliation`: its latest reconciled date and basis, and whether the\nledger still matches the statement on that date (difference = ledger\nminus statement target, ledger sign; nonzero means a later write moved\nit).\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
+    "description": "Real accounts with current balances (pending+posted). Loan/property\naccounts report their latest valuation instead of the postings sum\n(marked balance_method='valuation'); brokerage accounts add their latest\nholdings market value on top of it (balance_method='postings+holdings').\nBoth carry the overlay's balance_as_of date. A reconciled account carries\n`reconciliation`: its latest reconciled date, basis and component (cash\nonly for brokerage, balance for other accounts), and whether the\nledger still matches the statement on that date (difference = ledger\nminus statement target, ledger sign; nonzero means a later write moved\nit).\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -551,6 +670,69 @@
     }
   },
   {
+    "name": "list_awards",
+    "description": "Equity awards on a brokerage account (read scope), a page at a time:\neach award (award_id, granted, cancelled, vested, unvested,\nunvested_known, unscheduled \u2014 unvested units with no vest date yet \u2014 the\nnext vest, due_unrecorded: scheduled vests on or before today not yet\nrecorded with record_vest), and on the first page the unvested units per\nsymbol, valued at the latest close \u2014 informational: unvested units are\nnever in net worth, balances or holdings. Pass award (an award_id, or\nthe grant reference) for that award's vest schedule (vest_id, date,\nunits, status), paged the same way \u2014 the vest_id is what\nupdate_award_vest takes. unvested_known false means the broker gave no\nvested count and the schedule does not account for every unit: the\nfigure is the scheduled units only, not the whole balance. capture says\nwhen the broker's awards were last captured. next_cursor continues the\nsame listing (same account, symbol and award).\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "symbol": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "award": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "include": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "account"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "list_categories",
     "description": "The category tree as ltree paths (categories are virtual accounts).\n\ninclude_descriptions=true returns {path, description} objects instead \u2014\nheavier on tokens; the bare path list is usually enough.",
     "inputSchema": {
@@ -566,7 +748,7 @@
   },
   {
     "name": "list_holdings",
-    "description": "Brokerage holdings: each open brokerage account's newest snapshot set\n\u2014 what its value adds on top of its cash in net worth \u2014 with its source\n(feed: the bank's snapshots; manual: positions recorded by hand and\npriced daily), the set's date and total, how many positions it holds and\nhow many of those sit on a stale close (stale_price) or have no price at\nall (no_price: market_value null, adding nothing \u2014 never a silent 0), or\na close at which the value is too large to store (value_out_of_range:\ncheck the share count; recording a close cannot fix it).\ntop itemizes the largest positions (symbol, quantity, market_value; a\nmanual one adds price and price_as_of, unrealized_gain when its cost\nbasis is known, stale: true when its close is old), fitted to the\nresponse budget; truncated says some were left out. totals.market_value\nis the sum over every open account, listed or not. A feed position the\nfeed sends with no value (0 or none: a plan-only fund no provider\nprices) is valued from a close recorded with record_price under its\nticker: it shows price, price_as_of and price_source; with no recorded\nclose it counts in no_price. One whose feed symbol is no ticker at all\n(a description) counts in unpriceable and is marked unpriceable: no\nclose can value it, so never record one for it.\n\nPass account (UUID or path) for that account's positions, in symbol\norder, each with its cost_basis (null when unknown), one page at a time:\na page holds what fits the same budget; next_cursor is the cursor to\ncall with for the next page (the last symbol listed), null on the last.\nPaging by symbol never repeats a position, but each page reads the\nnewest set when called: a position added meanwhile with a symbol before\nthe cursor is not listed, and the daily price job can move later pages\nto a newer set. With account named, totals.market_value is that account's own\nvalue; a closed account shows its last set with closed: true and totals\n0.00 (net worth no longer counts it).",
+    "description": "Brokerage holdings: each open brokerage account's newest snapshot set\n\u2014 what its value adds on top of its cash in net worth \u2014 with its source\n(feed: the bank's snapshots; manual: positions recorded by hand and\npriced daily), the set's date and total, how many positions it holds and\nhow many of those sit on a stale close (stale_price) or have no price at\nall (no_price: market_value null, adding nothing \u2014 never a silent 0), or\na close at which the value is too large to store (value_out_of_range:\ncheck the share count; recording a close cannot fix it).\ntop itemizes the largest positions (symbol, quantity, market_value; a\nmanual one adds price and price_as_of, unrealized_gain when its cost\nbasis is known, stale: true when its close is old), fitted to the\nresponse budget; truncated says some were left out. totals.market_value\nis the sum over every open account, listed or not. A feed position the\nfeed sends with no value (0 or none: a plan-only fund no provider\nprices) is valued from a close recorded with record_price under its\nticker: it shows price, price_as_of and price_source; with no recorded\nclose it counts in no_price. One whose feed symbol is no ticker at all\n(a description) counts in unpriceable and is marked unpriceable: no\nclose can value it, so never record one for it. in_transit on a manual\nline is a trade's cash that has not landed on the account yet (a sale's\nproceeds, or minus a cash-funded buy's cost), already inside its\nmarket_value until the cash date; a line with quantity 0 is such cash\nafter a sale of every share.\n\nPass account (UUID or path) for that account's positions, in symbol\norder, each with its cost_basis (null when unknown), one page at a time:\na page holds what fits the same budget; next_cursor is the cursor to\ncall with for the next page (the last symbol listed), null on the last.\nPaging by symbol never repeats a position, but each page reads the\nnewest set when called: a position added meanwhile with a symbol before\nthe cursor is not listed, and the daily price job can move later pages\nto a newer set. With account named, totals.market_value is that account's own\nvalue; a closed account shows its last set with closed: true and totals\n0.00 (net worth no longer counts it). An account with equity awards\nadds unvested: per symbol, the units not yet vested, their value at the\nlatest close and the next vest \u2014 informational, never inside\nmarket_value, totals or net worth. Lot detail is list_lots; awards are\nlist_awards.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -593,6 +775,55 @@
           "default": null
         }
       },
+      "type": "object"
+    }
+  },
+  {
+    "name": "list_lots",
+    "description": "A hand-tracked position's tax lots (read scope), oldest first, a page\nat a time, with its lot summary: shares held, shares in lots,\nunallocated shares (outside every lot), shares whose lot has no basis,\nand cost_basis \u2014 the lots' basis, null unless every share has one (never\nan average). capture says when the broker's lots were last captured\n(as_of, captured_at, completeness): capture freshness, distinct from\nprice_as_of, the quote's date. Each lot: lot_id (to name it in\nrecord_sale, record_transfer_out or void_lot), acquired_on, acquisition,\nstatus, remaining, basis_per_share (null: unknown), and term_if_sold_today\n(long only after the one-year anniversary). status is open (default),\nclosed, voided, reversed or all. next_cursor pages.\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "status": {
+          "default": "open",
+          "type": "string"
+        },
+        "cursor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "include": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "account",
+        "symbol"
+      ],
       "type": "object"
     }
   },
@@ -757,7 +988,7 @@
   },
   {
     "name": "list_suggestions",
-    "description": "What Purser thinks you should decide. kind='schedule': detected\nrecurring bills and transfers, agent-proposed schedules, payments for a\nnewly added card. kind='transfer_link': a transfer_link rule a manual\nconfirm_transfer proposed for that account pair, scoped to the payee and\nits aliases (evidence = the confirmed pairs). kind='match': an open match\nproposal \u2014 an expected bill paired with a bank row (draft = both rows'\ndates and amounts on `account`, and the variance; confidence = the match\nscore). Omit kind for all. Each row carries a one-line headline, the\ntyped draft accept would apply unchanged, an evidence summary (count,\nfirst/last, amount range, cadence, and the proposing agent's note if it\nleft one), and a confidence (null for transfer links and agent\nproposals, which nothing scored). Snoozed rows are hidden until their\ndate. Decide with decide_suggestion; GET /suggestions/{id} has the full\nevidence.\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
+    "description": "What Purser thinks you should decide. kind='schedule': detected\nrecurring bills and transfers, agent-proposed schedules, payments for a\nnewly added card. kind='transfer_link': a transfer_link rule a manual\nconfirm_transfer proposed for that account pair, scoped to the payee and\nits aliases (evidence = the confirmed pairs). kind='match': an open match\nproposal \u2014 an expected bill paired with a bank row (draft = both rows'\ndates and amounts on `account`, and the variance; confidence = the match\nscore). kind='transfer_pair': two bank rows of exactly opposite amounts\non two accounts, close in date, that nothing links automatically \u2014 is it\none transfer? (draft = both rows, from_account/to_account, amount, the\ndates and both bank texts). Omit kind for all. Each row carries a\none-line headline, the typed draft accept would apply unchanged, an\nevidence summary (count, first/last, amount range, latest amount and\npossible price change, cadence, and the\nproposing agent's note if it left one), and a confidence (null for\ntransfer links, transfer pairs and agent proposals, which nothing\nscored). Snoozed rows are hidden until their date. `open` counts every\nopen row and `open_by_kind` each kind's, so `limit` never hides how\nmany wait; `offset` skips the rows of earlier pages to reach the rest.\nDecide with decide_suggestion; GET /suggestions/{id} has the\nfull evidence.\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -789,6 +1020,10 @@
         },
         "limit": {
           "default": 10,
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
           "type": "integer"
         },
         "include": {
@@ -1411,8 +1646,39 @@
     }
   },
   {
+    "name": "realized_gains",
+    "description": "Realized gains of an account's lot dispositions in a calendar year\n(read scope), by term: short, or long (sold after the one-year\nanniversary). Totals sum only dispositions with both a basis and\nproceeds; shares lacking either are counted (unknown_basis_quantity,\nunknown_proceeds_quantity), never valued as 0, and shares sold from\noutside every lot are unallocated_quantity. Informational: Purser\ncomputes no tax.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "year": {
+          "type": "integer"
+        },
+        "symbol": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "account",
+        "year"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "reconcile_account",
-    "description": "Reconcile a checking, savings, cash or credit-card account to a\nstatement (write scope). statement_balance is the figure AS THE STATEMENT\nSHOWS IT: positive = money in the account, or for a credit card the amount\nowed. Purser converts it to ledger sign (cards are negative when owed), and\nevery other amount in the answer is ledger sign. basis is posted (default)\nor pending_inclusive (posted plus pending); as_of is YYYY-MM-DD, today or\nearlier. Purser posts ONE adjustment for the difference to a system\ncategory, and it lands in the review set; when the ledger already matches\nnothing is posted and the clean reconcile is still recorded. dry_run=true\nanswers the same without writing. Retrying the same date and balance\nreturns created=false while it still holds; once a backdated change has\nmoved the balance on that date it fails with the difference.\nlist_accounts shows whether each account's latest reconciliation still\nholds.",
+    "description": "Reconcile a checking, savings, cash or credit-card account to a\nstatement (write scope). statement_balance is the figure AS THE STATEMENT\nSHOWS IT: positive = money in the account, or for a credit card the amount\nowed. Purser converts it to ledger sign (cards are negative when owed), and\nevery other amount in the answer is ledger sign. basis is posted (default)\nor pending_inclusive (posted plus pending); as_of is YYYY-MM-DD, today or\nearlier. Purser posts ONE adjustment for the difference to a system\ncategory, and it lands in the review set; when the ledger already matches\nnothing is posted and the clean reconcile is still recorded. dry_run=true\nanswers the same without writing. Retrying the same date and balance\nreturns created=false while it still holds; once a backdated change has\nmoved the balance on that date it fails with the difference.\nFor a manual brokerage account, component=\"cash\" is REQUIRED and\nstatement_balance must be cash only, excluding securities and unvested\nawards. Holdings and prices never change. Other accounts use the default\ncomponent=\"balance\". Results and list_accounts identify which component\nwas reconciled; list_accounts checks whether it still holds.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1432,6 +1698,14 @@
         "dry_run": {
           "default": false,
           "type": "boolean"
+        },
+        "component": {
+          "default": "balance",
+          "enum": [
+            "balance",
+            "cash"
+          ],
+          "type": "string"
         }
       },
       "required": [
@@ -1539,6 +1813,146 @@
     }
   },
   {
+    "name": "record_sale",
+    "description": "Record a sale of quantity shares of symbol at price on trade_date\n(YYYY-MM-DD, today or earlier) on a manually tracked brokerage account\n(write scope). The net proceeds (quantity x price - fees, rounded to\nthe cent) land on the account's cash on trade_date, the day the shares\nleave the holdings (settle_date posts them on a later settlement date\ninstead), booked against the system account equity.securities \u2014 never\nincome. proceeds_to='none' records the sale without cash (shares\nwithheld for tax). If the account already shows a posted row of exactly\nthat amount around the settlement date (the broker's own \"SOLD\" cash),\nthe call is refused with cash_already_recorded naming that row: when it\nis the sale's cash, call again with transaction_id set to that row's id\nto link it (a linked row must hold exactly the net proceeds, to the\ncent); when it is a different payment of the same amount, call again\nwith force_cash=true to post the sale's cash as well (audited). When the\nbroker's own row of exactly that cash arrives AFTER the sale, the import\nlinks it in place of Purser's row by itself: nothing to repair. A sale\nthat would leave the position below zero on\nany date is refused, naming the date. dry_run=true answers with what the\ncall would do \u2014 shares before and after, the cash and its settlement\ndate, and already_recorded when the double-count check finds the cash \u2014\nand writes nothing. quantity, price and fees are decimal strings.\n\nA position that tracks lots (list_lots) needs the lots the sale drew on:\nlots [{lot, quantity}] where lot is a lot_id from list_lots or the\nbroker's lot reference, or 'unallocated' for shares outside every lot;\nor lot_method fifo (oldest first), lifo or hifo (highest basis per share\nfirst). Use the broker's own lot choice when it shows one. A method never\ntakes unallocated shares. The answer's lots summarizes the dispositions\n(basis, proceeds and realized gain where known, terms).\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "quantity": {
+          "type": "string"
+        },
+        "price": {
+          "type": "string"
+        },
+        "trade_date": {
+          "type": "string"
+        },
+        "settle_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "fees": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "proceeds_to": {
+          "default": "cash",
+          "type": "string"
+        },
+        "transaction_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "dry_run": {
+          "default": false,
+          "type": "boolean"
+        },
+        "force_cash": {
+          "default": false,
+          "type": "boolean"
+        },
+        "lots": {
+          "anyOf": [
+            {
+              "items": {
+                "description": "One lot a sale or transfer out draws on: ``lot`` is the lot id or the\nbroker's lot reference (matched by blind index), or the word\n``unallocated`` for shares outside every lot.",
+                "properties": {
+                  "lot": {
+                    "type": "string"
+                  },
+                  "quantity": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "lot",
+                  "quantity"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "lot_method": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "include": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "account",
+        "symbol",
+        "quantity",
+        "price",
+        "trade_date"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "record_statement_balance",
     "description": "Record a credit card's statement balance against the payment it is\ndue on (write scope). Use it for a card statement email or notice\n(\"your Amex Platinum statement balance is $8,347.00, payment due Oct\n19\"): account is the card (path or id), statement_balance the figure as\nprinted (the amount owed, positive), due_date the payment due date\n(YYYY-MM-DD), statement_date the closing date if the statement gives one.\nOne call: the card's live payment instance due nearest due_date (within\n14 days) takes the statement balance on both legs and is pinned, so the\ncard's current balance, which card-payment schedules estimate from by\ndefault, no longer moves it. forecast_balance shows that event with\nbasis 'statement'. Recording again replaces the figure; reset_instance\nhands the payment back to the current-balance estimate. Credit cards\nonly: for a loan payment or any other bill, use override_instance.\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
     "inputSchema": {
@@ -1588,6 +2002,83 @@
     }
   },
   {
+    "name": "record_transfer_out",
+    "description": "Record shares that left a hand-tracked position with no price and no\ncash (write scope): a transfer to another broker, or a decrease the\nbroker shows that is not a sale you can price. Never use it for a sale\n(record_sale). On a position that tracks lots, name the lots: lots\n[{lot, quantity}] (lot_id, the broker's reference, or 'unallocated') or\nlot_method fifo/lifo/hifo. Undo with reverse_position_event.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "symbol": {
+          "type": "string"
+        },
+        "quantity": {
+          "type": "string"
+        },
+        "occurred_on": {
+          "type": "string"
+        },
+        "lots": {
+          "anyOf": [
+            {
+              "items": {
+                "description": "One lot a sale or transfer out draws on: ``lot`` is the lot id or the\nbroker's lot reference (matched by blind index), or the word\n``unallocated`` for shares outside every lot.",
+                "properties": {
+                  "lot": {
+                    "type": "string"
+                  },
+                  "quantity": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "lot",
+                  "quantity"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "lot_method": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "account",
+        "symbol",
+        "quantity",
+        "occurred_on"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "record_valuation",
     "description": "Record a loan or property account's value on a date (write scope).\nSuch an account's balance IS its latest valuation, in net worth and on\nevery account surface, so this is how it is kept current: it cannot be\nreconciled (reconcile_account is for checking, savings, cash and credit\ncards). as_of is YYYY-MM-DD. value is a decimal string in ledger sign by\ndefault (convention='ledger'): a property positive, a loan NEGATIVE while\nmoney is owed. To enter the figure as the statement prints it, a loan's\namount owed positive, pass convention='statement' and Purser negates it,\nexactly as reconcile_account converts a statement balance. Never flip the\nsign yourself: a positive loan value in ledger convention is refused,\nnever recorded as an asset. The answer's value is the stored figure, in\nledger sign.",
     "inputSchema": {
@@ -1611,6 +2102,169 @@
         "account",
         "as_of",
         "value"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "record_vest",
+    "description": "Record an award vest (write scope): award is the award_id or the\nbroker's grant reference; gross_quantity the units that vested,\nwithheld_quantity is REQUIRED: units withheld for tax, explicitly \"0\"\nonly when known (net = gross - withheld). Never infer it from sold/withdrawn\ntotals; leave the historical vest unrecorded until evidence is available. fmv\nthe fair market value per share at vest (withheld = gross records a\nvest that delivered no shares: no event, no lot). By default a vest event adds\nthe net shares to the position and opens their lot (basis = fmv;\nlot_ref = the broker's lot reference, if shown). If the broker's lot\nlist was already captured, the vest's lot is already there: pass lot\n(its lot_id or reference) to LINK it instead \u2014 no shares are added;\nthe lot must be acquired on vest_date with the net shares (fewer if\nsome were sold before the capture) and fmv as its basis. With an\nunlinked lot acquired that day and neither lot nor force_new_lot, the\ncall is refused (possible_duplicate) so a vest is never counted twice.\nRecording the same vest again with the same figures is a no-op\n(already_recorded); with other figures it is refused \u2014 reverse the vest\nevent (reverse_position_event) first. dry_run=true writes nothing.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "award": {
+          "type": "string"
+        },
+        "vest_date": {
+          "type": "string"
+        },
+        "gross_quantity": {
+          "type": "string"
+        },
+        "withheld_quantity": {
+          "type": "string"
+        },
+        "fmv": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "lot": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "lot_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "force_new_lot": {
+          "default": false,
+          "type": "boolean"
+        },
+        "ordinal": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "dry_run": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "account",
+        "award",
+        "vest_date",
+        "gross_quantity",
+        "withheld_quantity"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "refetch_feed",
+    "description": "Re-fetch a date range from SimpleFIN and import what the ledger is\nmissing \u2014 for a gap a bank outage left (a bank that stopped updating,\nthen came back) that the automatic repair after a sync did not cover.\nstart/end are ISO dates (end inclusive, default today; at most 90 days\napart, and the bank serves about 90 days of history). accounts: ledger\naccount paths (default every mapped account). connection_id may be\nomitted when there is one connection. Idempotent: rows already in the\nledger are skipped. Uses one of the day's 24 fetches.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "start": {
+          "type": "string"
+        },
+        "end": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "accounts": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "connection_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "start"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "reopen_position",
+    "description": "Reopen a closed position (write scope), so a wrong event on it \u2014 its\nlast sale, say \u2014 can be reversed with reverse_position_event and recorded\nagain; close it again afterwards (REST PATCH /positions/{id} with\nclosed=true). position_id is in record_sale's and record_position's\nanswers and in the \"position is closed\" refusal. Refused while another\nposition in the symbol is open on the account (one open per symbol),\nand while a later position in it exists. Audited, like the REST\nPATCH /positions/{id} with closed=false it shares a service path with.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "position_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "position_id"
       ],
       "type": "object"
     }
@@ -1646,8 +2300,35 @@
     }
   },
   {
+    "name": "reverse_position_event",
+    "description": "Reverse a position event (write scope): the way to undo a wrong\nrecord_sale or record_position (event_id is in their answer). Events\nare never edited; a reversal row makes the event count no more, and a\ntrade's cash goes with it (Purser's own cash row is corrected to zero, a\nlinked row gets its category back). Then record the right event. Refused\nwhen the remaining history would leave the position below zero on some\ndate, when the event is already reversed or is itself a reversal, and\nwhen the position is closed: a closed position is reopened first (REST\nPATCH /positions/{id} with closed=false). A trade's cash row in\nreview_batch (flag securities_trade) is corrected this way, never with\nupdate_transaction or confirm_transfer. note says why (optional).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "event_id": {
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "event_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "review_batch",
-    "description": "The review loop: the next unreviewed transactions with everything you\nneed to judge them INLINE \u2014 current category and how it was assigned, any\ntransfer already on the row, raw-vs-friendly payee, what automation did \u2014\nplus the checklist to review against. No per-row round-trips.\n\nCheck `context` before clearing rows: it says which surfaces were actually\navailable. If one you needed was absent, escalate rather than clear.\nRows the backend reviewer handed back appear under `escalated` first.\nFix what is wrong with update_transaction/confirm_transfer, then\nmark_reviewed. Set include_guidance=false on later pages.\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
+    "description": "The review loop: the next unreviewed transactions with everything you\nneed to judge them INLINE \u2014 current category and how it was assigned, any\ntransfer already on the row, raw-vs-friendly payee, what automation did \u2014\nplus the checklist to review against. No per-row round-trips.\n\nCheck `context` before clearing rows: it says which surfaces were actually\navailable. If one you needed was absent, escalate rather than clear.\nRows the backend reviewer handed back appear under `escalated` first.\nFix what is wrong with update_transaction/confirm_transfer, then\nmark_reviewed \u2014 except a row flagged securities_trade: its `locked`\nnames the trade (event_id, position_id) whose cash it is, and the\nguidance says how such a row is corrected. Set include_guidance=false on\nlater pages.\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2001,6 +2682,236 @@
     }
   },
   {
+    "name": "update_award_vest",
+    "description": "Forfeit a scheduled vest (status 'forfeited'), reinstate a forfeited\none, or set a vest that was LINKED to an existing lot back to\n'scheduled' (write scope). A vest recorded as an event goes back by\nreversing that event (reverse_position_event). vest_id comes from\nlist_awards(award=...).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "vest_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "vest_id",
+        "status"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "update_occurrence_certainty",
+    "description": "Set evidence on just this occurrence's amount and/or date. Address it\nby transaction_id, or by schedule_id plus occurrence_date (works for a\nprojected slot beyond the materialized window: the rule's amount and\ndate stay, the evidence moves onto the instance when it materializes).\nEach supplied dimension needs state (estimated/confirmed), source, as_of\nand a note; value is optional (omit to keep the current value; a\nschedule-slot address accepts only its current value). A fixed amount is a\nmodel, not proof: mark it estimated without changing it. History is an\nestimate, never confirmation evidence. Confirm only what the supplied\nstatement, paystub, invoice or user instruction establishes; omit the\nother dimension. clear returns a dimension to the rule's certainty. This\nnever posts cash or confirms later occurrences. Link a real posted\npayment with match instead; ambiguous candidates require review. Original\nestimates and superseded confirmations remain available in Purser.\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "transaction_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "amount": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "enum": [
+                    "estimated",
+                    "confirmed"
+                  ],
+                  "type": "string"
+                },
+                "source": {
+                  "enum": [
+                    "history",
+                    "statement",
+                    "payroll",
+                    "invoice",
+                    "approval",
+                    "user",
+                    "agent",
+                    "other"
+                  ],
+                  "type": "string"
+                },
+                "as_of": {
+                  "format": "date",
+                  "type": "string"
+                },
+                "note": {
+                  "maxLength": 500,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "value": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                }
+              },
+              "required": [
+                "state",
+                "source",
+                "as_of",
+                "note"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "date": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "state": {
+                  "enum": [
+                    "estimated",
+                    "confirmed"
+                  ],
+                  "type": "string"
+                },
+                "source": {
+                  "enum": [
+                    "history",
+                    "statement",
+                    "payroll",
+                    "invoice",
+                    "approval",
+                    "user",
+                    "agent",
+                    "other"
+                  ],
+                  "type": "string"
+                },
+                "as_of": {
+                  "format": "date",
+                  "type": "string"
+                },
+                "note": {
+                  "maxLength": 500,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "value": {
+                  "anyOf": [
+                    {
+                      "format": "date",
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "default": null
+                }
+              },
+              "required": [
+                "state",
+                "source",
+                "as_of",
+                "note"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "schedule_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "occurrence_date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "clear": {
+          "anyOf": [
+            {
+              "items": {
+                "enum": [
+                  "amount",
+                  "date"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "include": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "type": "object"
+    }
+  },
+  {
     "name": "update_schedule",
     "description": "Edit a schedule's rule (write scope); only the fields sent change.\nLive instances the user has not overridden follow the new rule (slots the\nrule no longer produces are dropped, amounts re-estimated, missing slots\nadded); overridden (\"pinned\") instances keep their amounts and dates.\nA new name or payee relabels every live instance, pinned ones too, whose\ndescription or payee still equals the old one (`relabeled` counts them);\nlabels set by hand stay. category and counterparty_account are mutually\nexclusive: sending one switches the schedule's shape between flat and\ntransfer.",
     "inputSchema": {
@@ -2054,6 +2965,17 @@
           "default": null
         },
         "amount_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "date_mode": {
           "anyOf": [
             {
               "type": "string"
@@ -2198,8 +3120,267 @@
     }
   },
   {
+    "name": "upsert_awards",
+    "description": "Bulk, idempotent input of equity awards and their vest schedules\n(write scope): awards [{grant_ref (the broker's grant id: the award's\nidentity), symbol, granted_on, granted_quantity, cancelled_quantity,\nvested_quantity (as the broker reports it), plan, schedule: [{vest_date,\nquantity, ordinal (only for two vests on one date)}] \u2014 the vests not\nyet delivered}]. Same contract as upsert_lots: dry_run=true by default,\ncommit with expect_hash, exact retries are no-ops, conflicts are never\napplied. Awards never touch holdings or net worth: a vest becomes shares\nonly through record_vest. A re-estimated scheduled quantity, new vests,\nmore cancelled units and a new reported vested count are applied; a\nchanged grant size, fewer cancelled units, or (complete) a scheduled\nfuture vest the broker no longer lists is a conflict \u2014 forfeit it with\nupdate_award_vest if it is gone. A scheduled vest on or before as_of\nthat the broker no longer lists is counted as due: record it.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "as_of": {
+          "type": "string"
+        },
+        "completeness": {
+          "type": "string"
+        },
+        "awards": {
+          "items": {
+            "properties": {
+              "grant_ref": {
+                "type": "string"
+              },
+              "symbol": {
+                "type": "string"
+              },
+              "granted_on": {
+                "type": "string"
+              },
+              "granted_quantity": {
+                "type": "string"
+              },
+              "cancelled_quantity": {
+                "type": "string"
+              },
+              "vested_quantity": {
+                "type": "string"
+              },
+              "plan": {
+                "type": "string"
+              },
+              "schedule": {
+                "items": {
+                  "properties": {
+                    "vest_date": {
+                      "type": "string"
+                    },
+                    "quantity": {
+                      "type": "string"
+                    },
+                    "ordinal": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "vest_date",
+                    "quantity"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "grant_ref",
+              "symbol",
+              "granted_on",
+              "granted_quantity"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "captured_at": {
+          "type": "string"
+        },
+        "source_note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "dry_run": {
+          "default": true,
+          "type": "boolean"
+        },
+        "expect_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "skip_conflicts": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "account",
+        "as_of",
+        "completeness",
+        "awards",
+        "captured_at"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "upsert_lots",
+    "description": "Bulk, idempotent input of a broker's tax lots as of a day (write\nscope) on a hand-tracked brokerage account. positions: [{symbol, lots:\n[{acquired_on, quantity (shares REMAINING on as_of), external_ref (the\nbroker's lot reference, when shown: the lot's identity), plan,\nordinal (when lots of one date and plan have no reference: 1, 2, ...\nin a stable order), basis_per_share and/or cost_basis (of the remaining\nshares; omit when unknown \u2014 never 0), acquisition (buy, rsu_vest,\nplan_purchase, espp_purchase, transfer_in, drip, gift, unknown)}]}].\nDecimal strings; dates YYYY-MM-DD. completeness: complete (each listed\nsymbol's list is the broker's whole list) or partial (only these rows;\nnothing is inferred from what is missing). captured_at: when you read\nthe page (ISO instant with zone; send the same value on the commit);\nsource_note: where (no personal data).\n\ndry_run=true (the default) returns the plan and plan_hash, writing\nnothing; commit with dry_run=false and expect_hash=plan_hash (refused\nwith preview_stale if anything changed). Re-sending the exact same\nrequest is a no-op (retry); the same holdings read again later only\nrecord freshness. New lots are adopted; a complete capture recounts\nthe position up to the broker's total. Never applied, always\nconflicts: a lot with fewer remaining shares (record the sale or\ntransfer out naming that lot first), more shares, a lot missing from a\ncomplete list, a differing basis (basis_policy='replace' takes the\nbroker's when nothing drew on the lot), an ambiguous identity, a\npartial capture whose new lots exceed the unallocated shares, or a\ncapture older than one applied. skip_conflicts=true applies the\nsymbols without any.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "as_of": {
+          "type": "string"
+        },
+        "completeness": {
+          "type": "string"
+        },
+        "positions": {
+          "items": {
+            "properties": {
+              "symbol": {
+                "type": "string"
+              },
+              "lots": {
+                "items": {
+                  "properties": {
+                    "acquired_on": {
+                      "type": "string"
+                    },
+                    "quantity": {
+                      "type": "string"
+                    },
+                    "external_ref": {
+                      "type": "string"
+                    },
+                    "plan": {
+                      "type": "string"
+                    },
+                    "ordinal": {
+                      "type": "integer"
+                    },
+                    "basis_per_share": {
+                      "type": "string"
+                    },
+                    "cost_basis": {
+                      "type": "string"
+                    },
+                    "acquisition": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "acquired_on",
+                    "quantity"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "symbol",
+              "lots"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "captured_at": {
+          "type": "string"
+        },
+        "source_note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "basis_policy": {
+          "default": "keep",
+          "type": "string"
+        },
+        "dry_run": {
+          "default": true,
+          "type": "boolean"
+        },
+        "expect_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "skip_conflicts": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "account",
+        "as_of",
+        "completeness",
+        "positions",
+        "captured_at"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "void_lot",
+    "description": "Void a lot that a capture adopted wrongly (write scope): it stops\ncounting and stays as read-only history. Refused while a sale or\ntransfer out draws on it (reverse those first with\nreverse_position_event, then record them again against the right\nlots), while an award vest is linked to it, and for a lot opened by an\nevent (reverse that event instead). Then capture again (a new\ncaptured_at: the exact same request is a no-op) to record the right\nlot.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "lot_id": {
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "lot_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "whats_new",
-    "description": "The morning brief: everything material since your last call in one\ncompact payload \u2014 new transactions (count/total, notable items above the\nmateriality threshold, default $50), confirmed bill matches (variance\nbreaches always itemized), subscription price changes, projected\nshortfalls, bank-reported balance drift against the ledger (each line\nnames its basis: posted_only when that bank's balance leaves pending\ncharges out, else pending_inclusive; pinned: true when an admin pinned\nthat basis instead of it being learned), pending transactions the bank dropped\nwithout posting (counted; those above the threshold itemized \u2014 a dropped\nrefund is money to chase), manually tracked symbols whose price turned\nstale or that have none (stale_prices; record_price fixes one), feed\npositions the feed sends with no value that no recorded close prices\n(unpriced_holdings; record_price under the ticker values one, except\none marked unpriceable: its feed symbol is no ticker, so no close can\nvalue it), brokerage accounts switched back to the feed whose\nhand-tracked set still counts because no fetch has arrived since\n(open_manual_periods: check the connection or the account mapping),\nthe week's expected bills, and sync failures.\nPass the returned cursor on your next call to get only new material; a\nfirst call without a cursor looks back 7 days. Every line carries its\nentity id so you can drill without a search. Narrate this in your own\nvoice; the digest widget is the visual receipt.\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
+    "description": "The morning brief: everything material since your last call in one\ncompact payload \u2014 new transactions (count/total, notable items above the\nmateriality threshold, default $50), confirmed bill matches (variance\nbreaches always itemized), subscription price changes, projected\nshortfalls, bank-reported balance drift against the ledger (each line\nnames its basis: posted_only when that bank's balance leaves pending\ncharges out, else pending_inclusive; pinned: true when an admin pinned\nthat basis instead of it being learned), pending transactions the bank dropped\nwithout posting (counted; those above the threshold itemized \u2014 a dropped\nrefund is money to chase), manually tracked symbols whose price turned\nstale or that have none (stale_prices; record_price fixes one), feed\npositions the feed sends with no value that no recorded close prices\n(unpriced_holdings; record_price under the ticker values one, except\none marked unpriceable: its feed symbol is no ticker, so no close can\nvalue it), brokerage accounts switched back to the feed whose\nhand-tracked set still counts because no fetch has arrived since\n(open_manual_periods: check the connection or the account mapping),\nthe week's expected bills, sync failures, and bank feed problems open\nnow (feed: logins that need the user to log in again at the bank,\naccounts the bank fails to deliver, accounts whose bank balance has\nstopped updating; repeated on every call until fixed).\nPass the returned cursor on your next call to get only new material; a\nfirst call without a cursor looks back 7 days. Every line carries its\nentity id so you can drill without a search. Narrate this in your own\nvoice; the digest widget is the visual receipt.\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {

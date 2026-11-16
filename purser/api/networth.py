@@ -1,8 +1,8 @@
 """Net worth, holdings, and valuations API."""
 
 import uuid
-from datetime import UTC, datetime, timedelta
 from datetime import date as date_type
+from datetime import timedelta
 from decimal import Decimal
 from typing import Annotated, Literal
 
@@ -10,6 +10,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, s
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from purser import clock
 from purser import networth as service
 from purser.admin.auth import ReadToken, WriteToken
 from purser.db import get_session
@@ -68,6 +69,10 @@ class HoldingOut(BaseModel):
     unpriceable: bool = False
     # A close, but a value too large to store: check the share count.
     value_out_of_range: bool = False
+    # A manual row's trade cash not yet on the account (a sale's proceeds +,
+    # a funded buy's cost -), included in market_value until the cash lands
+    # (decision 104). Null when there is none.
+    in_transit: Decimal | None = None
 
     @classmethod
     def from_model(cls, h: Holding) -> "HoldingOut":
@@ -84,6 +89,7 @@ class HoldingOut(BaseModel):
             price_as_of=h.price_as_of,
             price_source=h.price_source,
             unpriceable=h.unpriceable,
+            in_transit=h.in_transit,
             value_out_of_range=(
                 h.market_value is None and h.price is not None and bool(h.quantity)
             ),
@@ -130,7 +136,7 @@ def net_worth(
 ) -> NetWorthOut:
     """Point-in-time net worth with a per-account breakdown — consistent for
     any historical date (postings <= T, latest snapshot/valuation <= T)."""
-    result = service.net_worth_at(session, as_of or datetime.now(UTC).date())
+    result = service.net_worth_at(session, as_of or clock.ledger_today())
     return NetWorthOut(
         as_of=result["as_of"],
         assets=result["assets"],
@@ -138,6 +144,44 @@ def net_worth(
         net_worth=result["net_worth"],
         breakdown=[BreakdownItem(**b) for b in result["breakdown"]],
     )
+
+
+class PotentialNetWorthOut(BaseModel):
+    """Current-price, pre-withholding scenario if all captured awards vest.
+
+    Unknown quantities or unavailable valuations leave complete totals null;
+    known_unvested_value remains the explicitly partial priced amount.
+    This does not change owned balances, net worth or historical series.
+    """
+
+    as_of: date_type
+    owned_assets: Decimal
+    liabilities: Decimal
+    owned_net_worth: Decimal
+    unvested_value: Decimal | None
+    known_unvested_value: Decimal
+    potential_assets: Decimal | None
+    potential_net_worth: Decimal | None
+    complete: bool
+    unvested_awards: int
+    unknown_quantity_awards: int
+    unsupported_currency_awards: int
+    unpriced_symbols: list[str]
+    stale_price_symbols: list[str]
+    oldest_price_as_of: date_type | None
+    next_vest_date: date_type | None
+
+
+@router.get("/potential")
+def potential_net_worth(token: ReadToken, session: DbSession) -> PotentialNetWorthOut:
+    """Home's potential assets/net worth including unvested stock at recorded
+    prices, before tax withholding, conditional on vesting. Current snapshot
+    only: no price forecast and no historical award reconstruction. Closed
+    accounts are excluded; hidden accounts count as they do in owned net worth.
+    """
+    from purser.holdings.potential import overview
+
+    return PotentialNetWorthOut(**overview(session, clock.ledger_today()))
 
 
 @router.get("/series")

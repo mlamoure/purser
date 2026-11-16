@@ -1,0 +1,106 @@
+# Reviewed 2026-11-16. Debian has no fixed version for these exact packages.
+# Re-review reachability on code/image changes; never extend dates automatically.
+# Raw scan artifacts retain all findings. New versions and new IDs fail closed.
+vulnerabilities:
+  - id: CVE-2025-69720
+    expired_at: 2026-12-01
+    statement: >-
+      Purser serves HTTP and runs a background worker; it does not use curses or parse untrusted terminal definitions.
+    purls:
+      - pkg:deb/debian/libncursesw6@6.5%2B20250216-2
+      - pkg:deb/debian/libtinfo6@6.5%2B20250216-2
+      - pkg:deb/debian/ncurses-base@6.5%2B20250216-2
+      - pkg:deb/debian/ncurses-bin@6.5%2B20250216-2
+  - id: CVE-2026-119373
+    expired_at: 2026-12-01
+    statement: >-
+      Purser uses PostgreSQL only, with no SQLite database, FTS5, changeset ingestion, or sqlite3 imports. SQLite remains a Python base-image library.
+    purls:
+      - pkg:deb/debian/libsqlite3-0@3.46.1-7%2Bdeb13u2
+  - id: CVE-2026-119374
+    expired_at: 2026-12-01
+    statement: >-
+      Purser uses PostgreSQL only, with no SQLite database, FTS5, changeset ingestion, or sqlite3 imports. SQLite remains a Python base-image library.
+    purls:
+      - pkg:deb/debian/libsqlite3-0@3.46.1-7%2Bdeb13u2
+  - id: CVE-2026-119379
+    expired_at: 2026-12-01
+    statement: >-
+      Purser uses PostgreSQL only, with no SQLite database, FTS5, changeset ingestion, or sqlite3 imports. SQLite remains a Python base-image library.
+    purls:
+      - pkg:deb/debian/libsqlite3-0@3.46.1-7%2Bdeb13u2
+  - id: CVE-2026-16742
+    expired_at: 2026-12-01
+    statement: >-
+      systemd-homed is absent from the runtime image; Purser is the entrypoint, with no systemd service manager.
+    purls:
+      - pkg:deb/debian/libsystemd0@257.13-1~deb13u1
+      - pkg:deb/debian/libudev1@257.13-1~deb13u1
+  - id: CVE-2026-54369
+    expired_at: 2026-12-01
+    statement: >-
+      No ACL manipulation or untrusted filesystem extraction in Purser. The application runs as UID 999, without privileged mounts; Compose and Helm disable privilege escalation.
+    purls:
+      - pkg:deb/debian/libacl1@2.3.2-2%2Bb1
+  - id: CVE-2026-76642
+    expired_at: 2026-12-01
+    statement: >-
+      No mount or nsenter invocation, mount helpers, or user-controlled mount options in Purser. UID 999 with all capabilities dropped and no-new-privileges in Compose/Helm prevents the required privileged execution.
+    purls:
+      - pkg:deb/debian/bsdutils@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/libblkid1@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/liblastlog2-2@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/libmount1@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/libsmartcols1@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/libuuid1@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/login@4.16.0-2%2Breally2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/mount@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/util-linux@2.41.5-0%2Bdeb13u1
+  - id: CVE-2026-78408
+    expired_at: 2026-12-01
+    statement: >-
+      No mount or nsenter invocation, mount helpers, or user-controlled mount options in Purser. UID 999 with all capabilities dropped and no-new-privileges in Compose/Helm prevents the required privileged execution.
+    purls:
+      - pkg:deb/debian/bsdutils@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/libblkid1@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/liblastlog2-2@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/libmount1@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/libsmartcols1@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/libuuid1@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/login@4.16.0-2%2Breally2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/mount@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/util-linux@2.41.5-0%2Bdeb13u1
+  - id: CVE-2026-78409
+    expired_at: 2026-12-01
+    statement: >-
+      No mount or nsenter invocation, mount helpers, or user-controlled mount options in Purser. UID 999 with all capabilities dropped and no-new-privileges in Compose/Helm prevents the required privileged execution.
+    purls:
+      - pkg:deb/debian/bsdutils@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/libblkid1@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/liblastlog2-2@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/libmount1@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/libsmartcols1@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/libuuid1@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/login@4.16.0-2%2Breally2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/mount@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/util-linux@2.41.5-0%2Bdeb13u1
+  - id: CVE-2026-78410
+    expired_at: 2026-12-01
+    statement: >-
+      No mount or nsenter invocation, mount helpers, or user-controlled mount options in Purser. UID 999 with all capabilities dropped and no-new-privileges in Compose/Helm prevents the required privileged execution.
+    purls:
+      - pkg:deb/debian/bsdutils@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/libblkid1@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/liblastlog2-2@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/libmount1@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/libsmartcols1@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/libuuid1@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/login@4.16.0-2%2Breally2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/mount@2.41.5-0%2Bdeb13u1
+      - pkg:deb/debian/util-linux@2.41.5-0%2Bdeb13u1
+  - id: CVE-2026-9538
+    expired_at: 2026-12-01
+    statement: >-
+      Archive::Tar is absent from perl-base in this image (perl -MArchive::Tar fails). Purser does not invoke Perl.
+    purls:
+      - pkg:deb/debian/perl-base@5.40.1-6%2Bdeb13u1

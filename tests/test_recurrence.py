@@ -153,3 +153,28 @@ class TestConfidence:
         assert three.confidence < eight.confidence
         assert noisy.confidence < eight.confidence
         assert noisy.amount_type == "estimated" and eight.amount_type == "fixed"
+
+
+class TestAttentionPatterns:
+    def test_four_week_cadence_drifts_across_calendar(self) -> None:
+        dates = [TODAY - timedelta(days=28 * n) for n in reversed(range(8))]
+        detected = recurrence.detect(_occ(dates, ["-24.00"] * 8), today=TODAY)
+        assert detected is not None
+        assert detected.cadence == "every 4 weeks"
+        assert "FREQ=WEEKLY;INTERVAL=4" in detected.rrule
+
+    def test_calendar_month_with_february_stays_monthly(self) -> None:
+        dates = [date(2026, m, 5) for m in range(1, 5)]
+        detected = recurrence.detect(_occ(dates, ["-24.00"] * 4), today=date(2026, 4, 6))
+        assert detected is not None and detected.cadence == "monthly"
+
+    def test_latest_price_change_is_distinct_from_historical_median(self) -> None:
+        detected = recurrence.detect(_occ(_monthly(5, 5), ["-8"] * 4 + ["-25"]), today=TODAY)
+        assert detected is not None and detected.price_changed
+        assert detected.latest_amount == Decimal("-25")
+        assert detected.typical_amount == Decimal("-8")
+
+    def test_opposite_same_day_rows_do_not_hide_sign_changes(self) -> None:
+        dates = _monthly(5, 4)
+        occurrences = _occ(dates, ["-100"] * 4) + _occ(dates, ["20"] * 4)
+        assert recurrence.detect(occurrences, today=TODAY) is None

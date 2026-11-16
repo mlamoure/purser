@@ -91,6 +91,18 @@ The clearest case is an ambiguous transfer: categorizing a row as
 that account could be its pair, the right move is to hand it back rather than
 guess.
 
+### Rows a securities trade holds
+
+A sale's cash on a hand-tracked brokerage account, and the bank's row a sale
+linked as its cash, are flagged `securities_trade` and carry `locked`, which
+names the trade (`event_id`) and its position (`position_id`). Such a row
+moves only with its trade, so recategorizing it or confirming it as a transfer
+is refused. Mark it reviewed if the trade is right; if it is wrong, reverse
+the trade's event (reopening a closed position first) and record it again.
+The batch's guidance says the same, so a later page fetched with
+`include_guidance=false` carries only the marker. See
+[Manual holdings](../../how-to/manual-holdings/).
+
 ## Letting Purser review it for you
 
 If you have configured an AI provider, you can have the review pass run

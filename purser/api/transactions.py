@@ -104,6 +104,10 @@ class TransactionOut(BaseModel):
     # whether a human/agent edit pinned it (exempt from rule refresh).
     schedule_id: uuid.UUID | None = None
     schedule_pinned: bool = False
+    # The cash of a securities trade (#390, decision 103): its category leg is
+    # the system account equity.securities. It moves only with its trade, so
+    # it cannot be edited or recategorized; reverse the trade instead.
+    securities_trade: bool = False
     created_at: datetime
 
     @classmethod
@@ -171,6 +175,7 @@ class TransactionOut(BaseModel):
             needs_review=needs_review,
             schedule_id=t.schedule_id,
             schedule_pinned=t.schedule_pinned_at is not None,
+            securities_trade=ledger.has_system_leg(t.postings),
             created_at=t.created_at,
         )
 
@@ -505,6 +510,32 @@ def mark_reviewed(body: MarkReviewed, token: WriteToken, session: DbSession) -> 
             already += 1
     session.commit()
     return {"marked": marked, "already_reviewed": already}
+
+
+class ReviewAccountSummary(BaseModel):
+    account_id: uuid.UUID
+    path: str
+    name: str
+    total: int
+    pending: int
+    agent_pending: int
+
+
+class ReviewSummary(BaseModel):
+    total: int
+    pending: int
+    agent_pending: int
+    oldest_date: date_type | None
+    accounts: list[ReviewAccountSummary]
+
+
+@router.get("/review-summary")
+def review_summary(token: ReadToken, session: DbSession) -> ReviewSummary:
+    """Review counts and register destinations. Transfers count once globally,
+    but appear on both accounts; per-account totals must not be summed."""
+    from purser import review as review_service
+
+    return ReviewSummary(**review_service.summary(session))
 
 
 @router.get("/review-batch")

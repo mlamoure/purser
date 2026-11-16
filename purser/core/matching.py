@@ -5,9 +5,11 @@ different amount is still a confident match; the difference is recorded as
 variance, which is signal (estimates improve, threshold alerts fire).
 """
 
+from bisect import bisect_left
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date as date_type
+from datetime import timedelta
 from decimal import Decimal
 from difflib import SequenceMatcher
 from enum import StrEnum
@@ -25,6 +27,10 @@ WEIGHT_AMOUNT = Decimal("0.20")
 
 # |variance| / |expected| above this emits a variance.threshold event.
 VARIANCE_EVENT_THRESHOLD = Decimal("0.25")
+
+# Two viable candidates this close make the best one ambiguous (#512): it is
+# proposed for review, never auto-matched.
+AMBIGUITY_MARGIN = 0.10
 
 
 class Tier(StrEnum):
@@ -57,6 +63,12 @@ class MatchInput:
     # another held row (one merged transfer cannot settle two expecteds).
     # None = unconstrained.
     pair_account_id: UUID | None = None
+    # Expected side only (#512, decision 108): the occurrence's amount / date
+    # is an estimate, so agreeing with it is evidence for a proposal but can
+    # never be what makes a match certain (the auto tier).
+    currency: str = "USD"
+    amount_estimated: bool = False
+    date_estimated: bool = False
 
 
 @dataclass(frozen=True)
@@ -100,8 +112,22 @@ def amount_score(expected: Decimal, candidate: Decimal) -> float:
 
 def score(expected: MatchInput, candidate: MatchInput) -> Scored:
     d = date_score(expected.date, candidate.date)
-    if d == 0.0:
-        tier_score = 0.0
+    incompatible = (
+        expected.amount * candidate.amount <= 0
+        or expected.currency != candidate.currency
+        or (
+            expected.account_id is not None
+            and candidate.account_id is not None
+            and expected.account_id != candidate.account_id
+        )
+        or (
+            expected.counterparty_account_id is not None
+            and candidate.counterparty_account_id is not None
+            and expected.counterparty_account_id != candidate.counterparty_account_id
+        )
+    )
+    if d == 0.0 or incompatible:
+        tier_score = certain_score = 0.0
     else:
         if (
             expected.counterparty_account_id is not None
@@ -111,12 +137,20 @@ def score(expected: MatchInput, candidate: MatchInput) -> Scored:
         else:
             p = payee_similarity(expected.normalized_payee, candidate.normalized_payee)
         a = amount_score(expected.amount, candidate.amount)
-        tier_score = float(
-            WEIGHT_PAYEE * Decimal(str(p))
-            + WEIGHT_DATE * Decimal(str(d))
-            + WEIGHT_AMOUNT * Decimal(str(a))
+        payee_term = WEIGHT_PAYEE * Decimal(str(p))
+        date_term = WEIGHT_DATE * Decimal(str(d))
+        amount_term = WEIGHT_AMOUNT * Decimal(str(a))
+        tier_score = float(payee_term + date_term + amount_term)
+        # The certain part (#512): what is left once the estimated terms are
+        # taken out. Only that may reach the auto tier.
+        certain_score = float(
+            payee_term
+            + (Decimal(0) if expected.date_estimated else date_term)
+            + (Decimal(0) if expected.amount_estimated else amount_term)
         )
-    if tier_score >= AUTO_THRESHOLD:
+    if certain_score >= AUTO_THRESHOLD and not (
+        expected.amount_estimated or expected.date_estimated
+    ):
         tier = Tier.AUTO
     elif tier_score >= PROPOSE_THRESHOLD:
         tier = Tier.PROPOSED
@@ -132,11 +166,21 @@ def score(expected: MatchInput, candidate: MatchInput) -> Scored:
 
 
 def best_match(expected: MatchInput, candidates: list[MatchInput]) -> Scored | None:
+    """The best viable candidate. An auto-tier best is AMBIGUOUS when another
+    viable candidate scores within ``AMBIGUITY_MARGIN`` of it (#512): two
+    similar deposits near a reimbursement's date are a question for review,
+    so the best is proposed instead of settled."""
     scored = [score(expected, c) for c in candidates]
     viable = [s for s in scored if s.tier is not Tier.NONE]
     if not viable:
         return None
-    return max(viable, key=lambda s: s.score)
+    best = max(viable, key=lambda s: s.score)
+    if best.tier is Tier.AUTO and any(
+        s.candidate_id != best.candidate_id and s.score >= best.score - AMBIGUITY_MARGIN
+        for s in viable
+    ):
+        return replace(best, tier=Tier.PROPOSED)
+    return best
 
 
 def variance_ratio(expected_amount: Decimal, variance: Decimal) -> Decimal | None:
@@ -268,27 +312,49 @@ def detect_transfer_pairs(
     Never merges — candidates only.
 
     ``window`` gives each pair its own date window, or None to rule the pair
-    out; omitted, every pair gets the global ±TRANSFER_WINDOW_DAYS. The only
-    caller that passes one is the widened pass over the account pairs that
-    transfer_link rules declare (decision 66), run on the rows the standard
-    window left unpaired. The greedy order is the same either way: outgoing
-    rows by date, each taking the earliest-dated incoming row that fits.
+    out; omitted, every pair gets the global ±TRANSFER_WINDOW_DAYS. The
+    widened pass over the account pairs that transfer_link rules declare
+    (decision 66) passes one, run on the rows the standard window left
+    unpaired; so does every caller that rules a pair out — a pair a human
+    unlinked or rejected — which must happen here, inside the greedy loop,
+    for the same reason as the account checks. The greedy order is the same
+    either way: outgoing rows by date, each taking the earliest-dated
+    incoming row that fits.
+
+    Only an incoming row of exactly the opposite amount can fit, so each
+    outgoing row looks only at those (incoming rows bucketed by amount, each
+    bucket in the same stable date order), and within its bucket only at the
+    rows dated at most TRANSFER_WINDOW_MAX_DAYS from it, entered by binary
+    search: no pair's window is wider (decision 66 caps a rule's window
+    there, and a wider limit from ``window`` is clamped to it). The result is
+    the full scan's, without its quadratic cost — even for a common round
+    amount over years of history (#386 review).
     """
     candidates: list[TransferCandidate] = []
     outs = [t for t in transactions if t.amount < 0]
-    ins = [t for t in transactions if t.amount > 0]
+    by_amount: dict[Decimal, list[MatchInput]] = {}
+    for inc in sorted((t for t in transactions if t.amount > 0), key=lambda t: t.date):
+        by_amount.setdefault(inc.amount, []).append(inc)
+    dates_of = {amount: [inc.date for inc in bucket] for amount, bucket in by_amount.items()}
+    reach = timedelta(days=TRANSFER_WINDOW_MAX_DAYS)
     used: set[UUID] = set()
     for out in sorted(outs, key=lambda t: t.date):
-        for inc in sorted(ins, key=lambda t: t.date):
+        bucket = by_amount.get(-out.amount)
+        if bucket is None:
+            continue
+        latest = out.date + reach
+        for index in range(bisect_left(dates_of[-out.amount], out.date - reach), len(bucket)):
+            inc = bucket[index]
+            if inc.date > latest:
+                break
             if inc.id in used:
                 continue
             if not _may_pair(out, inc):
                 continue
-            if inc.amount != -out.amount:
-                continue
             limit = TRANSFER_WINDOW_DAYS if window is None else window(out, inc)
             if limit is None:
                 continue
+            limit = min(limit, TRANSFER_WINDOW_MAX_DAYS)
             gap = abs((inc.date - out.date).days)
             if gap <= limit:
                 candidates.append(

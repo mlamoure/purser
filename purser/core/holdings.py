@@ -3,9 +3,11 @@ snapshot projection of manually tracked positions (DESIGN §8, decisions
 88/89). No I/O in this module — it is part of the mypy --strict core; the
 service layer (``purser.holdings``) loads the facts and persists the rows.
 
-Simple mode only (issue #390 phase 1a): a position's history is a sequence
-of ``set_quantity`` / ``buy`` / ``sell`` events. Its cost basis is a total,
-carried at average cost. Lots arrive in a later phase.
+A position's history is a sequence of ``set_quantity`` / ``buy`` / ``sell``
+events (issue #390), plus ``vest`` and ``transfer_out`` (issue #393). Its
+running cost basis is a total carried at average cost; a position that
+tracks lots (``purser.core.lots``) takes its basis from its lots instead,
+through ``PositionFacts.lots`` (decision 107).
 
 Arithmetic runs in a 60-digit decimal context: a NUMERIC(20,6) quantity
 times a NUMERIC(20,6) price has 40 significant digits, more than the default
@@ -18,13 +20,17 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
-from typing import NamedTuple
+from typing import NamedTuple, Protocol
 from uuid import UUID
 
 SET_QUANTITY = "set_quantity"
 BUY = "buy"
 SELL = "sell"
-KINDS = (SET_QUANTITY, BUY, SELL)
+VEST = "vest"  # an award vest: the net shares delivered (#393)
+TRANSFER_OUT = "transfer_out"  # shares leave with no price and no cash (#393)
+KINDS = (SET_QUANTITY, BUY, SELL, VEST, TRANSFER_OUT)
+ADDS = (BUY, VEST)  # kinds that add their quantity
+REMOVES = (SELL, TRANSFER_OUT)  # kinds that remove theirs (lot dispositions)
 
 QUANTITY_QUANT = Decimal("0.000001")  # position_events.quantity, NUMERIC(20,6)
 PRICE_QUANT = Decimal("0.000001")  # prices, NUMERIC(20,6)
@@ -196,6 +202,12 @@ def quantity_timeline(events: Iterable[Event]) -> list[Point]:
     - ``sell`` removes shares at average cost: the basis drops by
       ``basis * sold / held_before``, rounded to 4 places, so the removed
       amounts and the remaining basis always sum to the basis before.
+    - ``vest`` adds like a priced buy (its price is the fair market value),
+      and ``transfer_out`` removes like a sell (#393).
+
+    A position that tracks lots reports its lots' basis instead from the
+    first day a lot counts (``PositionFacts.lots``); this running basis is
+    what the days before carry.
 
     A position that holds nothing has a basis of zero. Raises
     ``NegativeQuantity`` at the first point below zero: a backdated sell or
@@ -213,14 +225,14 @@ def quantity_timeline(events: Iterable[Event]) -> list[Point]:
                 elif event.quantity != quantity:
                     basis = None  # a new count of unknown cost
                 quantity = event.quantity
-            elif event.kind == BUY:
+            elif event.kind in ADDS:
                 quantity += event.quantity
                 if basis is not None and event.price is not None:
                     increment = event.quantity * event.price + (event.fees or Decimal(0))
                     basis = money(basis + increment)
                 else:
                     basis = None
-            elif event.kind == SELL:
+            elif event.kind in REMOVES:
                 held = quantity
                 quantity -= event.quantity
                 if quantity < 0:
@@ -342,10 +354,50 @@ def price_on(points: Iterable[PricePoint], day: date) -> PricePoint | None:
 
 
 @dataclass(frozen=True)
+class InTransit:
+    """A trade's cash that lands after the trade (decision 104): the shares
+    move on the trade date, the cash on ``end`` — a later ``settle_on``, the
+    bank's date of a linked row, or of a broker row that took the cash over.
+    From ``start`` (the trade date) to the day before ``end`` the projection
+    counts ``amount`` (the account side: a sale's proceeds +, a funded buy's
+    cost -) in the position's row, so net worth does not dip or bump between
+    the two dates. Only an EFFECTIVE event's cash counts."""
+
+    event_id: UUID
+    start: date
+    end: date  # exclusive: the day the cash is on the account
+    amount: Decimal
+
+
+class LotBasis(Protocol):
+    """A position's lots as the projection reads them (``purser.core.lots``,
+    decision 107): the days its lot basis changes, and its total basis on a
+    day given the share count and the running average-cost basis."""
+
+    def change_dates(self) -> Iterable[date]: ...
+
+    def basis_on(self, day: date, quantity: Decimal, average: Decimal | None) -> Decimal | None: ...
+
+
+@dataclass(frozen=True)
 class PositionFacts:
     id: UUID
     symbol: str
     events: Sequence[Event]
+    in_transit: Sequence[InTransit] = ()
+    # A position that tracks lots: its basis comes from them (decision 107).
+    lots: LotBasis | None = None
+
+
+def basis_of(position: PositionFacts, day: date, state: Point | None) -> Decimal | None:
+    """The position's total cost basis at the end of ``day``: its lots' when
+    it tracks lots that count that day, else the running average-cost basis
+    of its timeline."""
+    if state is None:
+        return Decimal(0)
+    if position.lots is None:
+        return state.basis
+    return position.lots.basis_on(day, state.quantity, state.basis)
 
 
 @dataclass(frozen=True)
@@ -360,6 +412,9 @@ class Row:
     market_value: Decimal | None
     price: Decimal | None
     price_as_of: date | None
+    # A trade's cash not yet on the account that day, included in
+    # market_value (decision 104); None when there is none.
+    in_transit: Decimal | None = None
 
 
 def first_event_date(positions: Iterable[PositionFacts]) -> date | None:
@@ -432,6 +487,7 @@ def projection_rows(
     *,
     lower: date,
     upper: date,
+    settle_after: bool = False,
 ) -> list[Row]:
     """The manual snapshot rows of one account, for every date in
     ``[lower, upper]`` on which something changes (decision 88).
@@ -458,7 +514,20 @@ def projection_rows(
     One whose value at that close does not fit an amount gets ``market_value``
     None too, but keeps its ``price`` and ``price_as_of`` (reported as
     ``value_out_of_range``, decision 89); the account's other rows are
-    untouched. Pure in
+    untouched.
+
+    A trade whose cash lands after it (``PositionFacts.in_transit``,
+    decision 104) adds that cash to its symbol's row from the trade date to
+    the day before the cash lands — to the held row, or, once the position
+    holds nothing, to a zero-share row that carries only it — and the day
+    the cash lands is a change date, so the next set ends it. With
+    ``settle_after`` (the account's current period, ``upper`` = today) a
+    landing day after ``upper`` is a change date too: that future-dated set
+    is what ends the transit the day the cash posts, before any later
+    projection runs — without it the posted cash and the transit would both
+    count until one did (#498 review). Readers take sets at or before a day,
+    so it changes nothing before then. A held row
+    with no value (no price, or out of range) stays without one. Pure in
     (positions, prices, lower, upper): the same facts always give the same
     rows, ordered by (as_of, position_id). Raises ``NegativeQuantity`` and
     ``OutOfRange`` (a share count or basis beyond its column)."""
@@ -466,18 +535,37 @@ def projection_rows(
         return []
     ordered = sorted(positions, key=lambda p: p.id)
     timelines = {p.id: Timeline(quantity_timeline(p.events)) for p in ordered}
+    transits: dict[UUID, list[InTransit]] = {}
+    for position in ordered:
+        live = {e.id for e in effective_events(position.events)}
+        transits[position.id] = [
+            t
+            for t in position.in_transit
+            if t.event_id in live and t.start < t.end and t.amount != 0
+        ]
 
     change: set[date] = {lower}
     for position in ordered:
         timeline = timelines[position.id]
         change.update(point.on for point in timeline.points if lower <= point.on <= upper)
+        if position.lots is not None:
+            change.update(d for d in position.lots.change_dates() if lower <= d <= upper)
         book = prices.get(position.symbol)
         if book is not None:
             change.update(
                 day for day in book.dates_between(lower, upper) if timeline.quantity_on(day) > 0
             )
+        for t in transits[position.id]:
+            change.update(day for day in (t.start, t.end) if lower <= day <= upper)
+            if settle_after and t.end > upper:
+                change.add(t.end)
+
+    def in_transit_on(position: PositionFacts, day: date) -> Decimal:
+        return sum((t.amount for t in transits[position.id] if t.start <= day < t.end), Decimal(0))
 
     rows: list[Row] = []
+    # Whether the position's row on the previous set counted for something:
+    # shares, or cash in transit. Its next set then needs a zero row.
     held_before = dict.fromkeys(timelines, False)
     symbols = sorted({p.symbol for p in ordered})
     for day in sorted(change):
@@ -487,11 +575,17 @@ def projection_rows(
             # holds is written; with none holding, a single zero row ends it.
             held: list[Row] = []
             zero: list[tuple[bool, PositionFacts]] = []
+            carriers: list[PositionFacts] = []
+            transit = Decimal(0)
             for position in ordered:
                 if position.symbol != symbol:
                     continue
                 state = timelines[position.id].state_on(day)
                 quantity = state.quantity if state is not None else Decimal(0)
+                own = in_transit_on(position, day)
+                if own != 0:
+                    transit += own
+                    carriers.append(position)
                 if quantity > 0:
                     assert state is not None
                     book = prices.get(position.symbol)
@@ -502,7 +596,7 @@ def projection_rows(
                             position_id=position.id,
                             symbol=position.symbol,
                             quantity=quantity.quantize(QUANTITY_QUANT),
-                            cost_basis=state.basis,
+                            cost_basis=basis_of(position, day, state),
                             market_value=value,
                             price=close.close if close is not None else None,
                             price_as_of=close.price_date if close is not None else None,
@@ -510,9 +604,43 @@ def projection_rows(
                     )
                 elif held_before[position.id] or (day == lower and state is not None):
                     zero.append((held_before[position.id], position))
-                held_before[position.id] = quantity > 0
+            shown: set[UUID] = set()
             if held:
+                if transit != 0:
+                    first = held[0]
+                    held[0] = Row(
+                        as_of=first.as_of,
+                        position_id=first.position_id,
+                        symbol=first.symbol,
+                        quantity=first.quantity,
+                        cost_basis=first.cost_basis,
+                        market_value=(
+                            _money_in_range(first.market_value + transit)
+                            if first.market_value is not None
+                            else None
+                        ),
+                        price=first.price,
+                        price_as_of=first.price_as_of,
+                        in_transit=money(transit),
+                    )
                 rows.extend(held)
+                shown = {r.position_id for r in held}
+            elif transit != 0:
+                carrier = carriers[0]
+                rows.append(
+                    Row(
+                        as_of=day,
+                        position_id=carrier.id,
+                        symbol=symbol,
+                        quantity=Decimal(0).quantize(QUANTITY_QUANT),
+                        cost_basis=Decimal(0).quantize(MONEY_QUANT),
+                        market_value=_money_in_range(transit),
+                        price=None,
+                        price_as_of=None,
+                        in_transit=money(transit),
+                    )
+                )
+                shown = {carrier.id}
             elif zero:
                 # The position that just sold out, else the first in id order.
                 _, ended = next(((h, p) for h, p in zero if h), zero[0])
@@ -528,8 +656,19 @@ def projection_rows(
                         price_as_of=None,
                     )
                 )
+            for position in ordered:
+                if position.symbol == symbol:
+                    held_before[position.id] = position.id in shown
     rows.sort(key=lambda r: (r.as_of, r.position_id))
     return rows
+
+
+def _money_in_range(value: Decimal) -> Decimal:
+    """An amount quantized to NUMERIC(20,4), or ``MarketValueOutOfRange``."""
+    out = money(value)
+    if abs(out) >= MAX_MONEY:
+        raise MarketValueOutOfRange(f"{value} is out of range for an amount")
+    return out
 
 
 def unrealized_gain(market: Decimal | None, basis: Decimal | None) -> Decimal | None:

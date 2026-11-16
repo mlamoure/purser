@@ -1,11 +1,25 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, errorDetail } from "../lib/api";
-import { Badge, Button, Card, CardTitle, ErrorText, Input, Label, Table, Td, Th } from "../components/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  CardTitle,
+  ErrorText,
+  Input,
+  Label,
+  Table,
+  Td,
+  Th,
+} from "../components/ui";
 
 const SCOPES = [
   ["read", "Read everything (accounts, transactions, reports)"],
-  ["write", "Act for you: create and edit transactions, rules, schedules and matches (audited, reversible)"],
+  [
+    "write",
+    "Act for you: create and edit transactions, rules, schedules and matches (audited, reversible)",
+  ],
   ["admin", "Manage users, tokens, connections"],
 ] as const;
 
@@ -27,10 +41,13 @@ type Token = {
   is_current: boolean;
 };
 
-const fmtWhen = (iso: string | null | undefined) => (iso ? new Date(iso).toLocaleString() : "never");
-const isExpired = (t: Token) => !!t.expires_at && new Date(t.expires_at) <= new Date();
+const fmtWhen = (iso: string | null | undefined) =>
+  iso ? new Date(iso).toLocaleString() : "never";
+const isExpired = (t: Token) =>
+  !!t.expires_at && new Date(t.expires_at) <= new Date();
 // Session names are server-minted as `session:{method}:{email}`.
-const signInMethod = (t: Token) => (t.name.split(":")[1] === "oidc" ? "SSO" : "Password");
+const signInMethod = (t: Token) =>
+  t.name.split(":")[1] === "oidc" ? "SSO" : "Password";
 
 export default function Tokens() {
   const qc = useQueryClient();
@@ -39,13 +56,18 @@ export default function Tokens() {
   const [scopes, setScopes] = useState<string[]>(["read", "write"]);
   const [expiry, setExpiry] = useState<string>("never");
   const [showExpired, setShowExpired] = useState(false);
+  const [replaces, setReplaces] = useState("");
   const [minted, setMinted] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const tokens = useQuery({
     queryKey: ["tokens", showExpired],
     queryFn: async () =>
-      (await api.GET("/tokens", { params: { query: { include_expired: showExpired } } })).data ?? [],
+      (
+        await api.GET("/tokens", {
+          params: { query: { include_expired: showExpired } },
+        })
+      ).data ?? [],
   });
   const create = useMutation({
     mutationFn: async () => {
@@ -53,13 +75,21 @@ export default function Tokens() {
         expiry === "never"
           ? undefined
           : new Date(Date.now() + Number(expiry) * 86_400_000).toISOString();
-      const { data, error: err } = await api.POST("/tokens", { body: { name, scopes, expires_at } });
+      const { data, error: err } = await api.POST("/tokens", {
+        body: {
+          name,
+          scopes,
+          expires_at,
+          ...(replaces ? { replaces_token_id: replaces } : {}),
+        },
+      });
       if (err) throw new Error(errorDetail(err));
       return data!;
     },
     onSuccess: (data) => {
       setMinted(data.token);
       setName("");
+      setReplaces("");
       qc.invalidateQueries({ queryKey: ["tokens"] });
     },
     onError: (e) => setError(e.message),
@@ -72,7 +102,9 @@ export default function Tokens() {
       window.location.href = "/login";
       return;
     }
-    await api.DELETE("/tokens/{token_id}", { params: { path: { token_id: t.id } } });
+    await api.DELETE("/tokens/{token_id}", {
+      params: { path: { token_id: t.id } },
+    });
     qc.invalidateQueries({ queryKey: ["tokens"] });
   };
 
@@ -85,32 +117,74 @@ export default function Tokens() {
       <Card>
         <CardTitle>Create an API token</CardTitle>
         <p className="mb-4 text-sm text-muted-foreground">
-          For agents, the recommended scopes are <b>read + write</b>: your agent acts for
-          you. Every write it makes is attributed to its token in the audit log and can be
-          reversed, and when it acts on its own idea it proposes instead, so you decide.
-          Only this admin page mints tokens — an agent can never create or escalate its
-          own access.
+          For agents, the recommended scopes are <b>read + write</b>: your agent
+          acts for you. Every write it makes is attributed to its token in the
+          audit log and can be reversed, and when it acts on its own idea it
+          proposes instead, so you decide. Only this admin page mints tokens —
+          an agent can never create or escalate its own access.
         </p>
         <p className="mb-4 text-sm text-muted-foreground">
           Documentation:{" "}
-          <a href="/docs" target="_blank" rel="noreferrer" className="underline">
+          <a
+            href="/docs"
+            target="_blank"
+            rel="noreferrer"
+            className="underline"
+          >
             API reference (Swagger)
           </a>
           ,{" "}
-          <a href="/redoc" target="_blank" rel="noreferrer" className="underline">
+          <a
+            href="/redoc"
+            target="_blank"
+            rel="noreferrer"
+            className="underline"
+          >
             ReDoc
           </a>
           ,{" "}
-          <a href="/llms.txt" target="_blank" rel="noreferrer" className="underline">
+          <a
+            href="/llms.txt"
+            target="_blank"
+            rel="noreferrer"
+            className="underline"
+          >
             llms.txt (agent guide)
           </a>
-          . MCP clients connect to <code>/mcp</code> using the same Bearer tokens.
+          . MCP clients connect to <code>/mcp</code> using the same Bearer
+          tokens.
         </p>
         <div className="mb-4 space-y-1">
           <Label>Token name</Label>
-          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="my-agent" />
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="my-agent"
+          />
         </div>
         <div className="mb-4 space-y-2">
+          <label className="block space-y-1 text-sm">
+            <span>Integration identity</span>
+            <select
+              className="h-9 w-full rounded-md border border-border bg-card px-3"
+              value={replaces}
+              onChange={(e) => setReplaces(e.target.value)}
+            >
+              <option value="">New integration</option>
+              {apiTokens.map((t) => (
+                <option key={t.id} value={t.id}>
+                  Replace credential for {t.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          {replaces && (
+            <p className="text-sm text-muted-foreground">
+              The new credential keeps the same integration in audit history.
+              Update the integrator, then revoke the old credential; it remains
+              valid until you do.
+            </p>
+          )}
           {SCOPES.map(([scope, help]) => (
             <label key={scope} className="flex items-start gap-2 text-sm">
               <input
@@ -118,7 +192,11 @@ export default function Tokens() {
                 className="mt-1"
                 checked={scopes.includes(scope)}
                 onChange={(e) =>
-                  setScopes(e.target.checked ? [...scopes, scope] : scopes.filter((s) => s !== scope))
+                  setScopes(
+                    e.target.checked
+                      ? [...scopes, scope]
+                      : scopes.filter((s) => s !== scope),
+                  )
                 }
               />
               <span>
@@ -142,13 +220,22 @@ export default function Tokens() {
             ))}
           </select>
         </div>
-        <Button disabled={!name || scopes.length === 0 || create.isPending} onClick={() => { setError(null); setMinted(null); create.mutate(); }}>
+        <Button
+          disabled={!name || scopes.length === 0 || create.isPending}
+          onClick={() => {
+            setError(null);
+            setMinted(null);
+            create.mutate();
+          }}
+        >
           Create token
         </Button>
         <ErrorText>{error}</ErrorText>
         {minted && (
           <div className="mt-4 rounded-md border border-emerald-300 bg-emerald-50 p-3">
-            <p className="mb-1 text-sm font-medium text-emerald-900">Copy it now — shown exactly once:</p>
+            <p className="mb-1 text-sm font-medium text-emerald-900">
+              Copy it now — shown exactly once:
+            </p>
             <code className="break-all text-xs">{minted}</code>
           </div>
         )}
@@ -161,21 +248,40 @@ export default function Tokens() {
         </p>
         <Table>
           <thead>
-            <tr><Th>Name</Th><Th>Scopes</Th><Th>Created</Th><Th>Last used</Th><Th>Expires</Th><Th /></tr>
+            <tr>
+              <Th>Name</Th>
+              <Th>Scopes</Th>
+              <Th>Created</Th>
+              <Th>Last used</Th>
+              <Th>Expires</Th>
+              <Th />
+            </tr>
           </thead>
           <tbody>
             {apiTokens.map((t) => (
               <tr key={t.id}>
                 <Td>{t.name}</Td>
-                <Td className="space-x-1">{t.scopes.map((s) => <Badge key={s}>{s}</Badge>)}</Td>
+                <Td className="space-x-1">
+                  {t.scopes.map((s) => (
+                    <Badge key={s}>{s}</Badge>
+                  ))}
+                </Td>
                 <Td>{fmtWhen(t.created_at)}</Td>
                 <Td>{fmtWhen(t.last_used_at)}</Td>
                 <Td className="space-x-1">
-                  <span>{t.expires_at ? new Date(t.expires_at).toLocaleString() : "—"}</span>
+                  <span>
+                    {t.expires_at
+                      ? new Date(t.expires_at).toLocaleString()
+                      : "—"}
+                  </span>
                   {isExpired(t) && <Badge variant="red">expired</Badge>}
                 </Td>
                 <Td>
-                  <Button size="sm" variant="destructive" onClick={() => revoke(t)}>
+                  <Button
+                    size="sm"
+                    variant="destructive"
+                    onClick={() => revoke(t)}
+                  >
                     Revoke
                   </Button>
                 </Td>
@@ -191,13 +297,19 @@ export default function Tokens() {
       <Card>
         <CardTitle>Login sessions</CardTitle>
         <p className="mb-4 text-sm text-muted-foreground">
-          Each browser sign-in creates a session that expires automatically after a period of
-          inactivity. Dead sessions are removed by a background job; revoking one signs that
-          browser out.
+          Each browser sign-in creates a session that expires automatically
+          after a period of inactivity. Dead sessions are removed by a
+          background job; revoking one signs that browser out.
         </p>
         <Table>
           <thead>
-            <tr><Th>Signed in via</Th><Th>Created</Th><Th>Last used</Th><Th>Expires</Th><Th /></tr>
+            <tr>
+              <Th>Signed in via</Th>
+              <Th>Created</Th>
+              <Th>Last used</Th>
+              <Th>Expires</Th>
+              <Th />
+            </tr>
           </thead>
           <tbody>
             {sessions.map((t) => (
@@ -209,9 +321,15 @@ export default function Tokens() {
                 </Td>
                 <Td>{fmtWhen(t.created_at)}</Td>
                 <Td>{fmtWhen(t.last_used_at)}</Td>
-                <Td>{t.expires_at ? new Date(t.expires_at).toLocaleString() : "—"}</Td>
                 <Td>
-                  <Button size="sm" variant={t.is_current ? "outline" : "destructive"} onClick={() => revoke(t)}>
+                  {t.expires_at ? new Date(t.expires_at).toLocaleString() : "—"}
+                </Td>
+                <Td>
+                  <Button
+                    size="sm"
+                    variant={t.is_current ? "outline" : "destructive"}
+                    onClick={() => revoke(t)}
+                  >
                     {t.is_current ? "Sign out" : "Revoke"}
                   </Button>
                 </Td>

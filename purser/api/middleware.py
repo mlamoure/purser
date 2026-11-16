@@ -1,9 +1,8 @@
 """Read/write call auditing for REST — pure ASGI middleware (issue #122).
 
-One audit call row per authenticated request, written AFTER the final
-response body flushes (the client never waits on audit) on a short dedicated
-session (``audit.record_call`` swallows failures — an audit hiccup must not
-fail a read). Requests that never resolve a principal (401s, public probes,
+Integration responses are buffered up to a bounded capture limit and durably
+recorded before release. Browser activity remains best-effort after release.
+Requests that never resolve a principal (401s, public probes,
 static/SPA, /mcp — which audits per tool call) produce nothing: the auth
 dependency stamps ``request.state.audit_actor`` and its absence is the skip
 signal. 403s DO land here — denied attempts are exactly what an audit trail
@@ -68,80 +67,175 @@ class AuditMiddleware:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        from purser import sharing
+
         if scope["type"] != "http" or scope["method"] == "OPTIONS":
             await self.app(scope, receive, send)
             return
         path = scope.get("path", "")
-        if any(path == p or path.startswith(p + "/") or path.startswith(p) for p in _SKIP_PREFIXES):
+        if any(path == p or path.startswith(p + "/") for p in _SKIP_PREFIXES):
             await self.app(scope, receive, send)
             return
-
         request_id = uuid.uuid4()
         reset = audit.current_request_id.set(request_id)
         started = time.monotonic()
-        status_code = 0
+        response_start: MutableMapping[str, Any] | None = None
         chunks: list[bytes] = []
         captured = 0
+        complete = False
+
+        async def capture(
+            status_code: int, *, strict: bool, oversized: bool = False
+        ) -> uuid.UUID | None:
+            state = scope.get("state", {})
+            actor = state.get("audit_actor")
+            if actor is None:
+                return None
+            route = scope.get("route")
+            template = getattr(route, "path_format", None) or path
+            method = scope["method"]
+            kind = (
+                audit.KIND_READ
+                if method in ("GET", "HEAD") or template in _READ_POSTS
+                else audit.KIND_WRITE
+            )
+            path_params = scope.get("path_params") or {}
+            ids = [v for v in path_params.values() if _as_uuid(v) is not None]
+            query = dict(parse_qsl(scope.get("query_string", b"").decode("latin-1")))
+            body = b"".join(chunks)
+            summary = sharing.summarize(body, requested={**query, **path_params})
+            if oversized:
+                summary = {
+                    "version": 1,
+                    "partial": True,
+                    "data_types": [],
+                    "fields": [],
+                    "withheld": [],
+                    "record_count": None,
+                    "empty": False,
+                }
+            outcome = (
+                "denied"
+                if status_code in (401, 403)
+                else "failed"
+                if status_code >= 400 or (oversized and strict)
+                else "empty"
+                if summary.get("empty")
+                else "shared"
+            )
+            detail: dict[str, Any] = {
+                "method": method,
+                "path": template,
+                "status": status_code,
+                "ms": int((time.monotonic() - started) * 1000),
+                "identity": state.get("audit_identity"),
+                "sharing": summary,
+            }
+            if query:
+                detail["query"] = audit.clip_values(query)
+            if oversized:
+                detail["error"] = (
+                    "Response exceeded capture limit; integration response withheld."
+                    if strict
+                    else "Response exceeded capture limit; field inventory unavailable."
+                )
+            rows = _row_count(body) if kind == audit.KIND_READ else None
+            if rows is not None:
+                detail["rows"] = rows
+            return await anyio.to_thread.run_sync(
+                lambda: audit.record_call(
+                    actor_token_id=actor,
+                    kind=kind,
+                    action=f"{method} {template}",
+                    entity_type=audit.entity_for_path(template),
+                    entity_id=_as_uuid(ids[0]) if len(ids) == 1 else None,
+                    request_id=request_id,
+                    detail=detail,
+                    channel="rest",
+                    outcome=outcome,
+                    strict=strict,
+                )
+            )
 
         async def send_wrapper(message: MutableMapping[str, Any]) -> None:
-            nonlocal status_code, captured
+            nonlocal response_start, captured, complete
+            who = scope.get("state", {}).get("audit_identity") or {}
+            strict = who.get("kind") == "api"
             if message["type"] == "http.response.start":
-                status_code = message["status"]
-            elif message["type"] == "http.response.body":
-                body = message.get("body", b"")
-                if body and captured <= _BODY_CAP:
-                    chunks.append(body)
-                    captured += len(body)
-            await send(message)
+                response_start = message
+                if not strict:
+                    await send(message)
+                return
+            if message["type"] != "http.response.body":
+                await send(message)
+                return
+            body = message.get("body", b"")
+            captured += len(body)
+            if captured <= sharing.MAX_BODY:
+                chunks.append(body)
+            else:
+                chunks.clear()
+            if not strict:
+                await send(message)
+            if message.get("more_body", False):
+                return
+            complete = True
+            code = response_start["status"] if response_start else 500
+            if not strict:
+                with contextlib.suppress(Exception):
+                    event = await capture(code, strict=False, oversized=captured > sharing.MAX_BODY)
+                    await anyio.to_thread.run_sync(audit.record_receipt, event)
+                return
+            try:
+                event = await capture(code, strict=True, oversized=captured > sharing.MAX_BODY)
+            except audit.CaptureUnavailable as exc:
+                error_body = json.dumps({"detail": str(exc)}).encode()
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 503,
+                        "headers": [(b"content-type", b"application/json")],
+                    }
+                )
+                await send({"type": "http.response.body", "body": error_body})
+                return
+            if captured > sharing.MAX_BODY:
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": 413,
+                        "headers": [(b"content-type", b"application/json")],
+                    }
+                )
+                await send(
+                    {
+                        "type": "http.response.body",
+                        "body": (
+                            b'{"detail":"Response exceeds audit capture limit; narrow the request. '
+                            b'A requested write may already have completed."}'
+                        ),
+                    }
+                )
+                await anyio.to_thread.run_sync(audit.record_receipt, event, "interrupted")
+                return
+            try:
+                if response_start is not None:
+                    await send(response_start)
+                await send({"type": "http.response.body", "body": b"".join(chunks)})
+            except BaseException:
+                await anyio.to_thread.run_sync(audit.record_receipt, event, "interrupted")
+                raise
+            else:
+                await anyio.to_thread.run_sync(audit.record_receipt, event)
 
         try:
             await self.app(scope, receive, send_wrapper)
         finally:
+            if not complete and scope.get("state", {}).get("audit_actor"):
+                with contextlib.suppress(Exception):
+                    event = await capture(500, strict=False)
+                    await anyio.to_thread.run_sync(audit.record_receipt, event, "interrupted")
             audit.current_request_id.reset(reset)
-
-        actor_token_id = scope.get("state", {}).get("audit_actor")
-        if actor_token_id is None:
-            return  # no principal resolved: public, unauthenticated, or 401
-
-        route = scope.get("route")
-        path_template = getattr(route, "path_format", None) or path
-        method = scope["method"]
-        kind = (
-            audit.KIND_READ
-            if method in ("GET", "HEAD") or path_template in _READ_POSTS
-            else audit.KIND_WRITE
-        )
-        entity_id = None
-        path_params = scope.get("path_params") or {}
-        uuid_params = [v for v in path_params.values() if _as_uuid(v) is not None]
-        if len(uuid_params) == 1:
-            entity_id = _as_uuid(uuid_params[0])
-        query = dict(parse_qsl(scope.get("query_string", b"").decode("latin-1")))
-        detail: dict[str, Any] = {
-            "method": method,
-            "path": path_template,
-            "status": status_code,
-            "ms": int((time.monotonic() - started) * 1000),
-        }
-        if query:
-            detail["query"] = audit.clip_values(query)
-        rows = _row_count(b"".join(chunks)) if kind == audit.KIND_READ else None
-        if rows is not None:
-            detail["rows"] = rows
-
-        # the response is already sent — an audit hiccup must never resurface
-        with contextlib.suppress(Exception):
-            await anyio.to_thread.run_sync(
-                lambda: audit.record_call(
-                    actor_token_id=actor_token_id,
-                    kind=kind,
-                    action=f"{method} {path_template}",
-                    entity_type=audit.entity_for_path(path_template),
-                    entity_id=entity_id,
-                    request_id=request_id,
-                    detail=detail,
-                )
-            )
 
 
 def _as_uuid(value: Any) -> uuid.UUID | None:

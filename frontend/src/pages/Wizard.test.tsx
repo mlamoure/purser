@@ -163,4 +163,27 @@ describe("Wizard (first-run flow across the steps)", () => {
     expect(await screen.findByRole("heading", { name: "Connect your AI agent" })).toBeInTheDocument();
     expect(screen.queryByText("setup token already claimed")).not.toBeInTheDocument();
   });
+
+  it("retries the saved connection after a failed first fetch without reclaiming the token", async () => {
+    let attempts = 0;
+    mockApi({
+      "POST /auth/setup": ok({ status: "created" }, 201),
+      "GET /auth/encryption-key": fail(410, "encryption key already acknowledged"),
+      "POST /connections": ok(CONNECTION, 201),
+      "POST /connections/{connection_id}/sync": () => ++attempts === 1
+        ? fail(502, "accounts fetch failed with HTTP 503")
+        : ok({}),
+      "GET /connections/{connection_id}/discovered": ok([]),
+    });
+    const { user, container } = renderWithProviders(<Wizard />);
+    await createAdmin(user, container);
+    await screen.findByRole("heading", { name: "Connect your bank feed (SimpleFIN)" });
+    await user.type(screen.getByRole("textbox"), "synthetic-setup-token");
+    await user.click(screen.getByRole("button", { name: "Connect & fetch" }));
+    expect(await screen.findByText("accounts fetch failed with HTTP 503")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Connect & fetch" }));
+    await screen.findByRole("heading", { name: "Map discovered accounts" });
+    expect(apiMock.POST.mock.calls.filter(([path]) => path === "/connections")).toHaveLength(1);
+    expect(attempts).toBe(2);
+  });
 });

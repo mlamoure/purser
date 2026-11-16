@@ -114,6 +114,73 @@ function AiCard({ initial }: { initial: ConfigOut }) {
   );
 }
 
+/** IANA zones the browser knows, for the time zone suggestions. UTC first:
+ * some engines leave it out of supportedValuesOf. */
+function knownTimeZones(): string[] {
+  const zones = typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
+  return ["UTC", ...zones.filter((z) => z !== "UTC")];
+}
+
+function browserTimeZone(): string | null {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+  } catch {
+    return null;
+  }
+}
+
+function TimeZoneCard({ initial }: { initial: ConfigOut }) {
+  const [zone, setZone] = useState(initial.values.timezone);
+  const [error, setError] = useState<string | null>(null);
+  const save = useSaveConfig(setError);
+  const browserZone = browserTimeZone();
+  const trimmed = zone.trim();
+
+  return (
+    <Card>
+      <CardTitle>Time zone</CardTitle>
+      <p className="mb-4 text-sm text-muted-foreground">
+        The household's time zone decides what "today" is: when a bill is due or late, the
+        week of upcoming bills, net worth for today, and how old an unreviewed or stale item
+        is. Scheduled jobs keep running at their UTC times, and timestamps stay in UTC.
+      </p>
+      <div className="flex items-end gap-2">
+        <div className="flex-1 space-y-1">
+          <Label htmlFor="household-timezone">Household time zone</Label>
+          <Input
+            id="household-timezone"
+            list="household-timezone-options"
+            value={zone}
+            onChange={(e) => setZone(e.target.value)}
+            placeholder="e.g. America/New_York"
+          />
+          <datalist id="household-timezone-options">
+            {knownTimeZones().map((z) => (
+              <option key={z} value={z} />
+            ))}
+          </datalist>
+        </div>
+        {browserZone && browserZone !== trimmed && (
+          <Button variant="outline" onClick={() => setZone(browserZone)}>
+            Use {browserZone}
+          </Button>
+        )}
+        <Button
+          disabled={save.isPending || !trimmed}
+          onClick={() => {
+            setError(null);
+            save.mutate({ timezone: trimmed });
+          }}
+        >
+          Save
+        </Button>
+      </div>
+      <Saved visible={save.isSuccess} />
+      <ErrorText>{error}</ErrorText>
+    </Card>
+  );
+}
+
 function TransfersCard({ initial }: { initial: ConfigOut }) {
   const [autoLink, setAutoLink] = useState(initial.values.transfer_auto_link);
   const [error, setError] = useState<string | null>(null);
@@ -432,6 +499,7 @@ export default function Settings() {
 
   return (
     <div className="space-y-6">
+      <TimeZoneCard initial={config.data} />
       <TransfersCard initial={config.data} />
       <PrivacyCard initial={config.data} />
       <AiCard initial={config.data} />

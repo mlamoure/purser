@@ -24,6 +24,11 @@ from purser.logging import get_logger
 log = get_logger(__name__)
 
 DEFAULT_SYNC_CRON: dict[str, str | int] = {"hour": 6, "minute": 30}
+# The SimpleFIN Bridge asks apps to spread their fetches instead of all
+# hitting it on the same minute (#483). APScheduler's jitter only delays, by
+# 0..N seconds, so every preset's :30 run lands between :30 and :40 — still
+# before the 06:45 matching job.
+SYNC_JITTER_SECONDS = 600
 
 # APScheduler's default `misfire_grace_time` is ONE SECOND: a job whose fire
 # time slips past it — a loaded box, a paused container, a worker restart that
@@ -129,9 +134,11 @@ def build_scheduler() -> BackgroundScheduler:
     _register_builtin_jobs()
     scheduler = BackgroundScheduler(timezone="UTC", job_defaults=JOB_DEFAULTS)
     for job_id, cron, fn in _JOBS:
+        extra: dict[str, int] = {}
         if job_id == "feed.sync_daily":
             cron = _sync_cron()
-        scheduler.add_job(fn, "cron", id=job_id, **cron)
+            extra["jitter"] = SYNC_JITTER_SECONDS
+        scheduler.add_job(fn, "cron", id=job_id, **cron, **extra)
         log.info("scheduled job", job_id=job_id, cron=cron)
     _active = scheduler
     return scheduler
@@ -154,6 +161,9 @@ def reschedule_sync() -> bool:
 
     assert _active is not None
     cron = _sync_cron()
-    _active.reschedule_job("feed.sync_daily", trigger=CronTrigger(timezone="UTC", **cron))
+    _active.reschedule_job(
+        "feed.sync_daily",
+        trigger=CronTrigger(timezone="UTC", jitter=SYNC_JITTER_SECONDS, **cron),
+    )
     log.info("rescheduled job", job_id="feed.sync_daily", cron=cron)
     return True

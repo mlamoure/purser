@@ -13,6 +13,7 @@ const checking: Discovered = {
   mapped_account_id: null,
   mapped_account_path: null,
   drift_basis_pinned: false,
+  ambiguous: false,
 };
 const savings: Discovered = {
   external_id: "ext-2",
@@ -23,6 +24,7 @@ const savings: Discovered = {
   mapped_account_id: "a-2",
   mapped_account_path: "assets.rainy_day",
   drift_basis_pinned: false,
+  ambiguous: false,
 };
 
 const rowOf = (text: string) => screen.getByText(text).closest("tr")!;

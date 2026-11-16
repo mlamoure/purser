@@ -32,8 +32,25 @@ class ConnectionOut(BaseModel):
     last_fetch_at: datetime | None
 
 
+class IssueOut(BaseModel):
+    """One error the server reported with a fetch (SimpleFIN v2 ``errlist``,
+    #479). ``code`` is ``gen.*`` (general), ``con.*`` (one bank login: e.g.
+    ``con.auth``, log in again) or ``act.*`` (one account: ``act.failed``,
+    ``act.missingdata``, try again later). A v1 message has no code and reads
+    as a naked ``gen.``."""
+
+    code: str
+    msg: str
+    conn_id: str | None = None
+    account_id: str | None = None
+
+
 class HealthOut(ConnectionOut):
+    # Messages of the latest fetch's issues (the shape before #479).
     last_errors: list[str]
+    last_issues: list[IssueOut] = []
+    # SimpleFIN protocol version of the latest fetch (None before the first).
+    protocol_version: int | None = None
     fetches_today: int
     # Historical backfill progress (issue #126): how far back we've fetched and
     # whether the institution's history is exhausted.
@@ -44,16 +61,28 @@ class HealthOut(ConnectionOut):
 class DiscoveredOut(BaseModel):
     external_id: str
     name: str | None
+    # The bank login's name (v2 connection name; v1 org name).
     org: str | None
+    # The bank login's id (SimpleFIN v2 conn_id; None for a v1 fetch).
+    conn_id: str | None = None
+    # True when another account in the same fetch has this external id (two
+    # logins): it is neither imported nor drift-checked until the ids differ.
+    ambiguous: bool = False
     currency: str
     balance: str | None
+    # The bank's available balance (#483), on cash and card accounts only and
+    # only when it differs from balance: spendable cash, or a card's
+    # remaining credit. Null otherwise.
+    available_balance: str | None = None
     balance_date: date | None = None
     mapped_account_id: uuid.UUID | None
     mapped_account_path: str | None
     # Live reported-vs-ledger drift (DESIGN §7.3), mapped cash/card accounts
-    # only. Tri-state: both None = not applicable (unmapped / valuation- or
-    # holdings-driven type); ledger_balance set + drift None = clean (either
-    # basis matched); both set = drifting, drift is the signed delta string.
+    # only, plus a hand-tracked brokerage account whose feed_balance_is_cash
+    # is on (decision 103). Tri-state: both None = not applicable (unmapped /
+    # valuation- or holdings-driven type); ledger_balance set + drift None =
+    # clean (either basis matched); both set = drifting, drift is the signed
+    # delta string.
     ledger_balance: str | None = None
     drift: str | None = None
     # Set whenever ledger_balance is: the ledger basis this account's bank
@@ -70,10 +99,81 @@ class DiscoveredOut(BaseModel):
     drift_basis_learned: Literal["pending_inclusive", "posted_only"] | None = None
 
 
+class InventoryIssueOut(BaseModel):
+    code: str
+    message: str
+
+
+class InventoryAccountOut(BaseModel):
+    # The bank's name for the account; for tokens that withhold external
+    # identifiers (#437) the masked account-number suffix is removed.
+    name: str | None
+    # SimpleFIN account id; null for tokens that withhold external ids.
+    external_id: str | None = None
+    # The ledger account it feeds, or null when it is not connected.
+    account: str | None
+    connected: bool
+    # Mapped to a ledger account that is closed (so not syncing).
+    closed: bool = False
+    balance_date: date | None
+    days_since_balance: int | None
+    # balance_date older than feed_stale_days.
+    stale: bool
+    # Rows the latest sync's fetch carried for the account.
+    holdings: int
+    transactions: int
+    issue: InventoryIssueOut | None = None
+    ambiguous: bool = False
+
+
+class InventoryLoginOut(BaseModel):
+    institution: str | None
+    # SimpleFIN v2 conn_id; null for v1 fetches and for tokens that withhold
+    # external ids.
+    conn_id: str | None = None
+    url: str | None = None
+    issue: InventoryIssueOut | None = None
+    accounts: list[InventoryAccountOut]
+
+
+class InventoryConnectionOut(BaseModel):
+    # Null for tokens that withhold external ids.
+    connection_id: uuid.UUID | None = None
+    status: str
+    last_sync_at: datetime | None
+    protocol_version: int | None = None
+    stale_days: int
+    logins: list[InventoryLoginOut]
+
+
 class MapRequest(BaseModel):
     external_id: str
     account_id: uuid.UUID | None = None
     create: dict[str, str] | None = None
+
+
+class GapRepairOut(BaseModel):
+    """The re-fetch a sync ran (or owes) for accounts back from an outage."""
+
+    accounts: list[str]  # ledger account paths
+    start: date
+    end: date
+    # Set when the outage began before the Bridge's reach (90 days): rows
+    # before this date need a manual import.
+    unreachable_before: date | None = None
+    # Set when the repair could not run on this sync (rate_budget,
+    # fetch_error); it stays owed and the next sync tries again.
+    deferred: Literal["rate_budget", "fetch_error"] | None = None
+    # The last page's archived fetch, and how many ≤45-day pages it took.
+    raw_fetch_id: uuid.UUID | None = None
+    pages: int = 0
+    imported: int = 0
+    skipped: int = 0
+    skipped_before_feed_start: int = 0
+    skipped_masked_duplicate: int = 0
+    skipped_redescribed: int = 0
+    # Rows that took over a hand-tracked trade's cash (#408, decision 103).
+    linked_trade_cash: int = 0
 
 
 class SyncOut(BaseModel):
@@ -105,16 +205,54 @@ class SyncOut(BaseModel):
     # feed does not report. Audited as account.manual_period_end.
     manual_period_rows_deleted: int = 0
     manual_period_tombstones: int = 0
+    # Accounts skipped because another account in the fetch has the same id
+    # (two bank logins, #479): never imported onto one ledger account.
+    skipped_ambiguous_accounts: int = 0
+    # The broker's own copy of a trade's cash Purser had already posted on a
+    # hand-tracked account (#408, decision 103): imported as the trade's cash,
+    # Purser's row superseded by it (counted in imported too) — or, while
+    # pending, not stored, so the posted row takes over when the bank books it.
+    linked_trade_cash: int = 0
+    skipped_trade_cash_pending: int = 0
     errors: list[str]
+    issues: list[IssueOut] = []
     # Long-idle catch-up (#218): backfill-style windows fetched ahead of the
     # final ≤max-range window, with their summed import counts.
     gap_windows: int = 0
+    # The gap windows' share of the counts above (which include them, #490).
     gap_stats: dict[str, int] | None = None
+    # Outage repair (#481): set when accounts came back from an outage whose
+    # rows this sync's window did not reach; see GapRepairOut.
+    gap_repair: GapRepairOut | None = None
+
+
+class RefetchRequest(BaseModel):
+    start: date
+    # Inclusive; default today. At most 90 days from start.
+    end: date | None = None
+    # Ledger account paths or ids mapped to this connection; default all.
+    accounts: list[str] | None = None
+
+
+class RefetchOut(BaseModel):
+    # The last page's archived fetch; pages = ≤45-day requests made (#490).
+    raw_fetch_id: uuid.UUID
+    pages: int = 1
+    start: date
+    end: date
+    accounts: list[str]
+    imported: int
+    skipped: int
+    skipped_before_feed_start: int = 0
+    skipped_masked_duplicate: int = 0
+    skipped_redescribed: int = 0
+    # Rows that took over a hand-tracked trade's cash (#408, decision 103).
+    linked_trade_cash: int = 0
 
 
 class BackfillRequest(BaseModel):
-    # windows: how many ≤90-day pages to walk this run (bridge budget capped).
-    windows: int = Field(4, ge=1, le=6)
+    # windows: how many ≤45-day pages to walk this run (bridge budget capped; #490).
+    windows: int = Field(8, ge=1, le=12)
     # optional floor: stop once a window reaches this date (don't page past it).
     target_date: date | None = None
     # Optional focus (issue #154): SimpleFIN external ids, sent as repeatable
@@ -137,6 +275,8 @@ class BackfillOut(BaseModel):
     # Re-described copies of rows the ledger already holds (issue #331,
     # decision 74).
     skipped_redescribed: int = 0
+    # Rows that took over a hand-tracked trade's cash (#408, decision 103).
+    linked_trade_cash: int = 0
     empty_windows: int
     backfill_complete: bool
     stopped_because: str
@@ -171,6 +311,22 @@ def create_connection(
         created_at=connection.created_at,
         last_fetch_at=connection.last_fetch_at,
     )
+
+
+@router.get("/inventory")
+def feed_inventory(token: ReadToken, session: DbSession) -> list[InventoryConnectionOut]:
+    """Every account SimpleFIN delivers, connected or not, grouped by bank
+    login: the login's issue, and per account whether it feeds a ledger
+    account, how old its bank balance is, whether holdings and transactions
+    arrive, and any account-level issue. Read scope; account numbers and
+    SimpleFIN ids are withheld from non-admin API tokens (#482)."""
+    from purser.admin import security
+    from purser.feed import inventory
+
+    redact = security.withholds_external_ids(token.kind, token.scopes)
+    return [
+        InventoryConnectionOut(**row) for row in inventory.feed_inventory(session, redact=redact)
+    ]
 
 
 @router.get("")
@@ -222,6 +378,34 @@ def trigger_backfill(
     session.commit()
     background_tasks.add_task(networth.consume_watermark)
     return BackfillOut(**result)
+
+
+@router.post("/{connection_id}/refetch")
+def trigger_refetch(
+    connection_id: uuid.UUID,
+    body: RefetchRequest,
+    token: WriteToken,
+    session: DbSession,
+    background_tasks: BackgroundTasks,
+) -> RefetchOut:
+    """Re-fetch a date range (at most 90 days) for some or all mapped
+    accounts and import what is missing — for a gap a bank outage left that
+    the automatic repair did not cover. Archive-first, idempotent; shares
+    the daily fetch budget. Agents may run it (write scope)."""
+    try:
+        result = service.refetch_connection(
+            session,
+            connection_id=connection_id,
+            start=body.start,
+            end=body.end,
+            accounts=body.accounts,
+            actor_token_id=token.id,
+        )
+    except (service.FeedError, EncryptionKeyMissing) as exc:
+        raise _wrap(exc) from exc
+    session.commit()
+    background_tasks.add_task(networth.consume_watermark)
+    return RefetchOut(**result)
 
 
 @router.get("/{connection_id}/discovered")

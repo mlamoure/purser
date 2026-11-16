@@ -24,11 +24,10 @@ clients below. Recommended agent scopes: **`read + write`**.
 
 Your agent acts for you: with `write` it writes directly when carrying out
 your request, and proposes instead when acting on its own initiative (a draft
-rule or memory, or a schedule suggestion). Every write is attributed to its
-token in the audit log and reversible. Token minting requires `admin` — an
-agent can never create tokens, so it can never grant itself more access or
-clone its own. An admin-scoped token can mint tokens: reserve it for trusted
-administration.
+rule or financial note, or a schedule suggestion). Every write is attributed to its
+token in the audit log and reversible. A token with only `read + write`
+cannot create tokens or grant itself more access. Token creation requires
+`admin`: reserve that scope for trusted administration.
 
 ## First call: describe
 
@@ -170,3 +169,16 @@ Clients that only speak stdio can bridge to the HTTP endpoint with
 `mcp-remote`.
 
 The full toolset is in the [MCP tool catalog](../../reference/mcp-tools/).
+
+## Replace a credential without splitting its audit history
+
+In **API & MCP Access**, choose **Replace credential for ...** under
+**Integration identity** when creating the replacement. The new credential keeps
+the same integration ID, with its own grant and effective permissions. Update the
+integrator to use it, then revoke the old credential. Creating a replacement does
+not automatically revoke the old one. Enable **Show expired and revoked** if you
+need to select an older credential. Only an administrator can create replacements,
+and they must belong to that administrator's user.
+
+Give separate integrations separate identities. A gateway credential shared by
+several agents identifies the gateway; Purser cannot infer which agent used it.

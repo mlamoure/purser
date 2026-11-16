@@ -1,14 +1,12 @@
 ---
 title: Matching
-description: Why reconciling expectations against imported reality is the center of gravity, and how candidates, tiers, and variance work.
+description: How expected payments are matched to bank transactions, with candidate scoring and recorded variances.
 ---
 
-Matching is Purser's center of gravity. A ledger that only records what already
-cleared is a rear-view mirror; Purser also holds **expectations** — manual bills,
-materialized [schedule](../../how-to/schedules-and-bills/) instances, and the
-uncleared rows of a [file import](../../how-to/import-qif-csv/) — and
-reconciles them against the imported reality of what the bank actually did. That
-reconciliation is where "the books cannot be silently wrong" earns its keep.
+Purser matches expected payments to bank transactions. Expectations include
+manual bills, [schedule](../../how-to/schedules-and-bills/) instances and
+uncleared rows from a [file import](../../how-to/import-qif-csv/). Matching
+retains the bank-reported amount and records differences from the estimate.
 
 ## Expected versus imported
 
@@ -41,7 +39,7 @@ expected card payment pairs with a merged transfer that carries no payee.
 
 The score sorts each expectation into one of three outcomes:
 
-- **auto** — a high score matches automatically.
+- **auto** — a high score matches automatically only when the occurrence is not estimated and the candidate is unambiguous.
 - **proposed** — a middling score becomes a `proposed` match for you to confirm
   or reject. It waits as a `match` card in the
   [suggestions inbox](../../how-to/suggestions/), and in the account register.
@@ -94,9 +92,26 @@ late bills, and **posted-but-unexpected** rows are new spending to triage. The
 haven't shown up?" and "what did I spend that I didn't plan?" as one call each.
 
 Transfer detection is a specialized branch of the same machinery — see
-[Manage transfers](../../how-to/transfers/). The authoritative spec is
+[Manage transfers](../../how-to/transfers/). A pair that looks like a transfer but
+carries nothing to link it waits for you the way a proposed match does: as a
+`transfer_pair` card in the inbox, and rejecting it is remembered by every
+automatic path. The authoritative spec is
 [`DESIGN.md`](https://github.com/mlamoure/purser/blob/main/DESIGN.md)
 section 5, and the principle behind it is design principle 5.
 
 Correction history contributes only its current replacement. A reversal is an
 accounting entry, not a bank payment, and cannot settle an expected bill.
+
+
+## Occurrence certainty and review
+
+Amount and date estimates are tracked independently. An estimated dimension
+cannot make a plausible candidate certain: estimated occurrences require review.
+Two candidates within 0.10 of the best score, or competing recurrence slots for
+the same movement, also require review. Account, direction, currency and
+counterparty compatibility are checked even for manual confirmation.
+
+The original estimate and its provenance remain available beside the linked
+actual and amount/timing variance. Unmatching keeps confirmation evidence on the
+replacement occurrence; reset explicitly returns it to the rule. It never creates
+another posted transaction. See [Occurrence estimates](../../how-to/schedules-and-bills/#estimate-certainty-on-one-occurrence).

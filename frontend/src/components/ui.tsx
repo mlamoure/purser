@@ -51,7 +51,7 @@ export function Label({ className, ...props }: React.LabelHTMLAttributes<HTMLLab
 export function Card({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return (
     <div
-      className={cn("rounded-xl border border-border bg-card p-6 shadow-sm", className)}
+      className={cn("min-w-0 rounded-xl border border-border bg-card p-4 shadow-sm sm:p-6", className)}
       {...props}
     />
   );
@@ -86,7 +86,7 @@ export function Badge({
 
 export function Table({ className, ...props }: React.TableHTMLAttributes<HTMLTableElement>) {
   return (
-    <div className="overflow-x-auto">
+    <div className="min-w-0 max-w-full overflow-x-auto">
       <table className={cn("w-full text-sm", className)} {...props} />
     </div>
   );
@@ -107,5 +107,5 @@ export function Td({ className, ...props }: React.TdHTMLAttributes<HTMLTableCell
 
 export function ErrorText({ children }: { children: React.ReactNode }) {
   if (!children) return null;
-  return <p className="mt-2 text-sm text-destructive">{String(children)}</p>;
+  return <p role="alert" className="mt-2 text-sm text-destructive">{String(children)}</p>;
 }

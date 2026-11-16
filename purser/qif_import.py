@@ -1387,6 +1387,9 @@ def import_qif(
     from purser import transfers
 
     stats.update(transfers.auto_link_pass(session))
+    # What it left unlinked becomes the inbox's transfer_pair cards and the
+    # transfer.candidate events (#386); its counts stay out of the import's.
+    transfers.sync_candidate_suggestions(session, actor_token_id=actor)
 
     result = {
         **stats,

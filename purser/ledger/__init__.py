@@ -8,7 +8,8 @@ importer — gets identical semantics:
 
 This module only re-exports (issue #91). The code lives in submodules, each
 importing only the ones listed before it:
-- errors: LedgerError and its subclasses, check_path, ltree_input_refusal
+- errors: LedgerError and its subclasses (RowChanged among them), check_path,
+  ltree_input_refusal
 - payees: resolve_payee
 - accounts: account and category lookup, create, update, move, delete, and
   the closed-account guard
@@ -16,7 +17,8 @@ importing only the ones listed before it:
 - tx_create: the create forms and the _persist_transaction funnel
 - lifecycle: close_account and reopen_account
 - tx_read: get_transaction and search_transactions
-- tx_update: edits, correction pairs, recategorize_posted, transition_status
+- tx_update: edits, correction pairs, recategorize_posted, transition_status,
+  and the row lock and corrected-row refusal every merge and correction runs
 
 Two rules keep the split invisible:
 - Import from ``purser.ledger`` only (``from purser import ledger`` or
@@ -39,13 +41,28 @@ re-exported with the redundant-alias form; no other private name is.
 from purser.ledger.accounts import (
     CATEGORY_TYPES,
     REAL_TYPES,
+    SECURITIES_PATH,
+    SYSTEM_ROOT,
+    SYSTEM_TYPES,
     account_by_path,
     create_account,
     delete_category,
     ensure_category_path,
     get_account,
+    has_system_leg,
+    in_system_subtree,
+    is_category,
+    is_system_account,
+    is_trade_cash_lineage,
+    lock_transaction,
     move_account,
+    refuse_system_account,
+    refuse_system_path,
+    refuse_trade_cash_lineage,
     resolve_account,
+    securities_account,
+    trade_cash_lineage_ids,
+    trade_cash_lineage_set,
     update_account,
     update_category,
 )
@@ -53,6 +70,8 @@ from purser.ledger.errors import (
     LedgerError,
     NotFoundError,
     PathConflictError,
+    RowBusy,
+    RowChanged,
     check_path,
     ltree_input_refusal,
 )
@@ -79,7 +98,9 @@ from purser.ledger.tx_read import get_transaction, search_transactions
 from purser.ledger.tx_update import _flat_legs as _flat_legs
 from purser.ledger.tx_update import _specs_of as _specs_of
 from purser.ledger.tx_update import (
+    lock_rows,
     recategorize_posted,
+    refuse_corrected,
     reverse_and_replace_with_specs,
     transition_status,
     update_transaction,
@@ -88,11 +109,16 @@ from purser.ledger.tx_update import (
 __all__ = [
     "CATEGORY_TYPES",
     "REAL_TYPES",
+    "SECURITIES_PATH",
     "SPENDING_BASELINES",
     "SPLIT_REMAINDER_MEMO",
+    "SYSTEM_ROOT",
+    "SYSTEM_TYPES",
     "LedgerError",
     "NotFoundError",
     "PathConflictError",
+    "RowBusy",
+    "RowChanged",
     "account_balances",
     "account_by_path",
     "category_rollup",
@@ -108,16 +134,30 @@ __all__ = [
     "ensure_category_path",
     "get_account",
     "get_transaction",
+    "has_system_leg",
+    "in_system_subtree",
+    "is_category",
+    "is_system_account",
+    "is_trade_cash_lineage",
+    "lock_rows",
+    "lock_transaction",
     "ltree_input_refusal",
     "move_account",
     "recategorize_posted",
+    "refuse_corrected",
+    "refuse_system_account",
+    "refuse_system_path",
+    "refuse_trade_cash_lineage",
     "reopen_account",
     "resolve_account",
     "resolve_payee",
     "reverse_and_replace_with_specs",
     "search_transactions",
+    "securities_account",
     "spending_baseline",
     "spending_summary",
+    "trade_cash_lineage_ids",
+    "trade_cash_lineage_set",
     "transition_status",
     "update_account",
     "update_category",

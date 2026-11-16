@@ -9,14 +9,15 @@ three kinds (DESIGN §9):
 - ``change`` — the per-entity before/after rows ``record()`` has always
   written, now stamped with the surrounding call's ``request_id``.
 
-Call rows are written AFTER the response on their own short session — a
-failure to audit a read never fails the request (reads keep availability;
-writes keep their in-transaction ``record()`` guarantee). Everything is
-pruned after ``audit_retention_days`` (default 90) by ``prune_daily``.
+Integration responses are durably recorded before release (#525). Browser
+activity remains best-effort; mutations retain their in-transaction record.
+Completion receipts never rewrite original evidence. Retention is configured.
 """
 
 import base64
 import binascii
+import threading
+import time
 import uuid
 from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
@@ -26,9 +27,31 @@ from sqlalchemy import Select, select, text
 from sqlalchemy.orm import Session
 
 from purser.logging import get_logger
-from purser.models import ApiToken, AuditLog, User
+from purser.models import ApiToken, AuditLog, AuditReceipt, User
 
 log = get_logger(__name__)
+_health_lock = threading.Lock()
+_health: dict[str, Any] = {
+    "since": datetime.now(UTC).isoformat(),
+    "failures": 0,
+    "last_failure": None,
+}
+
+
+class CaptureUnavailable(RuntimeError):
+    """No response data may be released when durable evidence is unavailable."""
+
+
+def capture_health() -> dict[str, Any]:
+    with _health_lock:
+        return dict(_health)
+
+
+def _capture_failed() -> None:
+    with _health_lock:
+        _health["failures"] += 1
+        _health["last_failure"] = datetime.now(UTC).isoformat()
+
 
 KIND_READ = "read"
 KIND_WRITE = "write"
@@ -103,6 +126,15 @@ def record(
             replacement_id = uuid.UUID(raw)
         elif isinstance(raw, uuid.UUID):
             replacement_id = raw
+    from purser.sharing import account_ids, identity, summarize
+
+    with session.no_autoflush:
+        actor = session.get(ApiToken, actor_token_id) if actor_token_id else None
+        who = identity(session, actor) if actor else {"kind": "system", "name": "System"}
+        change_summary = summarize({"before": before, "after": after})
+        accounts = account_ids(session, change_summary)
+        if entity_type == "account" and entity_id and entity_id not in accounts:
+            accounts.append(entity_id)
     session.add(
         AuditLog(
             actor_token_id=actor_token_id,
@@ -113,6 +145,13 @@ def record(
             replacement_id=replacement_id,
             kind=KIND_CHANGE,
             request_id=current_request_id.get(),
+            detail={"identity": who},
+            actor_kind=who["kind"],
+            integration_id=actor.integration_id if actor else None,
+            channel="system" if actor is None else None,
+            outcome="changed",
+            account_ids=accounts,
+            data_types=change_summary["data_types"],
         )
     )
 
@@ -151,33 +190,83 @@ def record_call(
     request_id: uuid.UUID,
     detail: dict[str, Any],
     disclosed: list[str] | None = None,
-) -> None:
-    """Write one call row on its own short session, swallowing failures.
+    channel: str | None = None,
+    outcome: str | None = None,
+    strict: bool = False,
+) -> uuid.UUID | None:
+    """Persist with bounded, idempotent retries; strict callers withhold on failure."""
+    from purser.db import get_sessionmaker
+    from purser.sharing import account_ids, identity
 
-    Runs after the response has been sent (REST) or around the tool result
-    (MCP) — availability beats completeness for reads, and this is the single
-    seam where buffering/sampling would slot in if volume ever demands it.
-    """
+    row_id = uuid.uuid4()
+    for attempt in range(3):
+        try:
+            with get_sessionmaker()() as session:
+                if session.get(AuditLog, row_id) is not None:
+                    return row_id  # a commit acknowledgment was lost
+                token = session.get(ApiToken, actor_token_id)
+                who = detail.get("identity") or (identity(session, token) if token else {})
+                summary = detail.get("sharing") or {}
+                session.add(
+                    AuditLog(
+                        id=row_id,
+                        actor_token_id=actor_token_id,
+                        action=action,
+                        entity_type=entity_type,
+                        entity_id=entity_id,
+                        before_after=None,
+                        kind=kind,
+                        request_id=request_id,
+                        detail={**detail, "identity": who},
+                        disclosed=disclosed or None,
+                        channel=channel,
+                        outcome=outcome,
+                        actor_kind=who.get("kind"),
+                        integration_id=uuid.UUID(who["integration_id"])
+                        if who.get("integration_id")
+                        else None,
+                        data_types=summary.get("data_types"),
+                        account_ids=account_ids(session, summary),
+                    )
+                )
+                session.commit()
+            return row_id
+        except Exception:
+            if attempt < 2:
+                time.sleep(0.02 * (attempt + 1))
+    _capture_failed()
+    log.error("audit capture unavailable", action=action)
+    if strict:
+        raise CaptureUnavailable(
+            "Audit capture unavailable; response data was withheld. A requested change may "
+            "already have completed. Check its state before retrying a write."
+        )
+    return None
+
+
+def record_receipt(event_id: uuid.UUID | None, state: str = "returned") -> None:
+    """Completion can fail independently: absent receipt means delivery uncertain."""
+    if event_id is None:
+        return
+    from sqlalchemy.dialects.postgresql import insert
+
     from purser.db import get_sessionmaker
 
-    try:
-        with get_sessionmaker()() as session:
-            session.add(
-                AuditLog(
-                    actor_token_id=actor_token_id,
-                    action=action,
-                    entity_type=entity_type,
-                    entity_id=entity_id,
-                    before_after=None,
-                    kind=kind,
-                    request_id=request_id,
-                    detail=detail,
-                    disclosed=disclosed or None,
+    for attempt in range(3):
+        try:
+            with get_sessionmaker()() as session:
+                session.execute(
+                    insert(AuditReceipt)
+                    .values(event_id=event_id, state=state)
+                    .on_conflict_do_nothing()
                 )
-            )
-            session.commit()
-    except Exception:
-        log.warning("audit call-row write failed", action=action, exc_info=True)
+                session.commit()
+            return
+        except Exception:
+            if attempt < 2:
+                time.sleep(0.02 * (attempt + 1))
+    _capture_failed()
+    log.error("audit completion receipt unavailable")
 
 
 # --------------------------------------------------------------------------

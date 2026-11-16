@@ -183,3 +183,5 @@ node_modules/
 
 # frontend widget kit is source, not a Python build dir
 !frontend/widgets/lib/
+# Local dependency/image scan artifacts (CI uploads its copy).
+security-reports/

@@ -8,9 +8,11 @@ services:
       PURSER_DISABLE_SCHEDULER: "1"
   worker:
     # The same image as the api service in docker-compose.yml.
-    image: ghcr.io/mlamoure/purser:v2026.11.1
+    image: ghcr.io/mlamoure/purser:v2026.11.2
     build: .
     restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
     command: ["worker"]
     depends_on:
       postgres:

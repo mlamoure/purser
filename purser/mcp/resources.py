@@ -17,7 +17,7 @@ here via the usual ``_require``.
 """
 
 import json
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -25,9 +25,18 @@ from typing import Any
 from mcp.types import CallToolResult, TextContent
 from sqlalchemy.orm import Session
 
+from purser import clock
 from purser.admin import security
 from purser.config import get_settings
-from purser.mcp._registry import _require, _run, audited_tool, disclose, mcp, withheld_now
+from purser.mcp._registry import (
+    _require,
+    _run,
+    audited_resource,
+    audited_tool,
+    disclose,
+    mcp,
+    withheld_now,
+)
 from purser.mcp.presentation import WIDGETS
 from purser.mcp.privacy import AMOUNT, Emits
 
@@ -110,8 +119,22 @@ def _coverage_json(coverage: dict[str, Any]) -> dict[str, Any]:
 FORECAST_SERIES_EMITS = Emits(
     payee=True,
     narrative=True,
-    description=("days[].events[].name",),
-    amount=("days[].events[].amount", "days[].events[].range"),
+    description=(
+        "days[].events[].name",
+        "days[].events[].certainty.amount.note",
+        "days[].events[].certainty.date.note",
+    ),
+    amount=(
+        "days[].events[].amount",
+        "days[].events[].range",
+        "days[].events[].certainty.amount.value",
+        "days[].events[].certainty.amount.evidence_value",
+        "days[].events[].certainty.original.amount",
+        "days[].events[].certainty.actual.amount",
+        "days[].events[].certainty.actual.variance.amount",
+        "days[].events[].certainty.amount.note",
+        "days[].events[].certainty.date.note",
+    ),
 )
 
 
@@ -129,6 +152,7 @@ FORECAST_SERIES_EMITS = Emits(
     ),
     mime_type="application/json",
 )
+@audited_resource
 async def forecast_daily(account: str, horizon: str) -> str:
     days = _parse_horizon(horizon)
 
@@ -163,6 +187,7 @@ async def forecast_daily(account: str, horizon: str) -> str:
                             "projected": e.projected,
                             "overdue": e.overdue,
                             "basis": e.basis,
+                            "certainty": e.certainty,
                             "range": (
                                 {"low": str(e.range[0]), "high": str(e.range[1])}
                                 if e.range is not None
@@ -220,12 +245,13 @@ def named_net_worth_window(session: Session, period: str, *, today: date) -> tup
     ),
     mime_type="application/json",
 )
+@audited_resource
 async def net_worth_daily_series() -> str:
     def op(session: Session) -> str:
         from purser import networth
 
         _require(security.can_read, "read")
-        start, today = named_net_worth_window(session, "all", today=datetime.now(UTC).date())
+        start, today = named_net_worth_window(session, "all", today=clock.ledger_today())
         rows = networth.series(session, start=start, end=today)
         return json.dumps(
             {
@@ -326,6 +352,7 @@ def _parse_balance_period(raw: str) -> str | tuple[date, date]:
     ),
     mime_type="application/json",
 )
+@audited_resource
 async def balance_history_series(account: str, period: str) -> str:
     window = _parse_balance_period(period)
 
@@ -343,7 +370,7 @@ async def balance_history_series(account: str, period: str) -> str:
         if isinstance(window, tuple):
             start, end = window
         else:
-            start, end = named_balance_window(session, window, today=datetime.now(UTC).date())
+            start, end = named_balance_window(session, window, today=clock.ledger_today())
 
         rows, truncated = balances.change_points(
             session, target.id, start=start, end=end, limit=_BALANCE_POINT_CAP

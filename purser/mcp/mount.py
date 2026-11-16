@@ -20,6 +20,7 @@ Send = Callable[[MutableMapping[str, Any]], Awaitable[None]]
 def _authenticate(raw: str) -> Principal | None:
     from purser.admin import service as admin_service
     from purser.db import get_sessionmaker
+    from purser.sharing import identity
 
     with get_sessionmaker()() as session:
         token = admin_service.authenticate_token(session, raw)
@@ -30,6 +31,7 @@ def _authenticate(raw: str) -> Principal | None:
             user_id=token.user_id,
             name=token.name,
             scopes=tuple(token.scopes),
+            identity=identity(session, token),
         )
         session.commit()  # persist last_used_at
         return principal

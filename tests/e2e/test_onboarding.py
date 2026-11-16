@@ -7,7 +7,9 @@ opens and closes only its own tab.
 """
 
 import asyncio
+import base64
 import os
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -18,6 +20,54 @@ import pytest
 pytestmark = pytest.mark.skipif(
     not os.environ.get("PURSER_E2E_URL"), reason="requires isolated Docker E2E instance"
 )
+
+
+def exercise_feed_failures(page: Any, context: Any, url: str, expect: Any) -> None:
+    """Only the provider is doubled: browser, HTTP, timeout and DB are real."""
+    provider = os.environ["PURSER_E2E_FEED_DOUBLE"]
+    setup = base64.b64encode(b"https://feed.example.test:8443/claim").decode()
+    page.get_by_label("Setup token", exact=True).fill(setup)
+    for mode, message, wait in (
+        ("claim_error", "claim failed with HTTP 503", 10000),
+        ("claim_timeout", "claim request failed: ReadTimeout", 45000),
+        ("fetch_error", "accounts fetch failed with HTTP 503", 10000),
+        ("fetch_timeout", "accounts fetch failed: ReadTimeout", 75000),
+    ):
+        subprocess.run(
+            [
+                "docker",
+                "exec",
+                provider,
+                "python",
+                "-c",
+                f"from pathlib import Path; Path('/tmp/feed-mode').write_text({mode!r})",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        page.get_by_role("button", name="Connect & fetch", exact=True).click()
+        expect(page.get_by_role("alert")).to_contain_text(message, timeout=wait)
+        expect(page.get_by_role("button", name="Connect & fetch", exact=True)).to_be_enabled()
+        # The error is accessible and sanitized, not a provider credential URL.
+        assert "example:synthetic" not in page.locator("body").inner_text()
+        count = len(context.request.get(url + "/connections").json())
+        assert count == (0 if mode.startswith("claim") else 1)
+    subprocess.run(
+        [
+            "docker",
+            "exec",
+            provider,
+            "python",
+            "-c",
+            "from pathlib import Path; Path('/tmp/feed-mode').write_text('ok')",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    page.get_by_role("button", name="Connect & fetch", exact=True).click()
+    expect(page.get_by_role("heading", name="Map discovered accounts")).to_be_visible()
+    assert len(context.request.get(url + "/connections").json()) == 1
+    page.get_by_role("button", name="Continue", exact=True).click()
 
 
 async def exercise_agent(url: str, token: str) -> None:
@@ -141,7 +191,10 @@ def test_first_run_agent_access_and_logout() -> None:
             audit(page, "encryption key", findings)
             page.get_by_label("I have stored this key somewhere safe").check()
             page.get_by_role("button", name="Continue", exact=True).click()
-            page.get_by_role("button", name="Skip for now", exact=True).click()
+            if os.environ.get("PURSER_E2E_FEED_DOUBLE"):
+                exercise_feed_failures(page, context, url, playwright.expect)
+            else:
+                page.get_by_role("button", name="Skip for now", exact=True).click()
             playwright.expect(
                 page.get_by_text("Import bank history (optional)", exact=True)
             ).to_be_visible()

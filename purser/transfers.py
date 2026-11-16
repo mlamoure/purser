@@ -23,12 +23,20 @@ rule activation confirm counts it.
 
 Never unlogged: every merge/absorb writes an audit row and emits an event,
 the register shows the link, and unlink resurrects the originals. Pairs a
-human explicitly unlinked are suppressed from the AUTO paths only — an
-explicit confirm or convert can always relink them. Kill switch:
-``transfer_auto_link`` (Config).
+human explicitly unlinked or rejected ("not a transfer", #386) are
+suppressed from the AUTO paths only — an explicit confirm or convert can
+always link them. Kill switch: ``transfer_auto_link`` (Config).
+
+What the pass leaves unlinked are the confirm-first candidates.
+``sync_candidate_suggestions`` runs after every pass (the SimpleFIN and
+QIF/CSV imports, the daily job): a candidate whose newer leg is recent gets a ``transfer_pair``
+card in the suggestions inbox and its one ``transfer.candidate`` event, and
+a card whose pair stopped being a candidate is withdrawn.
 """
 
+import re
 import uuid
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import date as date_type
 from datetime import timedelta
@@ -36,10 +44,11 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import ColumnElement, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, aliased, selectinload
 
-from purser import appsettings, audit, balances, events, matching
+from purser import appsettings, audit, balances, clock, events, matching
 from purser import ledger as ledger_service
+from purser import lineage as bank_lineage
 from purser import review as review_service
 from purser import suggestions as suggestions_service
 from purser.admin import security
@@ -47,7 +56,18 @@ from purser.core import ledger as core
 from purser.core import matching as core_matching
 from purser.ledger import LedgerError
 from purser.logging import get_logger
-from purser.models import ApiToken, Event, Match, Posting, Schedule, Transaction
+from purser.models import (
+    Account,
+    ApiToken,
+    AuditLog,
+    Event,
+    Match,
+    Posting,
+    RawFetch,
+    Schedule,
+    Suggestion,
+    Transaction,
+)
 
 if TYPE_CHECKING:
     from purser.rules import DeclaredPair
@@ -65,26 +85,127 @@ def _signal_text(tx: Transaction) -> str:
     return f"{payee} {tx.description or ''}"
 
 
-def _unlinked_pair_keys(session: Session) -> set[str]:
+def _unlinked_pairs(session: Session) -> set[tuple[uuid.UUID, uuid.UUID]]:
+    """The pairs a human unlinked, as the two rows the unlink resurrected."""
     # pair_key moved to the plaintext dedup_key column (#137): the payload is
     # now encrypted, so a JSONB projection can't read it.
     rows = session.execute(
         select(Event.dedup_key).where(Event.type == "transfer.unlinked")
     ).scalars()
-    return {key for key in rows if key}
+    pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
+    for key in rows:
+        if key:
+            low, high = key.split(":")
+            pairs.add((uuid.UUID(low), uuid.UUID(high)))
+    return pairs
+
+
+def _suppressed_pairs(session: Session) -> matching.LineagePairs:
+    """The pairs no AUTO path may link (#386): the ones a human unlinked,
+    and the ones a human rejected as "not a transfer" (a transfer_pair
+    suggestion) — by bank line, so a correction of either row (the
+    categorize pass corrects most posted rows) or a pending posting since
+    leaves the pair suppressed (#386 review). Used by both stages of
+    ``plan_auto_links`` — so a transfer_link rule's projected count, decision
+    66, still equals what the pass links — by an automatic conversion's
+    counterpart and absorb target (``_counterpart_in``,
+    ``_absorb_target_for_convert``) and by the candidate list. Explicit
+    confirm and convert ignore it: a person can always link a pair."""
+    stored: dict[tuple[uuid.UUID, uuid.UUID], uuid.UUID | None] = dict.fromkeys(
+        _unlinked_pairs(session)
+    )
+    stored.update(suggestions_service.rejected_transfer_pair_rows(session))
+    return matching.lineage_pairs(session, stored)
+
+
+class SuppressedPairs:
+    """``_suppressed_pairs`` kept across one pass (#386 review): the
+    categorize pass and a rule's apply-history hand one of these to every
+    machine answer they check and apply, instead of re-reading the memory per
+    row. Read on first use: a pass that never meets an '[account]' answer
+    never reads it.
+
+    Nothing a pass does rejects or unlinks a pair, but a correction does mint
+    a replacement row, which the read did not map to its lineage: a rejected
+    pair seen through that row would match no key and could be linked. So
+    every write that mints a row (``categorize._apply_category``) calls
+    ``forget`` with the row it replaced, and when that row is one the memory
+    holds, the next check reads the memory again (#497 review). Any other
+    row's replacement can match no remembered pair, so the read stands."""
+
+    def __init__(self) -> None:
+        self._pairs: matching.LineagePairs | None = None
+
+    def get(self, session: Session) -> matching.LineagePairs:
+        if self._pairs is None:
+            self._pairs = _suppressed_pairs(session)
+        return self._pairs
+
+    def forget(self, replaced: uuid.UUID) -> None:
+        if self._pairs is not None and replaced in self._pairs.root_of:
+            self._pairs = None
 
 
 def _unlinked_absorbs(session: Session) -> set[tuple[str, str]]:
-    """(transfer_id, content_hash) pairs a human explicitly unlinked."""
+    """(transfer_id, bank line) pairs a human explicitly unlinked: the line
+    as the clone's content hash, and as the clone's id — a clone of a
+    replacement has no hash (#386 review). ``_absorb_unlinked`` reads it."""
     suppressed: set[tuple[str, str]] = set()
     rows = session.execute(select(Event.payload).where(Event.type == "transfer.unlinked")).scalars()
     for payload in rows:
         transfer_id = payload.get("transfer_id")
+        if not transfer_id:
+            continue
         for resurrected in payload.get("resurrected", []):
-            content_hash = resurrected.get("content_hash")
-            if transfer_id and content_hash:
-                suppressed.add((transfer_id, content_hash))
+            for key in (resurrected.get("content_hash"), resurrected.get("id")):
+                if key:
+                    suppressed.add((transfer_id, key))
     return suppressed
+
+
+def _absorb_unlinked(
+    suppressed: set[tuple[str, str]], transfer: Transaction, row: Transaction
+) -> bool:
+    """A human unlinked ``row``'s bank line from ``transfer``."""
+    return any(
+        (str(transfer.id), key) in suppressed for key in (row.content_hash, str(row.id)) if key
+    )
+
+
+def _conversion_sources(
+    session: Session, transfer_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, set[uuid.UUID]]:
+    """The bank rows each transfer stands for, beside itself. A posted row
+    converted to ``[account]`` is replaced by a transfer whose reversal names
+    the original (a pending row converts in place and keeps its id), so an
+    absorb into that transfer links the original with the absorbed row: a
+    pair a human rejected or unlinked must block it (#386 review)."""
+    ids = list(transfer_ids)
+    sources: dict[uuid.UUID, set[uuid.UUID]] = {tid: {tid} for tid in ids}
+    if not ids:
+        return sources
+    reversal = aliased(Transaction)
+    rows = session.execute(
+        select(Transaction.id, reversal.reverses_id)
+        .join(reversal, reversal.id == Transaction.reverses_id)
+        .where(Transaction.id.in_(ids), reversal.reverses_id.is_not(None))
+    ).all()
+    for transfer_id, original_id in rows:
+        if original_id is not None:
+            sources[transfer_id].add(original_id)
+    return sources
+
+
+def _pair_suppressed(
+    row_id: uuid.UUID,
+    transfer_id: uuid.UUID,
+    sources: dict[uuid.UUID, set[uuid.UUID]],
+    suppressed_pairs: matching.LineagePairs,
+) -> bool:
+    """Absorbing ``row_id`` into ``transfer_id`` would link a suppressed pair."""
+    return any(
+        (source, row_id) in suppressed_pairs for source in sources.get(transfer_id, {transfer_id})
+    )
 
 
 @dataclass
@@ -98,8 +219,10 @@ class _OpenLeg:
     counterparty_name: str
 
 
-def _open_transfer_legs(session: Session) -> list[_OpenLeg]:
-    """Legs of live chain-head transfers that no voided import backs yet.
+def _open_transfer_legs(session: Session, *, account_id: uuid.UUID | None = None) -> list[_OpenLeg]:
+    """Legs of live chain-head transfers that no voided import backs yet —
+    of every transfer, or only of those with a leg on ``account_id`` (one
+    conversion's absorb target, #386 review: not the whole ledger's).
 
     Loads live chain-head transactions and filters to the PLAIN transfer
     shape (two real legs that cancel, no virtual) in Python — transfers are a
@@ -107,7 +230,6 @@ def _open_transfer_legs(session: Session) -> list[_OpenLeg]:
     phase. A split loan payment is never an absorb target: its unequal legs
     were both claimed from bank rows when it was confirmed.
     """
-    reversed_ids = select(Transaction.reverses_id).where(Transaction.reverses_id.is_not(None))
     rows = list(
         session.execute(
             select(Transaction)
@@ -115,7 +237,17 @@ def _open_transfer_legs(session: Session) -> list[_OpenLeg]:
             .where(
                 Transaction.status.in_(matching.MATCHABLE_STATUSES),
                 Transaction.superseded_by.is_(None),
-                Transaction.id.not_in(reversed_ids),
+                bank_lineage.chain_head_clause(),
+                ~matching.trade_cash_clause(),
+                *(
+                    ()
+                    if account_id is None
+                    else (
+                        Transaction.id.in_(
+                            select(Posting.transaction_id).where(Posting.account_id == account_id)
+                        ),
+                    )
+                ),
             )
         ).scalars()
     )
@@ -123,24 +255,34 @@ def _open_transfer_legs(session: Session) -> list[_OpenLeg]:
     if not transfers:
         return []
     backed: set[tuple[uuid.UUID, uuid.UUID]] = set()  # (transfer_id, account_id)
-    children = session.execute(
-        select(Transaction)
-        .options(selectinload(Transaction.postings).selectinload(Posting.account))
-        .where(
-            Transaction.superseded_by.in_([t.id for t in transfers]),
-            Transaction.status == "void",
-            # Backing means "this bank line is accounted for" — so only
-            # children still HOLDING a content hash count. Unlink moves the
-            # hash onto the resurrected clone (leg opens again), and voided
-            # manual originals never had one (the bank's own rows for that
-            # transfer should still be absorbable).
-            Transaction.content_hash.is_not(None),
-        )
-    ).scalars()
-    for child in children:
+    # Backing means "this bank line is accounted for": a child still merged
+    # into the transfer (an unlinked one points at its clone instead, #386
+    # review) that IS a bank line — a row still holding its content hash, or
+    # a hashless row whose lineage holds an import row (a replacement: the
+    # hash stays on the corrected original; a clone of one). An import row
+    # without its hash was unlinked before unlink re-pointed originals: it
+    # backs nothing, as before. Voided manual originals never back (the
+    # bank's own rows for that transfer should still be absorbed), and an
+    # expected the transfer settles is no original at all.
+    children = list(
+        session.execute(
+            select(Transaction)
+            .options(selectinload(Transaction.postings).selectinload(Posting.account))
+            .where(
+                Transaction.superseded_by.in_([t.id for t in transfers]),
+                Transaction.status == "void",
+                linked_original_clause(),
+            )
+        ).scalars()
+    )
+    lines = matching.bank_line_ids(
+        session, [c for c in children if c.content_hash is None and c.origin != "import"]
+    )
+    for child in (c for c in children if c.content_hash is not None or c.id in lines):
         for p in child.postings:
             if not p.account.is_virtual and child.superseded_by is not None:
                 backed.add((child.superseded_by, p.account_id))
+    backed |= _converted_bank_lines(session, transfers)
     legs: list[_OpenLeg] = []
     for t in transfers:
         for leg in t.postings:
@@ -159,6 +301,150 @@ def _open_transfer_legs(session: Session) -> list[_OpenLeg]:
                 )
             )
     return legs
+
+
+def _emit_converted(
+    session: Session, *, transfer: Transaction, own_account_id: uuid.UUID, target: Account
+) -> None:
+    """``transfer.converted``: a row became a transfer to ``target`` through
+    the '[account]' sugar. ``dedup_key`` is the account the row was on, in
+    plain text — the durable record of which side a pending row converted in
+    place is the bank's own (``_converted_bank_lines``; the audit row is
+    pruned, events are not, #386 review)."""
+    own = session.get(Account, own_account_id)
+    events.emit(
+        session,
+        type_="transfer.converted",
+        entity_type="transaction",
+        entity_id=transfer.id,
+        payload={
+            "transfer_id": str(transfer.id),
+            "account": own.path if own is not None else None,
+            "counterparty_account": target.path,
+        },
+        dedup_key=str(own_account_id),
+    )
+
+
+def _converted_bank_lines(
+    session: Session, transfers: list[Transaction]
+) -> set[tuple[uuid.UUID, uuid.UUID]]:
+    """(transfer_id, account_id) legs a converted bank row backs itself (#386
+    review): a bank row converted to '[account]' IS that account's bank line,
+    so its own side was never open — reading it open voided the next real
+    same-amount row on that account into the transfer, and that row was gone
+    from the ledger. A manual row converted the same way backs nothing: the
+    bank's own row for it should still be absorbed.
+
+    - Posted, the conversion is a reversal + a transfer-shaped replacement;
+      the reversal names the converted row (``_conversion_sources``).
+    - Pending, the row is converted in place: the transfer is the bank row
+      itself, and its own side is the account it was on (``_own_sides``).
+      A QIF/CSV transfer, imported whole, backs nothing here: its legs are
+      backed by what is absorbed into them."""
+    if not transfers:
+        return set()
+    sides = {t.id: {p.account_id for p in t.postings} for t in transfers}
+    backed: set[tuple[uuid.UUID, uuid.UUID]] = set()
+    sources = _conversion_sources(session, list(sides))
+    originals = {source for t_id, ids in sources.items() for source in ids if source != t_id}
+    if originals:
+        rows = list(
+            session.execute(
+                select(Transaction)
+                .options(selectinload(Transaction.postings).selectinload(Posting.account))
+                .where(Transaction.id.in_(originals))
+            ).scalars()
+        )
+        bank_lines = matching.bank_line_ids(session, rows)
+        account_of = {
+            tx.id: leg.account_id
+            for tx in rows
+            if tx.id in bank_lines and (leg := matching._real_leg(tx)) is not None
+        }
+        for t_id, ids in sources.items():
+            for source in ids - {t_id}:
+                account = account_of.get(source)
+                if account is not None and account in sides[t_id]:
+                    backed.add((t_id, account))
+    in_place = [t for t in transfers if t.origin == "import"]
+    if in_place:
+        own = _own_sides(session, in_place, sides)
+        for t in in_place:
+            kept = own.get(t.id)
+            if kept is not None:
+                backed |= {(t.id, account) for account in kept & sides[t.id]}
+    return backed
+
+
+def _own_sides(
+    session: Session, in_place: list[Transaction], sides: dict[uuid.UUID, set[uuid.UUID]]
+) -> dict[uuid.UUID, set[uuid.UUID]]:
+    """The account each import-origin transfer was on before a conversion
+    made it one, by what records it (#386 review): its newest
+    ``transfer.converted`` event (durable); for a conversion older than that
+    event, its newest ``transfer.convert`` audit row (the account before and
+    after) while the audit retention keeps it; failing both, the one leg on
+    an account of the connection its feed row came from. A transfer none of
+    these names — a QIF/CSV transfer imported whole, or an old conversion
+    whose two accounts share a connection — backs nothing."""
+    ids = [t.id for t in in_place]
+    own: dict[uuid.UUID, set[uuid.UUID]] = {}
+    for entity_id, account in session.execute(
+        select(Event.entity_id, Event.dedup_key)
+        .where(Event.type == "transfer.converted", Event.entity_id.in_(ids))
+        .order_by(Event.at.desc(), Event.id.desc())
+    ).all():
+        if entity_id is not None and account and entity_id not in own:
+            own[entity_id] = {uuid.UUID(account)}
+
+    def accounts(shape: dict[str, Any] | None) -> set[uuid.UUID]:
+        """The accounts an audit row's transaction shape posts to."""
+        return {uuid.UUID(p["account_id"]) for p in (shape or {}).get("postings", [])}
+
+    rest = [i for i in ids if i not in own]
+    if rest:
+        for entity_id, before_after in session.execute(
+            select(AuditLog.entity_id, AuditLog.before_after)
+            .where(
+                AuditLog.action == "transfer.convert",
+                AuditLog.entity_type == "transaction",
+                AuditLog.entity_id.in_(rest),
+            )
+            .order_by(AuditLog.at.desc(), AuditLog.id.desc())
+        ).all():
+            if entity_id is None or entity_id in own or not before_after:
+                continue
+            own[entity_id] = accounts(before_after.get("before")) & accounts(
+                before_after.get("after")
+            )
+    fed = [t for t in in_place if t.id not in own and t.source_fetch_id is not None]
+    if fed:
+        connection_of = dict(
+            session.execute(
+                select(RawFetch.id, RawFetch.connection_id).where(
+                    RawFetch.id.in_({t.source_fetch_id for t in fed})
+                )
+            ).all()
+        )
+        on_connection: dict[uuid.UUID, uuid.UUID | None] = dict(
+            session.execute(
+                select(Account.id, Account.connection_id).where(
+                    Account.id.in_({a for t in fed for a in sides[t.id]})
+                )
+            ).all()
+        )
+        for t in fed:
+            assert t.source_fetch_id is not None  # ``fed`` holds feed rows only
+            connection = connection_of.get(t.source_fetch_id)
+            mine = {
+                a
+                for a in sides[t.id]
+                if connection is not None and on_connection.get(a) == connection
+            }
+            if len(mine) == 1:
+                own[t.id] = mine
+    return own
 
 
 @dataclass(frozen=True)
@@ -295,6 +581,18 @@ def _absorb_row(
     That flip, and the row's move under the transfer, can move a schedule
     estimate (a confirmed match's lineage head turning posted), so the change
     is bracketed with the probe ``transition_status`` uses (#330, #343)."""
+    # Locked and reloaded before anything changes: a concurrent correction or
+    # merge of the row, or of the transfer, is seen (#386 review).
+    ledger_service.lock_rows(session, (row, transfer))
+    if (
+        row.status not in matching.MATCHABLE_STATUSES
+        or row.superseded_by is not None
+        or transfer.status not in matching.MATCHABLE_STATUSES
+        or transfer.superseded_by is not None
+    ):
+        raise ledger_service.RowChanged(f"transaction {row.id} can no longer be absorbed")
+    ledger_service.refuse_corrected(session, row)
+    ledger_service.refuse_corrected(session, transfer)
     probes = matching.estimate_probes_on(session, transfer, row)
     prior_status = row.status
     if row.status == "posted" and transfer.status == "pending":
@@ -421,7 +719,16 @@ def plan_auto_links(session: Session, declared: "list[DeclaredPair]") -> LinkPla
     for leg in _open_transfer_legs(session):
         open_legs.setdefault((leg.account_id, leg.amount), []).append(leg)
     suppressed_absorbs = _unlinked_absorbs(session) if open_legs else set()
-    suppressed_pairs = _unlinked_pair_keys(session)
+    # Unlinked or rejected ("not a transfer", #386): both stages skip them,
+    # as pairs and as absorbs into a transfer converted from one side.
+    suppressed_pairs = _suppressed_pairs(session)
+    sources = (
+        _conversion_sources(
+            session, {leg.transfer.id for legs in open_legs.values() for leg in legs}
+        )
+        if open_legs and suppressed_pairs
+        else {}
+    )
     # Open instances of active transfer schedules, taken from this one list by
     # both stages: each covers one merge at most.
     active = _transfer_schedule_ids(session)
@@ -433,7 +740,15 @@ def plan_auto_links(session: Session, declared: "list[DeclaredPair]") -> LinkPla
     def unheld(rows: list[Transaction]) -> list[Transaction]:
         return [r for r in rows if r.id not in holds]
 
-    absorbs = _plan_absorbs(unheld(pool), open_legs, declared, suppressed_absorbs, widened=False)
+    absorbs = _plan_absorbs(
+        unheld(pool),
+        open_legs,
+        declared,
+        suppressed_absorbs,
+        widened=False,
+        suppressed_pairs=suppressed_pairs,
+        sources=sources,
+    )
     taken = {a.row.id for a in absorbs}
     merges, paired = _plan_merges(
         session,
@@ -450,7 +765,13 @@ def plan_auto_links(session: Session, declared: "list[DeclaredPair]") -> LinkPla
     if widened:
         reachable = {a for p in widened for a in p.accounts}
         far_absorbs = _plan_absorbs(
-            unheld(rest(taken)), open_legs, declared, suppressed_absorbs, widened=True
+            unheld(rest(taken)),
+            open_legs,
+            declared,
+            suppressed_absorbs,
+            widened=True,
+            suppressed_pairs=suppressed_pairs,
+            sources=sources,
         )
         taken |= {a.row.id for a in far_absorbs}
         far_rows = [
@@ -494,11 +815,15 @@ def _plan_absorbs(
     suppressed: set[tuple[str, str]],
     *,
     widened: bool,
+    suppressed_pairs: matching.LineagePairs = matching.NO_PAIRS,
+    sources: dict[uuid.UUID, set[uuid.UUID]] | None = None,
 ) -> list[PlannedAbsorb]:
     """Rows claimed by existing transfers with an unbacked side. Standard:
     within ±3 days, on a name signal or a declaration whose window covers the
     gap. Widened: farther apart, on a declaration only. Claimed legs leave
-    ``open_legs``."""
+    ``open_legs``. A row is never absorbed into a transfer converted from the
+    other side of a pair a human rejected or unlinked (``suppressed_pairs``,
+    ``sources`` = ``_conversion_sources``; #386 review)."""
     from purser import rules as rules_service
 
     planned: list[PlannedAbsorb] = []
@@ -512,7 +837,11 @@ def _plan_absorbs(
         for leg in open_legs.get((real.account_id, amount), []):
             if leg.transfer.id == row.id:
                 continue
-            if (str(leg.transfer.id), row.content_hash) in suppressed:
+            if _absorb_unlinked(suppressed, leg.transfer, row):
+                continue
+            if suppressed_pairs and _pair_suppressed(
+                row.id, leg.transfer.id, sources or {}, suppressed_pairs
+            ):
                 continue
             gap = abs((row.date - leg.transfer.date).days)
             rule_id = rules_service.pair_declared(
@@ -550,7 +879,7 @@ def _plan_merges(
     session: Session,
     pool: list[Transaction],
     declared: "list[DeclaredPair]",
-    suppressed: set[str],
+    suppressed: matching.LineagePairs,
     *,
     holds: dict[uuid.UUID, matching.TransferHold],
     instances: list[_Instance],
@@ -566,13 +895,16 @@ def _plan_merges(
     is recorded for settlement and leaves ``instances``, so it covers one."""
     from purser import rules as rules_service
 
-    pairs, tx_of = matching.detect_transfer_pairs_for(session, pool, holds=holds, window=window)
+    # A suppressed pair (unlinked or rejected) is ruled out inside the
+    # pairing, so it never consumes its rows: they stay free to pair with
+    # their real counterparts, in this stage or the widened one (#386 review).
+    pairs, tx_of = matching.detect_transfer_pairs_for(
+        session, pool, holds=holds, window=window, suppressed=suppressed
+    )
     paired: set[uuid.UUID] = set()
     planned: list[PlannedMerge] = []
     for pair in pairs:
         paired.update((pair.outgoing_id, pair.incoming_id))
-        if matching._pair_key(pair.outgoing_id, pair.incoming_id) in suppressed:
-            continue
         outgoing, incoming = tx_of[pair.outgoing_id], tx_of[pair.incoming_id]
         out_leg, in_leg = matching._real_leg(outgoing), matching._real_leg(incoming)
         assert out_leg is not None and in_leg is not None  # the pool guarantees it
@@ -642,6 +974,10 @@ def auto_link_pass(session: Session) -> dict[str, int]:
     from purser import rules as rules_service
 
     declared = rules_service.declared_pairs(rules_service.load_active(session))
+    # The trade-cash lineage (decision 103), read once for the pass: its
+    # merges and re-matches neither make nor move a trade's cash (the pool
+    # leaves trade cash out through matching.trade_cash_clause).
+    claimed = ledger_service.trade_cash_lineage_set(session)
     plan = plan_auto_links(session, declared)
 
     # A link a declaration made is one application of that rule (#314), the
@@ -649,9 +985,21 @@ def auto_link_pass(session: Session) -> dict[str, int]:
     # link's signal names, once per link, in both stages and both phases.
     # Counted here, where links are made, so the activation confirm's
     # projection (the same plan) applies nothing; unlink takes nothing back.
+    # A row a concurrent correction or merge changed after the plan read it
+    # is refused before anything is written (RowChanged, under the row lock):
+    # the pass leaves it and goes on, and the next pass sees it as it is.
     for absorb in plan.absorbs:
         signal = "name" if absorb.rule_id is None else f"rule:{absorb.rule_id}"
-        _absorb(session, row=absorb.row, leg=absorb.leg, signal=signal)
+        try:
+            # Never wait on a row another writer holds (a sale linking it):
+            # this pass may hold the balance watermark that writer needs.
+            ledger_service.lock_transaction(session, absorb.row.id, skip_locked=True)
+            _absorb(session, row=absorb.row, leg=absorb.leg, signal=signal)
+        except (ledger_service.RowChanged, ledger_service.RowBusy) as exc:
+            # Changed since the plan (corrected, merged, voided) or held by
+            # another writer: left as it is, the next pass sees it anew.
+            log.info("transfer absorb skipped", row_id=str(absorb.row.id), reason=str(exc))
+            continue
         stats["transfers_absorbed"] += 1
         if absorb.rule_id is not None:
             rules_service.mark_applied(session, [absorb.rule_id])
@@ -660,26 +1008,165 @@ def auto_link_pass(session: Session) -> dict[str, int]:
         # The merge carries any match on its rows (decision 65); a covered
         # instance still open is then settled by the merge at once, so the
         # forecast never counts it beside the posted legs.
-        matching._merge_transfer_pair(
-            session,
-            outgoing=merge.outgoing,
-            incoming=merge.incoming,
-            token=None,
-            origin=core.Origin.SYSTEM,
-            action="transfer.auto_link",
-            event_type="transfer.auto_linked",
-            signal=merge.signal,
-        )
+        try:
+            matching._merge_transfer_pair(
+                session,
+                outgoing=merge.outgoing,
+                incoming=merge.incoming,
+                token=None,
+                origin=core.Origin.SYSTEM,
+                action="transfer.auto_link",
+                event_type="transfer.auto_linked",
+                signal=merge.signal,
+                claimed=claimed,
+                skip_busy=True,
+            )
+        except (ledger_service.RowChanged, ledger_service.RowBusy) as exc:
+            # A changed or held row: the next pass pairs it on what commits.
+            log.info("transfer auto-link skipped", reason=str(exc))
+            continue
         stats["transfers_auto_linked"] += 1
         if merge.rule_id is not None:
             rules_service.mark_applied(session, [merge.rule_id])
         if merge.settles is not None:
             instance = matching._load_tx(session, merge.settles)
             if instance.status == "expected":
-                matching._match_expected(session, instance)
+                matching._match_expected(session, instance, claimed=claimed)
 
     if stats["transfers_absorbed"] or stats["transfers_auto_linked"]:
         log.info("transfer auto-link pass", **stats)
+    return stats
+
+
+# ---------------------------------------------------------------------------
+# Confirm-first candidates and their inbox cards (#386, decision 102)
+# ---------------------------------------------------------------------------
+
+
+_INCOME_CREDIT = re.compile(
+    r"\b(?:cash\s?back|(?:cash\s+)?rewards?\s+credit|cash\s+rewards?|refund|dividends?|"
+    r"interest\s+(?:credit|paid|earned))\b",
+    re.IGNORECASE,
+)
+
+
+def _income_credit(tx: Transaction) -> bool:
+    legs = [p for p in tx.postings if not p.account.is_virtual]
+    return (
+        len(legs) == 1
+        and Decimal(legs[0].amount) > 0
+        and bool(_INCOME_CREDIT.search(_signal_text(tx)))
+    )
+
+
+def candidate_pairs(
+    session: Session,
+) -> list[tuple[core_matching.TransferCandidate, Transaction, Transaction]]:
+    """Every transfer candidate over the whole history, as ``(pair,
+    outgoing, incoming)``: the opposite-amount pairs the transfer pool forms
+    inside the standard window (``matching.transfer_pool``, so held legs
+    pair with their expected's other side, decision 65). A pair a human
+    unlinked or rejected is never formed — ruled out inside the pairing, as
+    in the plan, so its rows can still pair with their real counterparts.
+
+    Posted rows pair first, exactly as the plan pairs them (its pool is
+    posted rows only, §5); pending rows then pair only from what is left, for
+    the register's list. A pending row never takes a posted row's
+    counterpart: posted pairs are what the auto paths act on and what cards
+    are made of, so a pending row arriving must not withdraw one (#386
+    review). Pairs are found in (date, created_at, id) order, the plan's
+    order, so the same ledger always yields the same pairs and a card keeps
+    its pair; they come back in the outgoing row's order."""
+    rows, holds = matching.transfer_pool(session)
+    # Positive merchant refunds and earned credits are not evidence of an
+    # own-account transfer. Filter before pairing so a coincidental amount
+    # cannot steal the actual counterpart. Explicit linking remains available.
+    rows = [r for r in rows if not _income_credit(r)]
+    rows.sort(key=lambda t: (t.date, t.created_at, t.id))
+    suppressed = _suppressed_pairs(session)
+    pairs, tx_of = matching.detect_transfer_pairs_for(
+        session, [r for r in rows if r.status == "posted"], holds=holds, suppressed=suppressed
+    )
+    paired = {row_id for pair in pairs for row_id in (pair.outgoing_id, pair.incoming_id)}
+    rest = [r for r in rows if r.id not in paired]
+    if any(r.status == "pending" for r in rest):
+        later, more = matching.detect_transfer_pairs_for(
+            session, rest, holds=holds, suppressed=suppressed
+        )
+        tx_of.update(more)
+        pairs += [
+            pair
+            for pair in later
+            if "pending" in (tx_of[pair.outgoing_id].status, tx_of[pair.incoming_id].status)
+        ]
+    order = {row.id: index for index, row in enumerate(rows)}
+    pairs.sort(key=lambda pair: order[pair.outgoing_id])
+    return [(pair, tx_of[pair.outgoing_id], tx_of[pair.incoming_id]) for pair in pairs]
+
+
+def sync_candidate_suggestions(
+    session: Session, *, actor_token_id: uuid.UUID | None = None
+) -> dict[str, int]:
+    """The inbox side of the candidate list, run after every auto-link pass
+    (the SimpleFIN and QIF/CSV imports, the daily job). The caller owns the
+    commit.
+
+    - A candidate whose rows are both POSTED and whose newer leg is at most
+      ``suggestions.TRANSFER_PAIR_LOOKBACK_DAYS`` old gets its
+      ``transfer.candidate`` event (once per pair, ever) and a
+      ``transfer_pair`` card — created, re-opened if it was withdrawn, or
+      refreshed. Older pairs stay in the register's whole-history list. A
+      pair with a pending row waits, as the auto paths do (§5): the bank
+      posts a pending row as a new row, so its card would only churn —
+      replaced, or withdrawn when the posted pair auto-links (#386 review).
+    - An open card whose pair is no longer card-worthy at all (a row linked,
+      absorbed, matched to a bill, corrected or voided; the pair unlinked; a
+      closer row paired instead) is withdrawn. A card that merely aged past
+      the window stays until it is decided: the window bounds what lands in
+      the inbox, not how long a person may take.
+    - Rejected pairs are suppressed, so they get neither."""
+    stats = {"transfer_pair_cards_created": 0, "transfer_pair_cards_withdrawn": 0}
+    cutoff = clock.ledger_today() - timedelta(days=suggestions_service.TRANSFER_PAIR_LOOKBACK_DAYS)
+    posted = [
+        (pair, outgoing, incoming)
+        for pair, outgoing, incoming in candidate_pairs(session)
+        # a card waits until both rows post
+        if outgoing.status == "posted" and incoming.status == "posted"
+    ]
+    keys = matching.card_keys(session, [(p.outgoing_id, p.incoming_id) for p, _, _ in posted])
+    live: set[str] = set()
+    for pair, outgoing, incoming in posted:
+        live.add(
+            suggestions_service.transfer_pair_fingerprint(
+                keys[(pair.outgoing_id, pair.incoming_id)]
+            )
+        )
+        if max(outgoing.date, incoming.date) < cutoff:
+            continue
+        matching._emit_transfer_candidate_once(session, pair)
+        _, created = suggestions_service.upsert_transfer_pair_suggestion(
+            session,
+            outgoing=outgoing,
+            incoming=incoming,
+            amount=pair.amount,
+            gap_days=pair.date_gap_days,
+            actor_token_id=actor_token_id,
+        )
+        if created:
+            stats["transfer_pair_cards_created"] += 1
+    stale = [
+        row
+        for fingerprint, row_id in suggestions_service.open_transfer_pair_cards(session).items()
+        if fingerprint not in live and (row := session.get(Suggestion, row_id)) is not None
+    ]
+    for row in stale:
+        # False when a person decided the card since it was read (#497 review).
+        if suggestions_service.withdraw_transfer_pair(
+            session, row, actor_token_id=actor_token_id, reason="no_longer_candidate"
+        ):
+            stats["transfer_pair_cards_withdrawn"] += 1
+    if stats["transfer_pair_cards_created"] or stats["transfer_pair_cards_withdrawn"]:
+        log.info("transfer candidate cards", **stats)
     return stats
 
 
@@ -850,14 +1337,6 @@ def _require_commit(token: ApiToken | None, what: str) -> None:
         raise LedgerError(f"{what} requires write scope")
 
 
-def _corrected_once_guard(session: Session, tx: Transaction) -> None:
-    correction = session.execute(
-        select(Transaction.id).where(Transaction.reverses_id == tx.id)
-    ).scalar_one_or_none()
-    if correction is not None:
-        raise LedgerError("transaction already corrected; edit the replacement instead")
-
-
 def _audit_convert(
     session: Session, *, tx: Transaction, token: ApiToken | None, before: dict[str, Any]
 ) -> None:
@@ -872,6 +1351,21 @@ def _audit_convert(
     )
 
 
+class MachineAnswerRefused(LedgerError):
+    """An automatic '[account]' answer that would make a transfer of a pair a
+    person rejected or unlinked (#386 review): no answer, never a conversion."""
+
+
+@dataclass(frozen=True)
+class _Pick:
+    """What a conversion pairs with — the transfer to absorb into, or the
+    counterpart to merge with — and whether the machine path left a
+    candidate out only because a person rejected or unlinked that pair."""
+
+    chosen: Transaction | None
+    refused: bool = False
+
+
 def _absorb_target_for_convert(
     session: Session,
     *,
@@ -879,36 +1373,54 @@ def _absorb_target_for_convert(
     real: Posting,
     target_account_id: uuid.UUID,
     auto_pairing: bool = False,
-) -> Transaction | None:
+    pairs: SuppressedPairs | None = None,
+) -> _Pick:
     """An existing live transfer connecting exactly (row's account <-> target)
     whose row-side leg is unbacked and matches amount + window. Explicit user
     intent: no name signal, no unlink suppression.
 
     ``auto_pairing`` is the machine path (DESIGN §11 rule 5): the model named
     the account, so the *pairing* must follow ``auto_link_pass``'s rules
-    instead — posted rows only, and a pair a human unlinked stays unlinked.
+    instead — posted rows only, and a pair a human unlinked or rejected stays
+    unlinked, including through a transfer converted from its other side
+    (#386 review).
     """
     amount = Decimal(real.amount)
-    suppressed = _unlinked_absorbs(session) if auto_pairing else set()
-    candidates = [
+    in_reach = [
         leg
-        for leg in _open_transfer_legs(session)
+        for leg in _open_transfer_legs(session, account_id=real.account_id)
         if leg.account_id == real.account_id
         and leg.amount == amount
         and leg.counterparty_account_id == target_account_id
         and abs(row.date - leg.transfer.date) <= _WINDOW
         and leg.transfer.id != row.id
-        and not (
-            auto_pairing
-            and (
-                row.status != "posted"
-                or leg.transfer.status != "posted"
-                or (str(leg.transfer.id), row.content_hash) in suppressed
-            )
-        )
     ]
+    candidates, refused = in_reach, False
+    if auto_pairing and in_reach:
+        suppressed = _unlinked_absorbs(session)
+        suppressed_pairs = (pairs or SuppressedPairs()).get(session)
+        sources = (
+            _conversion_sources(session, {leg.transfer.id for leg in in_reach})
+            if suppressed_pairs
+            else {}
+        )
+        rejected = {
+            leg.transfer.id
+            for leg in in_reach
+            if suppressed_pairs
+            and _pair_suppressed(row.id, leg.transfer.id, sources, suppressed_pairs)
+        }
+        refused = bool(rejected)
+        candidates = [
+            leg
+            for leg in in_reach
+            if row.status == "posted"
+            and leg.transfer.status == "posted"
+            and not _absorb_unlinked(suppressed, leg.transfer, row)
+            and leg.transfer.id not in rejected
+        ]
     if not candidates:
-        return None
+        return _Pick(None, refused=refused)
     best = min(
         candidates,
         key=lambda leg: (
@@ -917,7 +1429,7 @@ def _absorb_target_for_convert(
             leg.transfer.id,
         ),
     )
-    return best.transfer
+    return _Pick(best.transfer, refused=refused)
 
 
 def _counterpart_in(
@@ -927,23 +1439,26 @@ def _counterpart_in(
     amount: Decimal,
     row: Transaction,
     auto_pairing: bool = False,
-) -> Transaction | None:
+    pairs: SuppressedPairs | None = None,
+) -> _Pick:
     """A live one-sided row in the target account with the opposite amount
     inside the window — the merge case of an explicit conversion.
 
     ``auto_pairing`` narrows the pool to what ``auto_link_pass`` would accept
-    (DESIGN §11 rule 5): **posted rows only** — a bank-pending row can come
-    back posted under a different description, and consuming it in a merge
-    first turns that rehash into a duplicated leg — and pairs a human
-    unlinked stay unlinked.
+    (DESIGN §11 rule 5): rows of the transfer pool only (``matching.
+    transfer_pool`` — never a manual row, nor a replacement in which a
+    person or an agent set a category: merging it would discard that
+    decision, #386 review),
+    **posted rows only** — a bank-pending row can come back posted under a
+    different description, and consuming it in a merge first turns that
+    rehash into a duplicated leg — and pairs a human unlinked or rejected
+    stay unlinked (#386).
 
     A counterpart the matcher holds for an expected transfer to ``row``'s
     account is still a counterpart (decision 65, the auto-link pool's rule):
     without it, converting the late side made a second copy of the held
     leg. ``row`` must not hold a match itself — one merge carries one.
     """
-    matched = select(Match.posted_id).where(Match.state.in_(["proposed", "confirmed"]))
-    reversed_ids = select(Transaction.reverses_id).where(Transaction.reverses_id.is_not(None))
     rows = session.execute(
         select(Transaction)
         .join(Posting, Posting.transaction_id == Transaction.id)
@@ -954,8 +1469,8 @@ def _counterpart_in(
         .where(
             Transaction.status.in_(matching.MATCHABLE_STATUSES),
             Transaction.superseded_by.is_(None),
-            Transaction.id.not_in(matched),
-            Transaction.id.not_in(reversed_ids),
+            bank_lineage.chain_head_clause(),
+            ~matching.trade_cash_clause(),
             Transaction.id != row.id,
             Posting.account_id == account_id,
             Posting.amount == amount,
@@ -969,15 +1484,14 @@ def _counterpart_in(
         for t in rows
         if matching._real_leg(t) is not None and matching._real_leg(t).account_id == account_id  # type: ignore[union-attr]
     ]
+    # Matched — or held — through the correction chain, as the pool reads it
+    # (#386 review): a match stays on the corrected original, so a
+    # replacement whose original settles a bill is that bill's bank row, and
+    # a held one comes back below with its hold.
+    matched = matching._live_matches_on_lineage(session, [*one_sided, row])
+    one_sided = [t for t in one_sided if t.id not in matched]
     row_leg = matching._real_leg(row)
-    row_is_held = (
-        session.execute(
-            select(Match.id)
-            .where(Match.posted_id == row.id, Match.state.in_(matching.LIVE_MATCH_STATES))
-            .limit(1)
-        ).first()
-        is not None
-    )
+    row_is_held = row.id in matched
     if row_leg is not None and not row_is_held:
         held = [
             hold.row
@@ -989,30 +1503,68 @@ def _counterpart_in(
             and leg.account_id == account_id
             and Decimal(leg.amount) == amount
         ]
-        if held:
-            corrected = set(
-                session.execute(
-                    select(Transaction.reverses_id).where(
-                        Transaction.reverses_id.in_([t.id for t in held])
-                    )
-                ).scalars()
-            )
-            one_sided += [t for t in held if t.id not in corrected]
+        # _transfer_holds holds chain heads only, so a corrected row never
+        # reaches here.
+        one_sided += held
+    refused = False
     if auto_pairing:
-        suppressed = _unlinked_pair_keys(session)
+        pool, _ = matching.transfer_pool(session, only=[t.id for t in one_sided])
+        in_pool = {t.id for t in pool}
+        suppressed = (pairs or SuppressedPairs()).get(session)
+        eligible = [t for t in one_sided if t.id in in_pool]
+        refused = any((row.id, t.id) in suppressed for t in eligible)
         one_sided = [
             t
-            for t in one_sided
-            if row.status == "posted"
-            and t.status == "posted"
-            and matching._pair_key(row.id, t.id) not in suppressed
+            for t in eligible
+            if row.status == "posted" and t.status == "posted" and (row.id, t.id) not in suppressed
         ]
     if not one_sided:
-        return None
-    return min(
-        one_sided,
-        key=lambda t: (abs((row.date - t.date).days), t.created_at, t.id),
+        return _Pick(None, refused=refused)
+    return _Pick(
+        min(one_sided, key=lambda t: (abs((row.date - t.date).days), t.created_at, t.id)),
+        refused=refused,
     )
+
+
+def machine_answer_refused(
+    session: Session,
+    tx: Transaction,
+    target_id: uuid.UUID,
+    *,
+    pairs: SuppressedPairs | None = None,
+) -> bool:
+    """Whether an automatic answer of ``target_id`` for ``tx`` — the
+    categorize pass's rule, memory or model tier, a categorize rule's
+    apply-history — must count as no answer (#386 review): ``target_id`` is a
+    real account whose only counterpart for this row (a one-sided row, or the
+    open leg of a transfer converted from one) forms a pair a person said is
+    not a transfer, or unlinked. The automated passes ask first, as they do
+    about the currency (``categorize.fits_currency``), so a refused answer
+    leaves the row for the next tier instead of failing the pass on it."""
+    target = session.get(Account, target_id)
+    real = matching._real_leg(tx)
+    if (
+        target is None
+        or target.is_virtual
+        or real is None
+        or real.account_id == target.id
+        or tx.status not in matching.MATCHABLE_STATUSES
+    ):
+        return False
+    absorb = _absorb_target_for_convert(
+        session, row=tx, real=real, target_account_id=target.id, auto_pairing=True, pairs=pairs
+    )
+    if absorb.chosen is not None:
+        return False
+    counterpart = _counterpart_in(
+        session,
+        account_id=target.id,
+        amount=-Decimal(real.amount),
+        row=tx,
+        auto_pairing=True,
+        pairs=pairs,
+    )
+    return counterpart.chosen is None and (absorb.refused or counterpart.refused)
 
 
 def convert_to_transfer(
@@ -1022,6 +1574,7 @@ def convert_to_transfer(
     target_ref: str,
     token: ApiToken | None,
     auto_pairing: bool = False,
+    pairs: SuppressedPairs | None = None,
 ) -> Transaction:
     """Category '[target]' semantics: make ``tx`` a transfer to ``target``.
 
@@ -1034,12 +1587,32 @@ def convert_to_transfer(
     ``auto_pairing=True`` is the machine path — the AI classifier (DESIGN §11
     rule 5) and rule application. The model names the *account*; which rows
     pair stays deterministic, so absorb/merge candidates are narrowed to what
-    ``auto_link_pass`` would accept: posted rows only, unlink-suppression
-    respected. The conversion itself is unaffected.
+    ``auto_link_pass`` would accept: rows of the transfer pool, posted rows
+    only, unlinked and rejected pairs left alone. When those were its only
+    candidates, the answer is refused (``MachineAnswerRefused``, asked first
+    by ``machine_answer_refused``) instead of converting in place: "not a
+    transfer" means automation never makes either row a transfer to the
+    other's account (#386 review). A corrected original is refused before
+    any of it.
     """
     target = ledger_service.resolve_account(session, target_ref)
     if target.is_virtual:
         raise LedgerError(f"{target.path} is a category — transfers connect two real accounts")
+    # Before anything that absorbs or merges the row (#386 review): a
+    # corrected original absorbed or merged would leave its replacement live
+    # beside the transfer, the money counted twice. Locked first, so a
+    # concurrent correction or merge of the row is seen. The machine path
+    # never waits on a row another writer holds (a sale linking it, decision
+    # 103): it skips it (RowBusy) for its next pass.
+    if auto_pairing:
+        ledger_service.lock_transaction(session, tx.id, skip_locked=True)
+    ledger_service.lock_rows(session, [tx])
+    if tx.status == core.Status.VOID or tx.superseded_by is not None:
+        raise ledger_service.RowChanged(f"transaction {tx.id} is {tx.status}")
+    ledger_service.refuse_corrected(session, tx)
+    # A trade's cash, or the bank row a trade linked, moves only with its
+    # trade (decision 103): no absorb, merge or in-place conversion takes it.
+    ledger_service.refuse_trade_cash_lineage(session, tx, what="become a transfer")
 
     if is_transfer(tx):
         return _repoint_transfer(session, tx=tx, target_account=target, token=token)
@@ -1053,25 +1626,26 @@ def convert_to_transfer(
     signal = "rule" if auto_pairing else "user"
 
     if tx.status in matching.MATCHABLE_STATUSES:
-        absorb_target = _absorb_target_for_convert(
+        absorb = _absorb_target_for_convert(
             session,
             row=tx,
             real=real,
             target_account_id=target.id,
             auto_pairing=auto_pairing,
+            pairs=pairs,
         )
-        if absorb_target is not None:
+        if absorb.chosen is not None:
             _require_commit(token, "absorbing into an existing transfer")
             _absorb_row(
                 session,
                 row=tx,
-                transfer=absorb_target,
+                transfer=absorb.chosen,
                 account_id=real.account_id,
                 amount=amount,
                 signal=signal,
                 actor_token_id=token.id if token else None,
             )
-            return absorb_target
+            return absorb.chosen
 
         counterpart = _counterpart_in(
             session,
@@ -1079,17 +1653,33 @@ def convert_to_transfer(
             amount=-amount,
             row=tx,
             auto_pairing=auto_pairing,
+            pairs=pairs,
         )
-        if counterpart is not None:
+        if counterpart.chosen is not None:
             _require_commit(token, "merging a transfer pair")
-            outgoing, incoming = (tx, counterpart) if amount < 0 else (counterpart, tx)
+            outgoing, incoming = (
+                (tx, counterpart.chosen) if amount < 0 else (counterpart.chosen, tx)
+            )
             return matching._merge_transfer_pair(
-                session, outgoing=outgoing, incoming=incoming, token=token
+                session,
+                outgoing=outgoing,
+                incoming=incoming,
+                token=token,
+                card_reason="transfer.convert",
+                skip_busy=auto_pairing,
+            )
+        if absorb.refused or counterpart.refused:
+            # "Not a transfer" means automation never makes either row a
+            # transfer to the other's account (#386 review): converted in
+            # place, the row would carry that account a second copy of the
+            # money its rejected counterpart already holds there.
+            raise MachineAnswerRefused(
+                f"{target.path} holds this row's counterpart of a pair a person said is not"
+                " a transfer"
             )
 
     if tx.status == core.Status.POSTED:
         _require_commit(token, "converting a posted transaction")
-        _corrected_once_guard(session, tx)
         if amount < 0:
             specs = core.expand_transfer(
                 from_account_id=real.account_id,
@@ -1104,9 +1694,13 @@ def convert_to_transfer(
                 amount=amount,
                 currency=real.currency.strip(),
             )
-        return ledger_service.reverse_and_replace_with_specs(
+        replacement = ledger_service.reverse_and_replace_with_specs(
             session, tx=tx, token=token, replacement_specs=specs, action="transfer.convert"
         )
+        _emit_converted(
+            session, transfer=replacement, own_account_id=real.account_id, target=target
+        )
+        return replacement
 
     before = ledger_service._tx_audit_shape(tx, ledger_service._specs_of(tx))
     # Assign the relationship (not just the FK): the session keeps objects
@@ -1117,6 +1711,7 @@ def convert_to_transfer(
     # The category leg just became a REAL leg: ``target`` gains this row.
     balances.mark_dirty(session, tx.date)
     _audit_convert(session, tx=tx, token=token, before=before)
+    _emit_converted(session, transfer=tx, own_account_id=real.account_id, target=target)
     return tx
 
 
@@ -1161,13 +1756,14 @@ def convert_to_category(
     category = ledger_service.resolve_account(session, category_ref)
     if not category.is_virtual:
         raise LedgerError(f"{category.path} is not a category")
+    ledger_service.refuse_system_account(category)
     kept = legs[kept_account.id]
     ledger_service.check_category_currency(kept.currency, category)
     other = next(p for p in tx.postings if p is not kept)
 
     if tx.status == core.Status.POSTED:
         _require_commit(token, "recategorizing a posted transfer")
-        _corrected_once_guard(session, tx)
+        ledger_service.refuse_corrected(session, tx)
         specs = core.expand_flat(
             account_id=kept.account_id,
             category_id=category.id,
@@ -1273,7 +1869,10 @@ def unlink_transfer(
 
     Each original's ``content_hash`` MOVES to its clone (the global unique
     index forbids duplication, and the clone now IS that bank line — import
-    idempotency and the pending lifecycle stay exactly right). A
+    idempotency and the pending lifecycle stay exactly right), and the
+    original's ``superseded_by`` moves to the clone as well: the clone
+    carries its bank line on (``lineage``), and the original is no longer a
+    linked original of the transfer, backing nothing. A
     merge-created transfer is voided with lineage to the resurrected
     outgoing side; a conversion-created transfer survives with its side
     back to unbacked. The emitted ``transfer.unlinked`` payload suppresses
@@ -1297,7 +1896,7 @@ def unlink_transfer(
         raise LedgerError("only transfers can be unlinked")
     if tx.status not in matching.MATCHABLE_STATUSES:
         raise LedgerError(f"transaction is {tx.status}, not a live transfer")
-    _corrected_once_guard(session, tx)
+    ledger_service.refuse_corrected(session, tx)
     children = list(
         session.execute(
             select(Transaction)
@@ -1334,6 +1933,14 @@ def unlink_transfer(
             content_hash=moved_hash,
         )
         resurrected.append((clone, moved_hash))
+        # The clone carries the original's bank line on (#386 review): the
+        # original now points at it, as a posted pending points at its
+        # successor. So the clone's lineage reaches the original's — it
+        # stays a bank line for pairing even without a hash (a replacement
+        # never had one) — and the original no longer reads as merged into
+        # this transfer, so it backs none of its legs.
+        child.superseded_by = clone.id
+        session.flush()
         # Review state moves with the row identity: the clone IS that bank
         # line, so it inherits that line's review state (#175, decision 29).
         review_service.copy_to_clone(session, void_id=child.id, clone_id=clone.id)

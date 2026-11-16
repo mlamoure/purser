@@ -1,12 +1,13 @@
 ---
 title: Suggestions inbox
-description: Decide what Purser thinks you should do — detected recurring bills and transfers, agent-proposed schedules, transfer-link rules your confirms propose, bill matches the matcher proposes — from the Dashboard cards or the MCP tools.
+description: Decide what Purser thinks you should do — detected recurring bills and transfers, agent-proposed schedules, transfer-link rules your confirms propose, bill matches the matcher proposes, bank rows that look like one transfer — from the Dashboard cards or the MCP tools.
 ---
 
 A **suggestion** is something Purser thinks you should decide: a recurring
 payee it found in your history, a schedule an agent proposed, a payment for a
-card you just added, a rule to link a transfer you keep confirming by hand, or
-a bank row the matcher thinks paid one of your expected bills.
+card you just added, a rule to link a transfer you keep confirming by hand, a
+bank row the matcher thinks paid one of your expected bills, or two bank rows
+that look like one transfer between your accounts.
 It carries a typed **draft** of what it would create, the **evidence** behind
 it, a **confidence** where Purser scored one, and it remembers what you
 decided. The Dashboard cards and the MCP tools are two renderings of the same
@@ -19,6 +20,7 @@ Every suggestion has a `kind`, and the kind decides what its draft is:
 | `schedule` | a schedule (name, account, rrule, amount, ...) | an **active** schedule, materialized immediately |
 | `transfer_link` | a `transfer_link` [rule](../../how-to/rules/#a-pair-scoped-to-a-payee) for one account pair, scoped to a payee | the rule as a **draft**, which links nothing until you activate it |
 | `match` | an expected row and the bank row the matcher proposed for it, with both amounts and the variance | the confirmed **match**: the bill is paid by that row |
+| `transfer_pair` | two bank rows of exactly opposite amounts on two of your accounts, close in date, that nothing links on its own | the **transfer**: one transaction in place of the two rows |
 
 ## Where suggestions come from
 
@@ -60,6 +62,82 @@ Every suggestion has a `kind`, and the kind decides what its draft is:
   expected transfer waits a few days for its other leg before it gets a card,
   because the transfer usually settles it by itself. See
   [How matching works](../../explanation/matching/).
+- **Transfer candidates.** After each import and the nightly matching job,
+  two bank rows that leave one account and arrive in another with exactly
+  the same amount, at most 3 days apart, but carry no keyword, rule or
+  schedule that links them, become a `transfer_pair` card (`source =
+  detected`, no confidence: amount and date are all there is to go on).
+  Only pairs whose two sides have both posted, the newer in the last 60
+  days, get a card, so importing years of history does not flood the inbox;
+  older pairs stay flagged in the account register, and a pair with a side
+  still pending waits until both post. Linking the pair with the register's
+  Link ⇄ (or `confirm_transfer`) accepts its card, and its ✗ rejects it;
+  when the pair stops being a candidate any other way — a rule or keyword
+  links it, an `[account]` edit or the categorize pass pairs a row
+  elsewhere, a side is voided or matched to a bill — the card is
+  **withdrawn** (a conversion's withdrawal is audited with the reason
+  `transfer.convert`). When the categorize pass corrects one of the rows (a
+  posted row gets a reversal and a replacement), the card stays the same
+  card, snooze included, and names the replacement. See
+  [Manage transfers](../../how-to/transfers/#confirm-first-candidates).
+
+## Reviewing Needs attention
+
+The Dashboard lists **Expected payments not seen** before suggestions. Each
+expectation shows its account, amount, age and available estimate or paused
+schedule labels. A past expected date is a prompt to check the bank statement;
+it does not prove a missed payment. A paused schedule can retain an explicitly
+confirmed or pinned occurrence; inspect it before deciding what to do.
+
+Suggestions are collapsed into **Payment matches**, **Possible transfers**,
+**Recurring schedules** and **Transfer rules**. Filter by account (either side
+of a transfer), choose oldest first or strongest pattern first, then expand a
+group. Pages contain ten suggestions. Pattern strength is a heuristic evidence
+score, not a probability; "checked" counts detector runs, not transactions.
+Evidence dates link to the underlying records.
+
+The action names state what they do: **Confirm payment match**, **Link as
+transfer**, **Create schedule**, or **Create draft rule**. Inspect the records
+before confirming. A schedule editor offers monthly, weekly, two-week and
+four-week choices and preserves custom recurrence rules. A created schedule
+can be edited or paused in Schedules; matches and transfers can be undone in
+the register. A transfer rule still requires its separate activation preview.
+
+**Transaction review** shows per-account links for posted and pending rows.
+In a register, select posted transactions and choose **Review selected** to
+preview their dates, payees, amounts and categories before confirming the
+review marks. Pending rows and other pages are excluded. Global counts count
+a transfer once; account counts include both sides. Agent proposals are shown
+separately. The REST summary is `GET /transactions/review-summary` (read scope).
+
+A failed check shows an incomplete-results message and Retry. **All clear**
+appears only after every attention check succeeds and every group is empty.
+
+## Detection safeguards
+
+Four-week patterns use a weekly recurrence with interval four when repeated
+28-day gaps and calendar drift support it. Calendar-month patterns retain
+monthly recurrence. Opposite-sign entries are not combined into one recurring
+cash flow. When a previously stable series has a changed latest amount, the
+proposal shows that latest amount and asks you to verify the possible price
+change; it may instead be a one-time adjustment.
+
+Detector-owned schedule cards are hidden when their evidence has lapsed. A
+completed detection scan withdraws patterns no longer supported by current
+history, with an audit entry. If the pattern returns, the same withdrawn card
+can reopen; accepted and rejected decisions remain durable. Agent-authored
+proposals are not expired by this detector. Stale automatic proposals must be
+refreshed before acceptance. Match cards and their counts require a live
+proposal and live transaction rows, and show variance from current signed
+amounts.
+
+Positive rows explicitly described as refunds, cash-back/reward credits,
+dividends or earned-interest credits are excluded from amount-and-date-only
+transfer candidates. You can still explicitly link a mislabeled bank row.
+Loan and investment recurrence proposals require particular care: inspect
+both accounts and the evidence to distinguish a cash movement from an internal
+allocation. These safeguards use transaction evidence, not merchant-specific
+or household-specific exceptions.
 
 ## Deciding
 
@@ -67,13 +145,14 @@ Every suggestion has a `kind`, and the kind decides what its draft is:
 
 | Decision | Effect |
 | --- | --- |
-| `accept` | Applies the draft exactly as shown. A `schedule` becomes an **active** schedule, materialized immediately; a `transfer_link` becomes a **draft** rule (below); a `match` confirms the match, which also marks the bank row reviewed. |
-| `edit_then_accept` | Same, after merging your `edits`. A schedule takes any draft field — `name`, `rrule`, `dtstart`, `amount`, `amount_type`, `estimate_basis`, `payee`, `category`, `counterparty_account`, `autopost_policy`. A transfer link takes only what narrows or widens it — `amount_exact` (a decimal string), `window_days` (0 to 14) and `effective_from` — because its account pair and payee are what it proposes. A match has nothing to edit: to pay the bill with a different row, mark it paid with that row (`POST /matching/match`, MCP `match`). The edits are validated by the same schema before anything is created. |
-| `reject` | Durable. `reject_scope = counterparty` means "never suggest this payee or counterparty on this account again" — for a transfer link, never again for this account pair, whatever the payee; `exact` (default) rejects just this pattern, or this pair and payee. A match is rejected exactly: the matcher never proposes that bank row for that bill again, nor the posted row that replaces it when it was pending. |
+| `accept` | Applies the draft exactly as shown. A `schedule` becomes an **active** schedule, materialized immediately; a `transfer_link` becomes a **draft** rule (below); a `match` confirms the match, which also marks the bank row reviewed; a `transfer_pair` links the two rows as one transfer, exactly as confirming them in the register does — the response's `transfer` names the merged row and, when the confirm proposed one, the `transfer_link` suggestion for that pair and payee. |
+| `edit_then_accept` | Same, after merging your `edits`. A schedule takes any draft field — `name`, `rrule`, `dtstart`, `amount`, `amount_type`, `estimate_basis`, `payee`, `category`, `counterparty_account`, `autopost_policy`. A transfer link takes only what narrows or widens it — `amount_exact` (a decimal string), `window_days` (0 to 14) and `effective_from` — because its account pair and payee are what it proposes. A match has nothing to edit: to pay the bill with a different row, mark it paid with that row (`POST /matching/match`, MCP `match`). A transfer pair has nothing to edit either: to link other rows, confirm them (`POST /matching/confirm-transfer`, MCP `confirm_transfer`). The edits are validated by the same schema before anything is created. |
+| `reject` | Durable. `reject_scope = counterparty` means "never suggest this payee or counterparty on this account again" — for a transfer link, never again for this account pair, whatever the payee; `exact` (default) rejects just this pattern, or this pair and payee. A match is rejected exactly: the matcher never proposes that bank row for that bill again, nor the posted row that replaces it when it was pending. A transfer pair is rejected exactly too: "not a transfer" — nothing links those two rows automatically again, not even a rule you activate later. |
 | `snooze` | Hides it until `snooze_until` (default 30 days). Nothing auto-accepts on expiry — it simply returns to the inbox. A snoozed match stays proposed: its bank row is still held, and the forecast still counts the bill as paid pending your confirmation. |
 
 Deciding a match card whose proposal is already gone answers 422 and
-withdraws the card.
+withdraws the card, and so does deciding a transfer pair whose rows no longer
+pair (one was linked elsewhere, voided or matched to a bill).
 
 ### Accepting a transfer link
 
@@ -93,13 +172,23 @@ On the Dashboard each open suggestion is a card: the headline, its source and
 confidence, an evidence summary that expands into the occurrences (or, for a
 transfer link, the pairs you confirmed), and the four decisions (rejecting
 asks whether to reject just this one or never suggest the pair again).
-`GET /suggestions` lists the open inbox by confidence — `?kind=schedule`,
-`?kind=transfer_link` or `?kind=match` narrows it, and `?status=withdrawn`
-shows the cards Purser closed on its own; `GET /suggestions/{id}` adds the
-full evidence. A match card shows the expected row against the bank row and
-the variance, with Accept, Snooze and Reject. MCP `list_suggestions` (with an optional `kind`) returns the same
+`GET /suggestions` lists the open inbox by confidence, a page at a time
+(`limit`, at most 25, and `offset` for the next page) — `?kind=schedule`,
+`?kind=transfer_link`, `?kind=match` or `?kind=transfer_pair` narrows it, and
+`?status=withdrawn` shows the cards Purser closed on its own;
+`GET /suggestions/counts` says how many of each kind are open (snoozed ones
+left out), and `GET /suggestions/{id}` adds the full evidence. A match card shows the
+expected row against the bank row and the variance, with Accept, Snooze and
+Reject. A transfer pair card shows where the money left and arrived, both
+dates and both bank texts, with Link as transfer, Snooze and Not a transfer.
+Transfer pairs, transfer links and agent proposals carry no confidence, so
+they sort after everything Purser scored. The Dashboard therefore shows each
+kind on its own, under its total ("2 transfer pairs to review"), ten cards at
+a time with **Show more** for the rest, so no kind is ever hidden behind
+another. MCP `list_suggestions` (with an optional `kind`) returns the same
 rows with a one-line `headline`, the draft, an evidence summary (count,
-first/last, amount range, cadence, and an agent's `note`) and the confidence; `whats_new` carries the
+first/last, amount range, cadence, and an agent's `note`) and the confidence,
+beside `open` (every open row) and `open_by_kind`; `whats_new` carries the
 open count and the top few.
 
 ## Why it remembers
@@ -113,7 +202,9 @@ pair and payee one of your `transfer_link` rules already covers — is never
 suggested at all. That is what keeps the inbox from becoming noise. A match's
 fingerprint is the bill's schedule slot (or the expected row) plus the bank
 row, so rejecting it holds even when the bill comes back as a fresh copy in
-the same slot.
+the same slot. A transfer pair's fingerprint is its two bank rows, in either
+order — as they were before any correction, so a correction of either row keeps
+the same card and the same "not a transfer".
 
 A transfer link's payee is matched through its **aliases**: if a rename rule
 later merges that payee into a friendlier one, a confirm under the new name
@@ -121,7 +212,7 @@ still refreshes the same suggestion, and a rejection still holds.
 
 The authoritative spec is
 [`DESIGN.md`](https://github.com/mlamoure/purser/blob/main/DESIGN.md)
-section 6 (schedules and forecasting) and decisions 57, 67 and 86. Schedules
+section 6 (schedules and forecasting) and decisions 57, 67, 86 and 102. Schedules
 themselves are covered in
 [Schedules and recurring bills](../../how-to/schedules-and-bills/), rules in
 [Write deterministic rules](../../how-to/rules/).

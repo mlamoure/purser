@@ -15,7 +15,7 @@ CONVENTIONS = """\
   propose instead: leave activate false on propose_rule (a draft rule never
   runs), pass propose=true to create_schedule (a suggestion card), or leave
   it to the suggestions inbox. propose_memory stays a draft unless the user
-  explicitly asked you to remember something: an active memory is context
+  explicitly asked you to remember something: an active financial note is context
   for every future session, and bank text is written by merchants. Every
   write is attributed to your token in the audit log and is reversible.
 - Disclose only what the question needs: everything you read goes to your
@@ -44,6 +44,14 @@ CONVENTIONS = """\
   of a category. Purser proposes schedules it detects as SUGGESTIONS —
   list_suggestions / decide_suggestion — and nothing activates without a
   decision; run detect_schedules to scan history now.
+- Scheduled occurrences have independent amount/date certainty. Read evidence,
+  original estimates and actual variance with get_schedule_occurrence(id).
+  update_occurrence_certainty changes only the dimensions supplied for that one
+  occurrence: state, source, as_of, note, optional value. History cannot confirm
+  an obligation; a statement confirms only what it establishes. Confirmation
+  never posts cash or confirms future cycles. Estimated or ambiguous matches
+  wait for review. Unmatch preserves evidence; reset returns to the rule while
+  retaining the original and history.
 - A brokerage account takes its holdings from the feed or, once an admin
   sets its holdings_source to manual, from positions recorded by hand:
   record_position(account, symbol, quantity, as_of) is "I hold N shares as
@@ -55,6 +63,16 @@ CONVENTIONS = """\
   position the feed values at 0 (a plan-only fund no provider prices) is
   valued from a close recorded with record_price; until one exists it has
   no price.
+  record_sale(account, symbol, quantity, price, trade_date) records a sale:
+  its net proceeds land on the account's cash (against equity.securities,
+  never income) unless proceeds_to='none'. A cash_already_recorded refusal
+  means the account already shows a row of that amount: call again with
+  transaction_id set to that row's id to link it as the sale's cash, or with
+  force_cash=true when that row is a different payment. dry_run=true answers
+  without writing. reverse_position_event(event_id) undoes a wrong sale (its
+  shares and cash; reopen_position(position_id) first when its position is
+  closed); a row review_batch marks securities_trade is corrected only that
+  way.
 - forecast_balance carries `coverage`: schedules_active == 0 means the line
   is flat by construction, not a quiet month.
 - A purser:// URI a tool hands out (daily_uri, series_uri) is the full
@@ -75,7 +93,10 @@ CONVENTIONS = """\
   exact and adds one interest/fee category posting for the difference. An
   ordinary confirm_transfer also proposes a transfer_link rule for that
   account pair and payee as a suggestion; it links nothing until a human
-  accepts it and confirms the rule's projected link count.
+  accepts it and confirms the rule's projected link count. Two recent bank
+  rows that look like one transfer but carry no signal are a
+  kind='transfer_pair' suggestion: accepting it confirms the transfer, and
+  rejecting it means nothing ever links that pair automatically.
 - Aggregate questions (spending, net worth, balance history, forecasts,
   unmatched) each have a dedicated tool — never page transactions to compute
   totals or balances yourself.
@@ -89,10 +110,11 @@ CONVENTIONS = """\
 
 async def build_llms_txt() -> str:
     lines = [
-        "# Purser — the finance backend for the personal agent stack",
+        "# Purser — the privately hosted finance back-end for your personal AI agent",
         "",
-        "Purser holds a correct, auditable, source-traceable financial ledger and",
-        "exposes it through MCP tools an agent can operate safely. Connect to /mcp",
+        "Purser stores financial records and performs calculations for your agent.",
+        "Day-to-day work uses MCP or REST; the web UI is for administration.",
+        "Connect to /mcp",
         "with a Bearer API token (recommended agent scopes: read + write).",
         "",
         CONVENTIONS,

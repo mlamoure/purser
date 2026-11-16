@@ -192,6 +192,9 @@ class Holding:
     unpriced: bool = False  # a feed row with no stored value and no stored close
     # Its symbol can never be a ticker (a description): no close values it.
     unpriceable: bool = False
+    # A manual row's trade cash not yet on the account, included in
+    # market_value (decision 104). None when there is none.
+    in_transit: Decimal | None = None
 
 
 def _held(rows: Sequence[HoldingsSnapshot], valuer: Valuer) -> list[Holding]:
@@ -210,6 +213,7 @@ def _held(rows: Sequence[HoldingsSnapshot], valuer: Valuer) -> list[Holding]:
                     position_id=row.position_id,
                     price=row.price,
                     price_as_of=row.price_as_of,
+                    in_transit=row.in_transit,
                 )
             )
             continue

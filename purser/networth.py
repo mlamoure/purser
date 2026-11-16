@@ -8,8 +8,8 @@ Materialized nightly into net_worth_daily.
 
 import uuid
 from collections.abc import Sequence
-from datetime import UTC, datetime, timedelta
 from datetime import date as date_type
+from datetime import timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, NamedTuple
 
@@ -17,7 +17,7 @@ from sqlalchemy import and_, case, func, literal_column, or_, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, aliased
 
-from purser import audit, balances, events, reconciliation
+from purser import audit, balances, clock, events, reconciliation
 from purser import ledger as ledger_service
 from purser.core import ledger as core
 from purser.core import sampling
@@ -171,11 +171,16 @@ def list_valuations(session: Session, account_id: uuid.UUID) -> list[Valuation]:
 def holdings_set_on(
     session: Session, account_id: uuid.UUID, as_of: date_type | None = None
 ) -> list[HoldingsSnapshot]:
-    """The snapshot set in effect at ``as_of``: every row of the account's
-    newest snapshot date at or before it, zero rows included."""
-    stmt = select(func.max(HoldingsSnapshot.as_of)).where(HoldingsSnapshot.account_id == account_id)
-    if as_of is not None:
-        stmt = stmt.where(HoldingsSnapshot.as_of <= as_of)
+    """The snapshot set in effect at ``as_of`` (default: the ledger day,
+    ``clock.ledger_today``): every row of the account's newest snapshot date
+    at or before it, zero rows included. Never a later set: a hand-tracked
+    sale whose cash lands after today has its landing day's set written
+    ahead (#498 review), and it must not show before that day."""
+    if as_of is None:
+        as_of = clock.ledger_today()
+    stmt = select(func.max(HoldingsSnapshot.as_of)).where(
+        HoldingsSnapshot.account_id == account_id, HoldingsSnapshot.as_of <= as_of
+    )
     latest_date = session.execute(stmt).scalar_one_or_none()
     if latest_date is None:
         return []
@@ -201,14 +206,16 @@ def latest_holdings(
     A manual set's zero rows are left out: the tombstones of a position sold
     out that day, or ended with a manual period because the feed does not
     report it (decision 88). They keep an older set from resurfacing but are
-    not holdings. A feed row is returned as the bank sent it, zero shares
-    included, valued on read when the feed values it at 0 (decision 92)."""
+    not holdings. A zero-share manual row that carries a sale's cash still in
+    transit is kept: it is worth that cash (decision 104). A feed row is
+    returned as the bank sent it, zero shares included, valued on read when
+    the feed values it at 0 (decision 92)."""
     return overlay.as_held(
         session,
         [
             h
             for h in holdings_set_on(session, account_id, as_of)
-            if not (h.source == "manual" and h.quantity == 0)
+            if not (h.source == "manual" and h.quantity == 0 and not h.in_transit)
         ],
     )
 
@@ -242,7 +249,7 @@ def valuation_balances(
     as_of: date_type | None = None,
 ) -> dict[uuid.UUID, tuple[Decimal, date_type]]:
     """Presentation overlay for account surfaces (DESIGN §8, decision 42):
-    the latest valuation at or before ``as_of`` (default today, UTC) per
+    the latest valuation at or before ``as_of`` (default the ledger day) per
     OPEN loan/property account, as {account_id: (value, valuation_as_of)}.
 
     Postings stay the ledger truth — ``ledger.account_balances()`` and the
@@ -251,7 +258,7 @@ def valuation_balances(
     Accounts at/past their close date are omitted so stale valuations never
     resurrect a closed account (same cutoff rule as ``net_worth_at``).
     """
-    effective = as_of or datetime.now(UTC).date()
+    effective = as_of or clock.ledger_today()
     stmt = (
         select(Valuation.account_id, Valuation.value, Valuation.as_of, Account.closed_at)
         .distinct(Valuation.account_id)
@@ -263,7 +270,7 @@ def valuation_balances(
         stmt = stmt.where(Valuation.account_id.in_(account_ids))
     overlay: dict[uuid.UUID, tuple[Decimal, date_type]] = {}
     for account_id, value, valued_as_of, closed_at in session.execute(stmt):
-        if closed_at is not None and effective >= closed_at.date():
+        if closed_at is not None and effective >= clock.ledger_date(closed_at):
             continue
         overlay[account_id] = (Decimal(value), valued_as_of)
     return overlay
@@ -276,7 +283,7 @@ def holdings_addends(
 ) -> dict[uuid.UUID, tuple[Decimal, date_type]]:
     """Presentation overlay for account surfaces (DESIGN §8, decision 50):
     the market value of the latest holdings snapshot at or before ``as_of``
-    (default today, UTC) per OPEN brokerage account, as
+    (default the ledger day) per OPEN brokerage account, as
     {account_id: (market_value, snapshot_as_of)}.
 
     This is an ADDEND, not a balance: brokerage cash lives in postings, so
@@ -290,7 +297,7 @@ def holdings_addends(
     a closed account. Zero-valued snapshots are omitted too — an account with
     nothing to add reports plain ``postings``.
     """
-    effective = as_of or datetime.now(UTC).date()
+    effective = as_of or clock.ledger_today()
     latest = (
         select(
             HoldingsSnapshot.account_id.label("account_id"),
@@ -339,7 +346,7 @@ def holdings_addends(
     )
     addends: dict[uuid.UUID, tuple[Decimal, date_type]] = {}
     for account_id, market_value, snapshot_as_of, closed_at in session.execute(stmt):
-        if closed_at is not None and effective >= closed_at.date():
+        if closed_at is not None and effective >= clock.ledger_date(closed_at):
             continue
         market = Decimal(market_value)
         if market == 0:
@@ -491,7 +498,7 @@ def account_balance_series(
     if not dates:
         return {}, "postings"
     postings = balances.balance_series(session, account.id, dates=dates)
-    closed_on = account.closed_at.date() if account.closed_at is not None else None
+    closed_on = clock.ledger_date(account.closed_at) if account.closed_at is not None else None
 
     def open_on(day: date_type) -> bool:
         return closed_on is None or day < closed_on
@@ -562,7 +569,9 @@ def net_worth_at(session: Session, as_of: date_type) -> dict[str, Any]:
         # onward: the closing adjustment zeroed its postings, and stale
         # valuations/holdings after that date must not resurrect it. History
         # BEFORE the close date is untouched (DESIGN §3.4).
-        closed_cutoff = account.closed_at is not None and as_of >= account.closed_at.date()
+        closed_cutoff = account.closed_at is not None and as_of >= clock.ledger_date(
+            account.closed_at
+        )
         if account.type in VALUATION_TYPES and not closed_cutoff:
             valuation = _latest_valuation(session, account.id, as_of)
             if valuation is not None:
@@ -787,7 +796,6 @@ def consume_watermark() -> int:
     lock is never held across the (possibly minutes-long) loop. On failure
     the unfinished range is re-marked; concurrent callers no-op on the
     claim. Returns the number of days materialized."""
-    from datetime import UTC, datetime
 
     from purser.db import get_sessionmaker
 
@@ -797,7 +805,7 @@ def consume_watermark() -> int:
         session.commit()
     if claimed is None:
         return 0
-    today = datetime.now(UTC).date()
+    today = clock.ledger_today()
     day = claimed
     done = 0
     try:
@@ -819,12 +827,11 @@ def materialize_job() -> None:
     """Nightly job: consume the watermark, then the unconditional
     today-2 floor, then the running-balance heal + parity probe
     (belt-and-suspenders for a writer that missed its mark)."""
-    from datetime import UTC, datetime
 
     from purser.db import get_sessionmaker
 
     consume_watermark()
-    today = datetime.now(UTC).date()
+    today = clock.ledger_today()
     with get_sessionmaker()() as session:
         for offset in range(3):
             materialize_day(session, today - timedelta(days=offset))

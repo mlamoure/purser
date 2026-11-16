@@ -1,7 +1,7 @@
 """Accounts & categories API (hybrid ledger: categories are virtual accounts)."""
 
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Literal
 
@@ -10,10 +10,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from purser import balances, ledger, networth, reconciliation
+from purser import balances, clock, ledger, networth, reconciliation
 from purser.admin import security
 from purser.admin.auth import ReadToken, WriteToken
 from purser.db import get_session
+from purser.feed.snapshot import BankSnapshot, account_snapshot
 from purser.models import Account, ApiToken
 
 DbSession = Annotated[Session, Depends(get_session)]
@@ -35,6 +36,7 @@ class ReconciliationOut(BaseModel):
     id: uuid.UUID
     as_of: date
     basis: Literal["posted", "pending_inclusive"]
+    component: Literal["balance", "cash"]
     statement_balance: Decimal
     target_balance: Decimal  # the statement figure in ledger sign
     adjustment: Decimal  # what Purser posted to reach the target; 0 = it already matched
@@ -52,6 +54,7 @@ class ReconciliationOut(BaseModel):
             id=row.id,
             as_of=row.as_of,
             basis=row.basis,
+            component=c.component,
             statement_balance=c.statement_balance,
             target_balance=row.target_balance,
             adjustment=row.adjustment,
@@ -107,6 +110,9 @@ class AccountOut(BaseModel):
     # feed's snapshots, or positions tracked by hand. Admin-set feed
     # configuration; always "feed" off brokerage.
     holdings_source: Literal["feed", "manual"] = "feed"
+    # A manually tracked brokerage account whose feed balance is its cash
+    # (§7.3, decision 103): admin opt-in that puts it in the drift check.
+    feed_balance_is_cash: bool = False
     balance: Decimal | None = None
     # Valuation overlay (DESIGN §8, decision 42): open loan/property accounts
     # report their latest valuation as `balance` (method "valuation",
@@ -154,6 +160,7 @@ class AccountOut(BaseModel):
             feed_invert=a.feed_invert,
             drift_basis_override=_drift_basis(a.drift_basis_override),
             holdings_source="manual" if a.holdings_source == "manual" else "feed",
+            feed_balance_is_cash=a.feed_balance_is_cash,
             balance=balance,
             balance_method=balance_method,
             balance_as_of=balance_as_of,
@@ -208,9 +215,9 @@ class AccountUpdate(BaseModel):
     too; a plain bool, so absent/None simply leaves it unchanged.
     ``drift_basis_override`` (§7.3, decision 83) is admin-only as well, with
     ``feed_start``'s explicit-null-clears rule. ``holdings_source`` (§8,
-    decision 88) is admin-only too; absent/None leaves it unchanged.
-    ``min_balance`` (§3.4, #466) is write scope, with the explicit-null-clears
-    rule."""
+    decision 88) and ``feed_balance_is_cash`` (§7.3, decision 103) are
+    admin-only too; absent/None leaves them unchanged. ``min_balance`` (§3.4,
+    #466) is write scope, with the explicit-null-clears rule."""
 
     name: str | None = Field(default=None, min_length=1)
     description: str | None = None
@@ -243,6 +250,15 @@ class AccountUpdate(BaseModel):
         max_digits=20,
         description=_MIN_BALANCE_HELP + " An explicit null clears the floor, and the "
         "account leaves the shortfall scan; absent leaves it unchanged. Write scope.",
+    )
+    feed_balance_is_cash: bool | None = Field(
+        default=None,
+        description="Say that this brokerage account's feed balance is its CASH, as for a "
+        "cash sweep whose positions are tracked by hand (`holdings_source` `manual`; 422 "
+        "otherwise). The post-sync drift check then compares that balance with the "
+        "account's transactions, like a checking account's. Off by default because many "
+        "brokers report the whole account value instead. Turning it off clears a "
+        "drift-basis pin; switching the account back to the feed turns it off. Admin scope.",
     )
     path: str | None = Field(
         default=None,
@@ -361,13 +377,22 @@ def list_accounts(
     ]
 
 
+class AccountDetailOut(AccountOut):
+    # Detail reads include bank truth under the same scope as transactions.
+    # Lists stay compact and do not decrypt a feed once per account.
+    bank_snapshot: BankSnapshot
+
+
 @router.get("/{account_id}")
-def get_account(account_id: uuid.UUID, token: ReadToken, session: DbSession) -> AccountOut:
+def get_account(account_id: uuid.UUID, token: ReadToken, session: DbSession) -> AccountDetailOut:
     try:
         account = ledger.get_account(session, account_id)
     except ledger.LedgerError as exc:
         raise _handle(exc) from exc
-    return _account_out(session, account, token)
+    return AccountDetailOut(
+        **_account_out(session, account, token).model_dump(),
+        bank_snapshot=account_snapshot(session, account),
+    )
 
 
 class BalanceAsOf(BaseModel):
@@ -381,6 +406,7 @@ class BalanceAsOf(BaseModel):
     balance: Decimal
     method: str  # "postings" | "valuation" | "postings+holdings"
     currency: str
+    bank_snapshot: BankSnapshot
 
 
 @router.get("/{account_id}/balance")
@@ -388,21 +414,23 @@ def balance_as_of(
     account_id: uuid.UUID,
     token: ReadToken,
     session: DbSession,
-    as_of: Annotated[date | None, Query(description="defaults to today (UTC)")] = None,
+    as_of: Annotated[date | None, Query(description="defaults to the ledger day")] = None,
 ) -> BalanceAsOf:
     """Balance at end of ``as_of``. Open loan/property accounts answer with
     their latest valuation at or before that date (decision 42); open
     brokerage accounts add their latest holdings market value on top of the
     postings basis (decision 50); everything else answers from the stored
     running balances (decision 37), never recomputed. 0 before first
-    activity; closed accounts answer for their whole history."""
+    activity; closed accounts answer for their whole history. ``bank_snapshot``
+    is the latest archived bank report, not a historical snapshot at ``as_of``;
+    its comparison uses live postings over all recorded dates."""
     try:
         account = ledger.get_account(session, account_id)
     except ledger.LedgerError as exc:
         raise _handle(exc) from exc
     if account.is_virtual:
         raise HTTPException(422, f"{account.path} is a category; balances apply to real accounts")
-    effective = as_of or datetime.now(UTC).date()
+    effective = as_of or clock.ledger_today()
     balance, method, _overlay_as_of = networth.account_balance_at(session, account, effective)
     return BalanceAsOf(
         account_id=account.id,
@@ -411,6 +439,7 @@ def balance_as_of(
         balance=balance,
         method=method,
         currency=account.currency.strip(),
+        bank_snapshot=account_snapshot(session, account),
     )
 
 
@@ -445,7 +474,7 @@ def balance_series(
     token: ReadToken,
     session: DbSession,
     start: Annotated[date | None, Query(description="defaults to end - 90d")] = None,
-    end: Annotated[date | None, Query(description="defaults to today (UTC)")] = None,
+    end: Annotated[date | None, Query(description="defaults to the ledger day")] = None,
 ) -> BalanceSeries:
     """Balance history for one account over ``[start, end]``, one point per
     transaction that moved it, plus the ``opening`` balance carried into the
@@ -461,7 +490,7 @@ def balance_series(
         raise _handle(exc) from exc
     if account.is_virtual:
         raise HTTPException(422, f"{account.path} is a category; balances apply to real accounts")
-    window_end = end or datetime.now(UTC).date()
+    window_end = end or clock.ledger_today()
     window_start = start or window_end - timedelta(days=90)
     if window_end < window_start:
         raise HTTPException(422, "end must be >= start")
@@ -554,8 +583,9 @@ def update_account(
     drift_basis_set = "drift_basis_override" in body.model_fields_set
     holdings_source_set = "holdings_source" in body.model_fields_set
     min_balance_set = "min_balance" in body.model_fields_set
+    cash_flag_set = "feed_balance_is_cash" in body.model_fields_set
     if (
-        feed_start_set or feed_invert_set or drift_basis_set or holdings_source_set
+        feed_start_set or feed_invert_set or drift_basis_set or holdings_source_set or cash_flag_set
     ) and not security.is_admin(token.scopes):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "requires scope: admin")
     try:
@@ -573,6 +603,7 @@ def update_account(
             holdings_source=body.holdings_source,
             min_balance=body.min_balance,
             min_balance_set=min_balance_set,
+            feed_balance_is_cash=body.feed_balance_is_cash,
             path=body.path,
             actor_token_id=token.id,
         )
@@ -628,9 +659,15 @@ def reopen_account(
 
 
 class ReconcileRequest(BaseModel):
+    component: Literal["balance", "cash"] = Field(
+        default="balance",
+        description="Use cash explicitly for a manual brokerage account: statement_balance "
+        "must be cash only, excluding securities and unvested awards. Other eligible "
+        "account types use balance. Holdings and prices are never adjusted.",
+    )
     as_of: date = Field(
         description="The statement date: the balance is the one at the end of this day. "
-        "Today (UTC) or earlier; a future date is rejected."
+        "Today (household time zone) or earlier; a future date is rejected."
     )
     statement_balance: Decimal = Field(
         decimal_places=4,
@@ -661,6 +698,7 @@ class ReconcileResult(BaseModel):
     account_id: uuid.UUID
     as_of: date
     basis: Literal["posted", "pending_inclusive"]
+    component: Literal["balance", "cash"]
     statement_balance: Decimal
     target_balance: Decimal
     ledger_balance: Decimal  # the balance on as_of in this basis before the adjustment
@@ -686,7 +724,9 @@ def reconcile_account(
     account_id: uuid.UUID, body: ReconcileRequest, token: WriteToken, session: DbSession
 ) -> ReconcileResult:
     """Reconcile a checking, savings, cash or credit-card account to a statement
-    balance (issue #268).
+    balance, or explicitly reconcile only a manual brokerage account's cash
+    with ``component="cash"``. Never pass total brokerage value as cash.
+    Holdings, awards and prices are unchanged; readbacks identify the component.
 
     Purser compares the statement figure with its own balance on ``as_of`` in
     the chosen ``basis`` and posts ONE adjustment for the difference, dated
@@ -707,6 +747,7 @@ def reconcile_account(
             account_id=account_id,
             as_of=body.as_of,
             statement_balance=body.statement_balance,
+            component=body.component,
             basis=body.basis,
             dry_run=body.dry_run,
             token=token,
@@ -722,6 +763,7 @@ def reconcile_account(
         account_id=outcome.account_id,
         as_of=outcome.as_of,
         basis=outcome.basis,
+        component=outcome.component,
         statement_balance=outcome.statement_balance,
         target_balance=outcome.target_balance,
         ledger_balance=outcome.ledger_balance,
@@ -756,8 +798,12 @@ def list_reconciliations(
 
 @categories_router.get("")
 def list_categories(token: ReadToken, session: DbSession) -> list[AccountOut]:
+    # Categories only: a system virtual account (equity.securities, the other
+    # side of a trade's cash, decision 103) is not one anyone picks.
     accounts = session.execute(
-        select(Account).where(Account.is_virtual.is_(True)).order_by(Account.path)
+        select(Account)
+        .where(Account.is_virtual.is_(True), Account.type.in_(ledger.CATEGORY_TYPES))
+        .order_by(Account.path)
     ).scalars()
     redacted = security.withholds_external_ids(token.kind, token.scopes)
     return [AccountOut.from_model(a, redacted=redacted) for a in accounts]

@@ -15,6 +15,7 @@ schedules are weekly.
 
 import asyncio
 import json
+import uuid
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
@@ -22,6 +23,7 @@ from typing import Any
 import httpx2
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.orm import Session
 
 from tests.test_mcp import (  # noqa: F401 (fixture re-export)
     TODAY,
@@ -42,6 +44,7 @@ DESCRIPTIONS = [
     "CANARY-DESC-GOLF",
     "CANARY-DESC-HOTEL",
     "CANARY-DESC-ORRERY",
+    "CANARY-DESC-INDIA",
 ]
 RULE_TEXT = "CANARYMATCHTEXT"
 # (payee, category, amount, description, status)
@@ -61,10 +64,14 @@ CARD_ROWS = [("Quillon Hardware", "-84.16"), ("Marrowfield Grocer", "-12.04")]
 LATE_BILL = ("Orrery Utilities", "expenses.groceries", "-52.83", "CANARY-DESC-ORRERY")
 SCHEDULE_AMOUNTS = ["-19.37", "-23.41"]
 RULE_AMOUNT = "-71.93"
+# The broker's own copy of a sale's cash on a hand-tracked account: a
+# record_sale dry run finds it (already_recorded) and would post the same
+# amount, a single transaction's amount either way.
+SALE_ROW = ("418.27", "CANARY-DESC-INDIA")
 SINGLE_AMOUNTS = (
     [r[2] for r in ROWS]
     + [a for _, a in CARD_ROWS]
-    + [LATE_BILL[2], *SCHEDULE_AMOUNTS, RULE_AMOUNT]
+    + [LATE_BILL[2], *SCHEDULE_AMOUNTS, RULE_AMOUNT, SALE_ROW[0]]
 )
 
 
@@ -156,7 +163,11 @@ def seeded(admin_client: TestClient) -> dict[str, Any]:
                 "account": "assets.checking",
                 "category": category,
                 "amount": amount,
-                "date": (TODAY - timedelta(days=3 + i)).isoformat(),
+                # Never before the 1st: aggregates are exact by design, and a
+                # group the month boundary splits to one row would report
+                # that row's amount as its total (the canary failed on the
+                # 10th, when the last row fell into the previous month).
+                "date": max(TODAY - timedelta(days=3 + i), TODAY.replace(day=1)).isoformat(),
                 **({"payee": payee} if payee else {}),
                 "description": description,
                 "status": status,
@@ -171,7 +182,8 @@ def seeded(admin_client: TestClient) -> dict[str, Any]:
                 "account": "liabilities.card",
                 "category": "expenses.groceries",
                 "amount": amount,
-                "date": (TODAY - timedelta(days=4 + i)).isoformat(),
+                # In this month too: they share payee groups with ROWS.
+                "date": max(TODAY - timedelta(days=4 + i), TODAY.replace(day=1)).isoformat(),
                 "payee": payee,
                 "status": "posted",
             },
@@ -261,6 +273,44 @@ def seeded(admin_client: TestClient) -> dict[str, Any]:
     )
     assert r.status_code in ok, r.text
     instance = c.get(f"/schedules/{schedules[0]}").json()["instances"][0]["transaction_id"]
+    # A hand-tracked brokerage account holding 10 CNRY, whose feed already
+    # shows a sale's cash (decision 103): record_sale's answer names it.
+    r = c.post("/accounts", json={"name": "Broker", "type": "brokerage", "path": "assets.broker"})
+    assert r.status_code in ok, r.text
+    broker = r.json()["id"]
+    r = c.patch(f"/accounts/{broker}", json={"holdings_source": "manual"})
+    assert r.status_code == 200, r.text
+    r = c.post(
+        f"/accounts/{broker}/positions",
+        json={
+            "symbol": "CNRY",
+            "quantity": "10",
+            "as_of": (TODAY - timedelta(days=30)).isoformat(),
+        },
+    )
+    assert r.status_code == 201, r.text
+    # Income, so no spending total is the row's own amount.
+    r = c.post(
+        "/categories",
+        json={"name": "Proceeds", "type": "category_income", "path": "income.proceeds"},
+    )
+    assert r.status_code in ok, r.text
+    for amount, on, description in (
+        ("2500.00", TODAY - timedelta(days=60), None),  # never a row's own balance
+        (SALE_ROW[0], TODAY - timedelta(days=1), SALE_ROW[1]),
+    ):
+        r = c.post(
+            "/transactions",
+            json={
+                "account": "assets.broker",
+                "category": "income.proceeds",
+                "amount": amount,
+                "date": on.isoformat(),
+                **({"description": description} if description else {}),
+                "status": "posted",
+            },
+        )
+        assert r.status_code in ok, r.text
     r = c.put("/config", json={"privacy_purchase": True, "privacy_amount": True})
     assert r.status_code == 200, r.text
     agent = c.post("/tokens", json={"name": "agent", "scopes": ["read", "write"]}).json()
@@ -283,6 +333,7 @@ def _read_calls(seeded: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
         ("search_transactions", {"account": "assets.checking"}),
         ("get_transaction", {"transaction_id": seeded["tx_ids"][0]}),
         ("list_schedules", {}),
+        ("get_schedule_occurrence", {"transaction_id": seeded["instance"]}),
         ("list_unmatched", {}),
         ("list_unmatched", {"direction": "posted"}),
         ("spending_summary", {}),
@@ -303,11 +354,26 @@ def _read_calls(seeded: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
         ),
         ("list_suggestions", {}),
         ("detect_schedules", {}),
+        # Lots and awards (#393): refs are external ids, plan labels narrative.
+        ("list_lots", {"account": "assets.broker", "symbol": "CNRY", "status": "all"}),
+        ("list_awards", {"account": "assets.broker"}),
     ]
 
 
 def _write_calls(seeded: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     return [
+        (
+            "update_occurrence_certainty",
+            {
+                "transaction_id": seeded["instance"],
+                "amount": {
+                    "state": "confirmed",
+                    "source": "invoice",
+                    "as_of": TODAY.isoformat(),
+                    "note": f"{DESCRIPTIONS[0]} {PAYEES[0]} {SCHEDULE_AMOUNTS[0]}",
+                },
+            },
+        ),
         ("override_instance", {"transaction_id": seeded["instance"], "amount": "-19.37"}),
         ("reset_instance", {"transaction_id": seeded["instance"]}),
         (
@@ -335,6 +401,17 @@ def _write_calls(seeded: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
                 "match_field": "payee",
                 "match_mode": "equals",
                 "match_text": "Quillon Hardware",
+            },
+        ),
+        (
+            "record_sale",
+            {
+                "account": "assets.broker",
+                "symbol": "CNRY",
+                "quantity": "1",
+                "price": SALE_ROW[0],
+                "trade_date": (TODAY - timedelta(days=2)).isoformat(),
+                "dry_run": True,
             },
         ),
     ]
@@ -826,3 +903,23 @@ class TestSeriesDisclosure:
         rows = admin_client.get("/audit", params={"disclosed": "true", "limit": 50}).json()
         tools = [(r.get("detail") or {}).get("tool") for r in rows["items"]]
         assert "read_series" in tools
+
+
+def test_attention_latest_amount_respects_mcp_disclosure(
+    seeded: dict[str, Any],
+    live_server: LiveServer,
+    db_session: Session,
+) -> None:
+    from purser.models import Suggestion
+
+    row = db_session.get(Suggestion, uuid.UUID(seeded["suggestion"]))
+    assert row is not None
+    row.evidence = {**(row.evidence or {}), "amount": {"latest": "-73.19", "price_changed": True}}
+    db_session.commit()
+    hidden, included = _call_all(
+        live_server.url,
+        seeded["token"],
+        [("list_suggestions", {}), ("list_suggestions", {"include": ["amount"]})],
+    )
+    assert "73.19" not in _dump(hidden)
+    assert "73.19" in _dump(included)

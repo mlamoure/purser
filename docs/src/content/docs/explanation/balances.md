@@ -106,7 +106,10 @@ Reconciling an account records a statement balance for a date and posts one
 adjustment for any difference. It compares against the same chain-head rows the
 running balance uses, on a basis you choose: posted rows only, or posted plus
 pending. The claim keeps its target, so every read of the account re-checks it
-and reports a `difference` when a later write moved that date's balance. See
+and reports a `difference` when a later write moved that date's balance.
+Manual brokerage accounts require `component: "cash"` and reconcile only
+cash, excluding securities and unvested awards. Share price changes leave
+the cash claim unchanged. See
 [Reconcile an account](../../how-to/reconcile-an-account/).
 
 ## Recording a valuation
@@ -179,3 +182,26 @@ The three questions and their tools:
 
 `net_worth(period="all")` starts at the ledger's earliest activity but at most
 ten years back, and its `series_uri` serves that same window day by day.
+
+
+## Future value on Home
+
+Home keeps current owned values prominent in the **Net worth** and **Assets**
+cards. When unvested awards exist, each card adds an **Including unvested**
+line; expand **Unvested stock** in Assets for valuation details. With no
+unvested awards, the cards show only the current values. The future totals add the current
+recorded value of unvested stock to owned value, assuming all captured awards
+vest. These are gross amounts before tax withholding, using recorded stock
+prices; they do not predict future prices or guaranteed proceeds.
+
+Owned balances and the historical net-worth chart continue to count owned
+assets. Unvested awards enter owned holdings only when a vest is recorded.
+Closed accounts are excluded from the future view; hidden accounts count.
+
+If remaining units or a usable price are missing, Home labels the valuation
+incomplete and shows the known priced portion. Full future totals stay unknown.
+Stale prices are identified, with the oldest price date shown. Awards in a
+non-USD account require currency conversion and leave the total incomplete.
+
+The read-only `GET /networth/potential` endpoint supplies this current snapshot.
+All sums are calculated by Purser; no balances or awards change when it is read.

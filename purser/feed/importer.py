@@ -16,6 +16,11 @@ row makes it a new identity. In a fetch's tail — rows older than its resync
 overlap, which a sync reaches only while widened for an open pending — such a
 row is recognised by the original it replaces and skipped as re-described
 (#331, decision 74).
+
+On an account with hand-tracked trades, a new row of exactly the cash of a
+trade Purser posted itself, dated inside that trade's window, is the broker's
+own copy: it is imported and then linked as the trade's cash in place of
+Purser's row, and a pending copy is not stored (#408, decision 104).
 """
 
 import uuid
@@ -30,9 +35,9 @@ from sqlalchemy.orm import Session
 from purser import audit, balances, crypto, ledger
 from purser import rules as rules_service
 from purser.core import ledger as core
-from purser.feed import reconcile
+from purser.feed import envelope, reconcile
 from purser.logging import get_logger
-from purser.models import Account, Posting, RawFetch, Transaction
+from purser.models import Account, Position, PositionEvent, Posting, RawFetch, Transaction
 
 log = get_logger(__name__)
 
@@ -182,6 +187,9 @@ def import_fetch(
         "holdings_skipped_manual": 0,
         "manual_period_rows_deleted": 0,
         "manual_period_tombstones": 0,
+        "skipped_ambiguous_accounts": 0,
+        "linked_trade_cash": 0,
+        "skipped_trade_cash_pending": 0,
     }
     redescribed: list[dict[str, str]] = []
 
@@ -202,7 +210,13 @@ def import_fetch(
     # need decrypting, so this must not be per-row (#174, decision 46).
     active_rules = rules_service.load_active(session)
 
+    ambiguous = envelope.duplicate_account_ids(payload)
     for sf_account in payload.get("accounts", []):
+        if sf_account["id"] in ambiguous:
+            # Two logins delivered accounts under one id (v2 ids are unique
+            # per connection only): never merge them onto one ledger account.
+            stats["skipped_ambiguous_accounts"] += 1
+            continue
         account = session.execute(
             select(Account).where(
                 Account.connection_id == raw_fetch.connection_id,
@@ -229,6 +243,8 @@ def import_fetch(
         stats["skipped_masked_duplicate"] += stats_account["skipped_masked_duplicate"]
         stats["skipped_redescribed"] += stats_account["skipped_redescribed"]
         stats["voided_pendings"] += stats_account["voided_pendings"]
+        stats["linked_trade_cash"] += stats_account["linked_trade_cash"]
+        stats["skipped_trade_cash_pending"] += stats_account["skipped_trade_cash_pending"]
         if not replay:  # point-in-time facts the live import already recorded (#328)
             held = _import_holdings(session, raw_fetch, sf_account, account)
             stats["holdings_snapshots"] += held.created
@@ -248,6 +264,9 @@ def import_fetch(
     from purser import transfers
 
     stats.update(transfers.auto_link_pass(session))
+    # What it left unlinked becomes the inbox's transfer_pair cards and the
+    # transfer.candidate events (#386); its counts stay out of the import's.
+    transfers.sync_candidate_suggestions(session)
     stats["redescribed"] = redescribed  # rows, not a count: callers summing counts skip it
     return stats
 
@@ -403,8 +422,21 @@ def _import_account(
         "skipped_masked_duplicate": 0,
         "skipped_redescribed": 0,
         "voided_pendings": 0,
+        "linked_trade_cash": 0,
+        "skipped_trade_cash_pending": 0,
     }
     transactions = sf_account.get("transactions", [])
+    # Hand-tracked trades on this account (decision 103): only then can a new
+    # row be the broker's copy of a trade's cash. One query per account.
+    trades_here = (
+        session.execute(
+            select(PositionEvent.id)
+            .join(Position, Position.id == PositionEvent.position_id)
+            .where(Position.account_id == account.id, PositionEvent.transaction_id.is_not(None))
+            .limit(1)
+        ).first()
+        is not None
+    )
     # Every row's identity up front: the occurrence ordinal of a row depends
     # on the identical rows before it in the payload (#275, decision 68).
     hashes = _row_hashes(sf_account)
@@ -507,6 +539,22 @@ def _import_account(
 
         payee_name = sf_tx.get("payee") or description or None
 
+        # The broker's own copy of a trade's cash Purser already posted (#408,
+        # decision 103): imported as usual below, then linked as the trade's
+        # cash in place of Purser's row, so the money is never counted twice.
+        taking_over = None
+        if posted_twin is None and trades_here:
+            from purser.holdings import cash as trade_cash
+
+            taking_over = trade_cash.unclaimed_cash(
+                session, account, amount=core.quantize(amount), on=tx_date, taken_too=is_pending
+            )
+            if taking_over is not None and is_pending:
+                # A pending copy is not stored (a link takes a posted row):
+                # the posted row the bank books later takes over instead.
+                stats["skipped_trade_cash_pending"] += 1
+                continue
+
         # Deterministic rules shape the row before it is created (#174,
         # decision 46): rename FIRST, so payee memory below is consulted on
         # the friendly payee — several raw descriptors renamed onto one payee
@@ -574,6 +622,11 @@ def _import_account(
         if posted_twin is not None:
             reconcile.void_pending(session, posted_twin, successor=tx, identity_moved=True)
             stats["voided_pendings"] += 1
+        if taking_over is not None:
+            from purser.holdings import cash as trade_cash
+
+            trade_cash.hand_over(session, account, taking_over, tx)
+            stats["linked_trade_cash"] += 1
         stats["imported"] += 1
     return stats
 

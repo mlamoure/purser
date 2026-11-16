@@ -18,6 +18,14 @@ type and its own apply:
   card adds snooze and rejection memory; accept confirms the proposal and
   reject rejects it. A card the system closes (the proposal was rescinded,
   carried, purged or auto-confirmed) is ``withdrawn``, never deleted.
+- ``transfer_pair`` (#386, decision 102) — a :class:`TransferPairDraft` for a
+  transfer CANDIDATE: two one-sided bank rows of exactly opposite amounts,
+  close in date, that no signal links on their own. The candidate list stays
+  the source of truth (it is recomputed from the ledger); the card adds
+  snooze and rejection memory. Accept confirms the pair (``confirm_transfer``)
+  and reject is remembered as "not a transfer", which the automatic link
+  paths honour too. A card whose pair stops being a candidate, or that the
+  auto-linker links, is ``withdrawn``.
 
 Three rules keep the inbox from becoming noise:
 
@@ -40,17 +48,20 @@ one row.
 
 import hashlib
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from datetime import date as date_type
+from datetime import date as date_value_type
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import and_, case, func, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from purser import audit, events
+from purser import audit, clock, events
 from purser import ledger as ledger_service
+from purser import lineage as bank_lineage
 from purser import rules as rules_service
 from purser.admin import security
 from purser.core import matching as core_matching
@@ -70,7 +81,8 @@ from purser.models import (
 KIND_SCHEDULE = "schedule"
 KIND_TRANSFER_LINK = "transfer_link"
 KIND_MATCH = "match"
-KINDS = (KIND_SCHEDULE, KIND_TRANSFER_LINK, KIND_MATCH)
+KIND_TRANSFER_PAIR = "transfer_pair"
+KINDS = (KIND_SCHEDULE, KIND_TRANSFER_LINK, KIND_MATCH, KIND_TRANSFER_PAIR)
 SOURCE_CONFIRM = "confirm"
 SOURCE_DETECTED = "detected"
 STATUS_OPEN = "open"
@@ -79,6 +91,12 @@ STATUS_REJECTED = "rejected"
 STATUS_WITHDRAWN = "withdrawn"
 STATUSES = (STATUS_OPEN, STATUS_ACCEPTED, STATUS_REJECTED, STATUS_WITHDRAWN)
 MATCH_DETECTOR = "matcher"
+TRANSFER_PAIR_DETECTOR = "transfer_pairing"
+# A transfer candidate earns a card only while its newer leg is this recent
+# (#386): older pairs stay in the register's whole-history candidate list.
+# Without a bound, the first pass over an imported history floods the inbox.
+TRANSFER_PAIR_LOOKBACK_DAYS = 60
+TRANSFER_PAIR_PREFIX = "transfer_pair:"
 DECISIONS = ("accept", "reject", "snooze", "edit_then_accept")
 REJECT_SCOPES = ("exact", "counterparty")
 DEFAULT_SNOOZE_DAYS = 30
@@ -112,7 +130,8 @@ class ScheduleDraft(BaseModel):
     account: str
     counterparty_account: str | None = None
     rrule: str
-    dtstart: date_type
+    dtstart: date_value_type
+    date_type: Literal["fixed", "estimated"] = "fixed"
     amount_type: Literal["fixed", "estimated"] = "fixed"
     amount: Decimal | None = None
     estimate_basis: (
@@ -155,7 +174,7 @@ class TransferLinkDraft(BaseModel):
     payee_id: uuid.UUID
     amount_exact: Decimal | None = None
     window_days: WindowDays | None = None
-    effective_from: date_type | None = None
+    effective_from: date_value_type | None = None
 
     @field_validator("amount_exact", mode="before")
     @classmethod
@@ -195,9 +214,9 @@ class MatchDraft(BaseModel):
     posted_id: uuid.UUID
     account: str
     label: str
-    expected_date: date_type
+    expected_date: date_value_type
     expected_amount: Decimal
-    posted_date: date_type
+    posted_date: date_value_type
     posted_amount: Decimal
     variance: Decimal
 
@@ -215,6 +234,56 @@ class MatchDraft(BaseModel):
             "posted_amount": str(self.posted_amount),
             "variance": str(self.variance),
         }
+
+
+class TransferPairDraft(BaseModel):
+    """The typed draft a transfer_pair card carries (#386, decision 102): the
+    candidate as the card shows it — the two bank rows, the accounts the
+    money left and arrived in, the amount moved (positive), both dates and
+    both bank texts. Money as a decimal string when stored.
+
+    Nothing is editable: the pair IS the suggestion — linking other rows is
+    ``confirm_transfer``, not an edit. Versioned like :class:`ScheduleDraft`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = 1
+    outgoing_id: uuid.UUID
+    incoming_id: uuid.UUID
+    from_account: str
+    to_account: str
+    amount: Decimal
+    outgoing_date: date_value_type
+    incoming_date: date_value_type
+    date_gap_days: int
+    outgoing_description: str | None = None
+    incoming_description: str | None = None
+
+    def stored(self) -> dict[str, Any]:
+        """JSON-safe form for the encrypted column (money as strings)."""
+        return {
+            "version": self.version,
+            "outgoing_id": str(self.outgoing_id),
+            "incoming_id": str(self.incoming_id),
+            "from_account": self.from_account,
+            "to_account": self.to_account,
+            "amount": str(self.amount),
+            "outgoing_date": self.outgoing_date.isoformat(),
+            "incoming_date": self.incoming_date.isoformat(),
+            "date_gap_days": self.date_gap_days,
+            "outgoing_description": self.outgoing_description,
+            "incoming_description": self.incoming_description,
+        }
+
+
+@dataclass(frozen=True)
+class TransferPairConfirmed:
+    """What accepting a transfer_pair card produced: the merged transfer,
+    and the transfer_link suggestion the confirm proposed for the pair and
+    its payee (decision 67), when it proposed one."""
+
+    merged: Transaction
+    proposed: Suggestion | None
 
 
 def schedule_fingerprint(account_id: uuid.UUID, counterparty_key: str) -> str:
@@ -398,28 +467,86 @@ def _create(
     actor_token_id: uuid.UUID | None,
     event_payload: dict[str, Any],
 ) -> Suggestion:
-    """A new open row, its audit row and its ``suggestion.created`` event."""
-    now = datetime.now(UTC)
-    row = Suggestion(
+    """A new open row, its audit row and its ``suggestion.created`` event —
+    or, when another session created the fingerprint first, that row
+    (``_create_once``)."""
+    row, _ = _create_once(
+        session,
         kind=kind,
-        status=STATUS_OPEN,
-        fingerprint=fingerprint,
+        draft=draft,
         source=source,
-        detector=detector,
-        detector_version=detector_version,
-        confidence=confidence,
+        fingerprint=fingerprint,
         subject_account_id=subject_account_id,
         subject_payee_id=subject_payee_id,
         counterparty_account_id=counterparty_account_id,
-        draft=draft,
         evidence=evidence,
-        seen_count=1,
-        last_seen_at=now,
-        created_at=now,
-        updated_at=now,
+        confidence=confidence,
+        detector=detector,
+        detector_version=detector_version,
+        actor_token_id=actor_token_id,
+        event_payload=event_payload,
     )
-    session.add(row)
-    session.flush()
+    return row
+
+
+def _create_once(
+    session: Session,
+    *,
+    kind: str,
+    draft: dict[str, Any],
+    source: str,
+    fingerprint: str,
+    subject_account_id: uuid.UUID,
+    subject_payee_id: uuid.UUID | None,
+    counterparty_account_id: uuid.UUID | None,
+    evidence: dict[str, Any] | None,
+    confidence: Decimal | None,
+    detector: str,
+    detector_version: int,
+    actor_token_id: uuid.UUID | None,
+    event_payload: dict[str, Any],
+) -> tuple[Suggestion, bool]:
+    """``(row, True)`` for a new open row, with its audit row and its
+    ``suggestion.created`` event; ``(existing, False)`` when another session
+    inserted the fingerprint first (#386 review). Two passes — an import and
+    the matching job — can both look, find nothing, and insert: the insert
+    is ``INSERT … ON CONFLICT (fingerprint) DO NOTHING``, which waits for the
+    other session's insert and then does nothing, so the caller's import or
+    job goes on and the winner's row is read back instead. No SAVEPOINT: its
+    release would run the session's commit hook (a balance recompute) at
+    each new row, and past 64 of them overflow the backend's subtransaction
+    cache."""
+    now = datetime.now(UTC)
+    new_id = session.execute(
+        pg_insert(Suggestion)
+        .values(
+            kind=kind,
+            status=STATUS_OPEN,
+            fingerprint=fingerprint,
+            source=source,
+            detector=detector,
+            detector_version=detector_version,
+            confidence=confidence,
+            subject_account_id=subject_account_id,
+            subject_payee_id=subject_payee_id,
+            counterparty_account_id=counterparty_account_id,
+            draft=draft,
+            evidence=evidence,
+            seen_count=1,
+            last_seen_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        .on_conflict_do_nothing(index_elements=[Suggestion.fingerprint])
+        .returning(Suggestion.id)
+    ).scalar_one_or_none()
+    if new_id is None:
+        existing = session.execute(
+            select(Suggestion).where(Suggestion.fingerprint == fingerprint)
+        ).scalar_one()
+        return existing, False
+    row = session.get(Suggestion, new_id)
+    assert row is not None  # inserted just now, in this transaction
     audit.record(
         session,
         actor_token_id=actor_token_id,
@@ -447,7 +574,7 @@ def _create(
         },
         dedup_key=fingerprint,
     )
-    return row
+    return row, True
 
 
 def upsert_schedule_suggestion(
@@ -468,41 +595,60 @@ def upsert_schedule_suggestion(
     """Create the suggestion, or refresh the open row that already carries
     this fingerprint. Returns (row, created). Rejected/accepted rows are
     returned untouched — callers check :func:`is_suppressed` first when they
-    want to skip the work entirely."""
+    want to skip the work entirely. A row another session created first
+    (the nightly detector and an agent's proposal racing) is refreshed like
+    any open row, so this caller's draft and evidence — an agent's note —
+    are stored, not dropped (#386 review)."""
     row = session.execute(
         select(Suggestion).where(Suggestion.fingerprint == fingerprint)
     ).scalar_one_or_none()
-    if row is not None:
-        if row.status != STATUS_OPEN:
-            return row, False
-        _refresh(
+    if row is None:
+        row, created = _create_once(
             session,
-            row,
+            kind=KIND_SCHEDULE,
             draft=draft.stored(),
+            source=source,
+            fingerprint=fingerprint,
+            subject_account_id=subject_account_id,
+            subject_payee_id=subject_payee_id,
+            counterparty_account_id=counterparty_account_id,
             evidence=evidence,
             confidence=confidence,
             detector=detector,
             detector_version=detector_version,
             actor_token_id=actor_token_id,
+            event_payload={"name": draft.name, "account": draft.account},
         )
+        if created:
+            return row, True
+    if row.status == STATUS_WITHDRAWN:
+        session.refresh(row, with_for_update=True)
+    if row.status == STATUS_WITHDRAWN and row.detector == "recurrence_v2":
+        row.status = STATUS_OPEN
+        row.decided_at = None
+        row.decided_by = None
+        audit.record(
+            session,
+            actor_token_id=actor_token_id,
+            action="suggestion.reopen",
+            entity_type="suggestion",
+            entity_id=row.id,
+            before={"status": STATUS_WITHDRAWN},
+            after={"status": STATUS_OPEN},
+        )
+    if row.status != STATUS_OPEN:
         return row, False
-    row = _create(
+    _refresh(
         session,
-        kind=KIND_SCHEDULE,
+        row,
         draft=draft.stored(),
-        source=source,
-        fingerprint=fingerprint,
-        subject_account_id=subject_account_id,
-        subject_payee_id=subject_payee_id,
-        counterparty_account_id=counterparty_account_id,
         evidence=evidence,
         confidence=confidence,
         detector=detector,
         detector_version=detector_version,
         actor_token_id=actor_token_id,
-        event_payload={"name": draft.name, "account": draft.account},
     )
-    return row, True
+    return row, False
 
 
 # --------------------------------------------------------------------------
@@ -636,28 +782,7 @@ def propose_transfer_link(
     }
     open_row = next((r for r in same if r.status == STATUS_OPEN), None)
     if open_row is not None:
-        occurrences = [
-            o
-            for o in (open_row.evidence or {}).get("occurrences", [])
-            if o.get("transaction_id") != occurrence["transaction_id"]
-        ]
-        occurrences.append(occurrence)
-        # Date order, as detection evidence is: an older pair confirmed later
-        # still reads as the first, and the cap keeps the most recent pairs.
-        occurrences.sort(key=lambda o: (o["date"], o["transaction_id"]))
-        # The pair and the user's direction stay as first seen; the payee
-        # follows its aliases, so the card names the payee as it is today.
-        draft = {**open_row.draft, "payee": payee.name, "payee_id": str(payee_root)}
-        _refresh(
-            session,
-            open_row,
-            draft=TransferLinkDraft.model_validate(draft).stored(),
-            evidence={"occurrences": occurrences[-EVIDENCE_OCCURRENCES_CAP:]},
-            confidence=None,
-            detector=CONFIRM_DETECTOR,
-            detector_version=1,
-            actor_token_id=token.id,
-        )
+        _add_confirmed_pair(session, open_row, payee, payee_root, occurrence, token)
         return open_row
 
     draft_model = TransferLinkDraft(
@@ -666,7 +791,7 @@ def propose_transfer_link(
         payee=payee.name,
         payee_id=payee_root,
     )
-    return _create(
+    row, created = _create_once(
         session,
         kind=KIND_TRANSFER_LINK,
         draft=draft_model.stored(),
@@ -686,6 +811,49 @@ def propose_transfer_link(
             "payee": payee.name,
         },
     )
+    if not created:
+        # Another confirm created the suggestion first: this pair is one
+        # more piece of its evidence, as when the row already existed (#386
+        # review) — not dropped behind the winner's row.
+        if row.status != STATUS_OPEN:
+            return None
+        _add_confirmed_pair(session, row, payee, payee_root, occurrence, token)
+    return row
+
+
+def _add_confirmed_pair(
+    session: Session,
+    row: Suggestion,
+    payee: Payee,
+    payee_root: uuid.UUID,
+    occurrence: dict[str, str],
+    token: ApiToken,
+) -> None:
+    """One more confirmed pair on an open transfer_link suggestion: its
+    occurrence joins the evidence (once per merged transaction), and the
+    row counts one more sighting."""
+    occurrences = [
+        o
+        for o in (row.evidence or {}).get("occurrences", [])
+        if o.get("transaction_id") != occurrence["transaction_id"]
+    ]
+    occurrences.append(occurrence)
+    # Date order, as detection evidence is: an older pair confirmed later
+    # still reads as the first, and the cap keeps the most recent pairs.
+    occurrences.sort(key=lambda o: (o["date"], o["transaction_id"]))
+    # The pair and the user's direction stay as first seen; the payee
+    # follows its aliases, so the card names the payee as it is today.
+    draft = {**row.draft, "payee": payee.name, "payee_id": str(payee_root)}
+    _refresh(
+        session,
+        row,
+        draft=TransferLinkDraft.model_validate(draft).stored(),
+        evidence={"occurrences": occurrences[-EVIDENCE_OCCURRENCES_CAP:]},
+        confidence=None,
+        detector=CONFIRM_DETECTOR,
+        detector_version=1,
+        actor_token_id=token.id,
+    )
 
 
 def draft_from_create_args(
@@ -694,7 +862,7 @@ def draft_from_create_args(
     name: str,
     account_ref: str,
     rrule: str,
-    dtstart: date_type | None,
+    dtstart: date_value_type | None,
     amount_type: str,
     amount: Decimal | None,
     estimate_basis: str | None,
@@ -702,6 +870,7 @@ def draft_from_create_args(
     category_path: str | None,
     autopost_policy: str,
     counterparty_account_ref: str | None,
+    date_mode: str = "fixed",
 ) -> tuple[ScheduleDraft, Account, Account | None]:
     """The ``propose=True`` path of ``create_schedule``: the same validation
     the direct path runs, captured as a draft instead of a row."""
@@ -718,7 +887,8 @@ def draft_from_create_args(
             account=account.path,
             counterparty_account=counterparty.path if counterparty else None,
             rrule=rrule,
-            dtstart=dtstart or date_type.today(),
+            dtstart=dtstart or clock.ledger_today(),
+            date_type=date_mode,
             amount_type=amount_type,
             amount=amount,
             estimate_basis=estimate_basis,
@@ -812,7 +982,7 @@ def _card_worthy(match: Match, expected: Transaction, posted: Transaction) -> bo
         return False
     window = timedelta(days=core_matching.TRANSFER_WINDOW_DAYS)
     held = matching._hold_target(posted, expected) is not None
-    return not (held and posted.date >= date_type.today() - window)
+    return not (held and posted.date >= clock.ledger_today() - window)
 
 
 def _match_card(
@@ -829,9 +999,9 @@ def _match_card(
     other = next((p for p in real if p.id != leg.id), None) if len(real) == 2 else None
     expected_amount = Decimal(leg.amount)
     posted_amount = Decimal(posted_leg.amount)
-    variance = (
-        Decimal(match.variance) if match.variance is not None else posted_amount - expected_amount
-    )
+    # A proposal's persisted variance can predate an edited expectation.
+    # The card must describe the two amounts it is actually showing.
+    variance = posted_amount - expected_amount
     label = (expected.payee.name if expected.payee else None) or expected.description or ""
     draft = MatchDraft(
         expected_id=expected.id,
@@ -929,37 +1099,16 @@ def upsert_match_suggestion(
                 after={"fingerprint": fingerprint, "seen_count": row.seen_count},
             )
         return row
-    reopened_from = row.status
-    now = datetime.now(UTC)
-    row.status = STATUS_OPEN
-    row.draft = stored
-    row.evidence = evidence
-    row.confidence = confidence
-    row.subject_account_id = subject_account_id
-    row.subject_payee_id = expected.payee_id
-    row.counterparty_account_id = counterparty_account_id
-    row.snooze_until = None
-    row.decided_at = None
-    row.decided_by = None
-    row.decision_note = None
-    row.reject_scope = None
-    row.result_entity_type = None
-    row.result_entity_id = None
-    row.seen_count = (row.seen_count or 1) + 1
-    row.last_seen_at = now
-    row.updated_at = now
-    session.flush()
-    audit.record(
+    _reopen(
         session,
+        row,
+        draft=stored,
+        evidence=evidence,
+        confidence=confidence,
+        subject_account_id=subject_account_id,
+        subject_payee_id=expected.payee_id,
+        counterparty_account_id=counterparty_account_id,
         actor_token_id=actor_token_id,
-        action="suggestion.refresh",
-        entity_type="suggestion",
-        entity_id=row.id,
-        after={
-            "fingerprint": fingerprint,
-            "seen_count": row.seen_count,
-            "reopened_from": reopened_from,
-        },
     )
     return row
 
@@ -976,6 +1125,47 @@ def _close_match_card(
     """Close a match card because its proposal closed outside the card: a
     token's confirm or reject in the register (or ``match``), or a system
     action — which withdraws it."""
+    _close_card(
+        session,
+        row,
+        status=status,
+        actor_token_id=actor_token_id,
+        reason=reason,
+        result=("match", match.id),
+        withdraw_context={"match_id": str(match.id)},
+    )
+
+
+def _still_open(session: Session, row: Suggestion) -> bool:
+    """Lock ``row`` and re-read it: whether it is still open (#497 review).
+    A sync or merge picks the cards it closes from a plain read; a person
+    may have rejected one since, and a system close must not overwrite that."""
+    session.refresh(row, with_for_update=True)
+    return row.status == STATUS_OPEN
+
+
+def _close_card(
+    session: Session,
+    row: Suggestion,
+    *,
+    status: str,
+    actor_token_id: uuid.UUID | None,
+    reason: str,
+    result: tuple[str, uuid.UUID] | None = None,
+    withdraw_context: dict[str, str] | None = None,
+) -> bool:
+    """Close a mirror card (match, transfer_pair) because what it mirrors
+    was decided outside the card or went away: ``accepted`` records
+    ``result`` (entity type, id) as what accepting produced, ``rejected``
+    rejects exactly, ``withdrawn`` is a system action and audits
+    ``suggestion.withdraw`` with ``withdraw_context``.
+
+    A system close (``withdrawn``, or ``accepted`` because what the card
+    mirrors was decided elsewhere) applies only to a card still open under
+    its row lock (``_still_open``): a person's decision committed meanwhile
+    stands. Returns whether the card was closed."""
+    if status in (STATUS_WITHDRAWN, STATUS_ACCEPTED) and not _still_open(session, row):
+        return False
     before = {"status": row.status}
     now = datetime.now(UTC)
     row.status = status
@@ -983,9 +1173,8 @@ def _close_match_card(
     row.decided_by = actor_token_id if status != STATUS_WITHDRAWN else None
     if status == STATUS_REJECTED:
         row.reject_scope = "exact"
-    if status == STATUS_ACCEPTED:
-        row.result_entity_type = "match"
-        row.result_entity_id = match.id
+    if status == STATUS_ACCEPTED and result is not None:
+        row.result_entity_type, row.result_entity_id = result
     row.updated_at = now
     session.flush()
     if status == STATUS_WITHDRAWN:
@@ -996,9 +1185,9 @@ def _close_match_card(
             entity_type="suggestion",
             entity_id=row.id,
             before=before,
-            after={"fingerprint": row.fingerprint, "match_id": str(match.id), "reason": reason},
+            after={"fingerprint": row.fingerprint, **(withdraw_context or {}), "reason": reason},
         )
-        return
+        return True
     decision = "accept" if status == STATUS_ACCEPTED else "reject"
     audit.record(
         session,
@@ -1028,6 +1217,7 @@ def _close_match_card(
             "result_entity_id": str(row.result_entity_id) if row.result_entity_id else None,
         },
     )
+    return True
 
 
 def on_proposal_closed(
@@ -1130,16 +1320,20 @@ def sync_match_suggestions(
         )
     ).scalars()
     for row in list(stale):
-        _withdraw_orphan(session, row, actor_token_id=actor_token_id)
-        stats["withdrawn"] += 1
+        if _withdraw_orphan(session, row, actor_token_id=actor_token_id):
+            stats["withdrawn"] += 1
     return stats
 
 
 def _withdraw_orphan(
     session: Session, row: Suggestion, *, actor_token_id: uuid.UUID | None, reason: str = "sweep"
-) -> None:
-    """Withdraw a match card whose proposal is gone (the sweep, or a stale
-    decide)."""
+) -> bool:
+    """Withdraw a mirror card whose subject is gone — a match card whose
+    proposal is gone, a transfer_pair card whose pair is no longer a
+    candidate — from a sweep or a stale decide. Only a card still open
+    under its lock (``_still_open``); returns whether it was withdrawn."""
+    if not _still_open(session, row):
+        return False
     before = {"status": row.status}
     now = datetime.now(UTC)
     row.status = STATUS_WITHDRAWN
@@ -1156,6 +1350,7 @@ def _withdraw_orphan(
         before=before,
         after={"fingerprint": row.fingerprint, "reason": reason},
     )
+    return True
 
 
 def _live_proposal_for(session: Session, row: Suggestion) -> Match | None:
@@ -1175,6 +1370,404 @@ def _live_proposal_for(session: Session, row: Suggestion) -> Match | None:
     return match if loaded is not None and _actionable(match, *loaded) else None
 
 
+def _reopen(
+    session: Session,
+    row: Suggestion,
+    *,
+    draft: dict[str, Any],
+    evidence: dict[str, Any] | None,
+    confidence: Decimal | None,
+    subject_account_id: uuid.UUID,
+    subject_payee_id: uuid.UUID | None,
+    counterparty_account_id: uuid.UUID | None,
+    actor_token_id: uuid.UUID | None,
+    keep_snooze: bool = False,
+) -> None:
+    """A withdrawn or accepted mirror card whose subject is live again (a
+    match proposed again, a pair a candidate again) opens once more: its
+    decision fields are cleared, and it counts one more sighting.
+    ``keep_snooze`` keeps a snooze the card carried when it was withdrawn
+    (a transfer_pair card: "ask me later" outlives the withdrawal, #386
+    review); a match card re-opens unsnoozed, as since decision 86."""
+    reopened_from = row.status
+    now = datetime.now(UTC)
+    row.status = STATUS_OPEN
+    row.draft = draft
+    row.evidence = evidence
+    row.confidence = confidence
+    row.subject_account_id = subject_account_id
+    row.subject_payee_id = subject_payee_id
+    row.counterparty_account_id = counterparty_account_id
+    if not keep_snooze:
+        row.snooze_until = None
+    row.decided_at = None
+    row.decided_by = None
+    row.decision_note = None
+    row.reject_scope = None
+    row.result_entity_type = None
+    row.result_entity_id = None
+    row.seen_count = (row.seen_count or 1) + 1
+    row.last_seen_at = now
+    row.updated_at = now
+    session.flush()
+    audit.record(
+        session,
+        actor_token_id=actor_token_id,
+        action="suggestion.refresh",
+        entity_type="suggestion",
+        entity_id=row.id,
+        after={
+            "fingerprint": row.fingerprint,
+            "seen_count": row.seen_count,
+            "reopened_from": reopened_from,
+        },
+    )
+
+
+# --------------------------------------------------------------------------
+# transfer_pair — a transfer candidate as a card (#386, decision 102)
+# --------------------------------------------------------------------------
+
+
+def transfer_pair_fingerprint(pair_key: str) -> str:
+    """Stable identity of a transfer_pair card, in plain text: the card key
+    of its candidate (``<low id>:<high id>``, ``matching.card_keys`` — the
+    first rows of the two correction chains, so a correction never gives a
+    pair a new card; for rows never corrected it is the plain pair key, the
+    ``dedup_key`` that ``transfer.candidate`` has always carried). Unordered,
+    like the pair."""
+    return f"{TRANSFER_PAIR_PREFIX}{pair_key}"
+
+
+def _pair_ids(fingerprint: str) -> tuple[uuid.UUID, uuid.UUID]:
+    low, high = fingerprint[len(TRANSFER_PAIR_PREFIX) :].split(":")
+    return uuid.UUID(low), uuid.UUID(high)
+
+
+def rejected_transfer_pair_rows(
+    session: Session,
+) -> dict[tuple[uuid.UUID, uuid.UUID], uuid.UUID]:
+    """The rows of each rejected transfer_pair suggestion -> its id: the
+    "not a transfer" memory (#386) that ``transfers._suppressed_pairs`` hands
+    every AUTO link path, the candidate list and the inbox. The pair is
+    remembered by bank line (``matching.lineage_pairs``): a row the bank
+    posted since (a pending's posted successor) or a correction carried on
+    (its replacement) is the same bank line, so the pair it forms with the
+    other side stays rejected (#386 review). Without that, rejecting a
+    pending pair would last only until its rows posted, and a rejected pair
+    only until the categorize pass corrected a row — when a name signal
+    could link it at once."""
+    return {
+        _pair_ids(fingerprint): row_id
+        for row_id, fingerprint in session.execute(
+            select(Suggestion.id, Suggestion.fingerprint).where(
+                Suggestion.kind == KIND_TRANSFER_PAIR, Suggestion.status == STATUS_REJECTED
+            )
+        ).all()
+    }
+
+
+def open_transfer_pair_cards(session: Session) -> dict[str, uuid.UUID]:
+    """Fingerprint -> id of every OPEN transfer_pair card, snoozed ones
+    included: what the candidate list names as each pair's
+    ``suggestion_id``."""
+    return {
+        fingerprint: row_id
+        for row_id, fingerprint in session.execute(
+            select(Suggestion.id, Suggestion.fingerprint).where(
+                Suggestion.kind == KIND_TRANSFER_PAIR, Suggestion.status == STATUS_OPEN
+            )
+        ).all()
+    }
+
+
+def _transfer_pair_card(
+    outgoing: Transaction, incoming: Transaction, *, amount: Decimal, gap_days: int
+) -> tuple[TransferPairDraft, dict[str, Any], uuid.UUID, uuid.UUID] | None:
+    """(draft, evidence, subject account, counterparty account): the money
+    left the subject account and arrived in the counterparty one. The
+    evidence is the pair itself, in the shape a transfer_link's confirmed
+    pairs take (left, arrived, amount)."""
+    out_leg, in_leg = _real_leg(outgoing), _real_leg(incoming)
+    if out_leg is None or in_leg is None:
+        return None
+    moved = abs(Decimal(amount))
+    draft = TransferPairDraft(
+        outgoing_id=outgoing.id,
+        incoming_id=incoming.id,
+        from_account=out_leg.account.path,
+        to_account=in_leg.account.path,
+        amount=moved,
+        outgoing_date=outgoing.date,
+        incoming_date=incoming.date,
+        date_gap_days=gap_days,
+        outgoing_description=outgoing.description,
+        incoming_description=incoming.description,
+    )
+    evidence = {
+        "occurrences": [
+            {
+                "date": outgoing.date.isoformat(),
+                "incoming_date": incoming.date.isoformat(),
+                "amount": str(moved),
+                "outgoing_id": str(outgoing.id),
+                "incoming_id": str(incoming.id),
+            }
+        ]
+    }
+    return draft, evidence, out_leg.account_id, in_leg.account_id
+
+
+def _create_transfer_pair(
+    session: Session,
+    *,
+    fingerprint: str,
+    draft: TransferPairDraft,
+    evidence: dict[str, Any],
+    subject_account_id: uuid.UUID,
+    counterparty_account_id: uuid.UUID,
+    actor_token_id: uuid.UUID | None,
+) -> tuple[Suggestion, bool]:
+    """``_create_once`` for a transfer_pair card: ``(row, created)``."""
+    return _create_once(
+        session,
+        kind=KIND_TRANSFER_PAIR,
+        draft=draft.stored(),
+        source=SOURCE_DETECTED,
+        fingerprint=fingerprint,
+        subject_account_id=subject_account_id,
+        subject_payee_id=None,
+        counterparty_account_id=counterparty_account_id,
+        evidence=evidence,
+        confidence=None,  # nothing scores a candidate: amount and date are all it has
+        detector=TRANSFER_PAIR_DETECTOR,
+        detector_version=1,
+        actor_token_id=actor_token_id,
+        event_payload={
+            "account": draft.from_account,
+            "counterparty_account": draft.to_account,
+            "amount": str(draft.amount),
+        },
+    )
+
+
+def upsert_transfer_pair_suggestion(
+    session: Session,
+    *,
+    outgoing: Transaction,
+    incoming: Transaction,
+    amount: Decimal,
+    gap_days: int,
+    actor_token_id: uuid.UUID | None = None,
+) -> tuple[Suggestion | None, bool]:
+    """The card for a transfer candidate (``transfers.sync_candidate_suggestions``):
+    created, or re-opened when a withdrawn card's pair is a candidate again —
+    ``(row, True)`` — or quietly refreshed when what it shows changed —
+    ``(row, False)``. ``(None, False)`` when the pair was rejected: the
+    memory stands (the sync should not have offered it)."""
+    from purser import matching  # function-local: matching imports this module
+
+    parts = _transfer_pair_card(outgoing, incoming, amount=amount, gap_days=gap_days)
+    if parts is None:
+        return None, False
+    draft, evidence, subject_account_id, counterparty_account_id = parts
+    fingerprint = transfer_pair_fingerprint(
+        matching.card_keys(session, [(outgoing.id, incoming.id)])[(outgoing.id, incoming.id)]
+    )
+    stored = draft.stored()
+    row = session.execute(
+        select(Suggestion).where(Suggestion.fingerprint == fingerprint)
+    ).scalar_one_or_none()
+    if row is None:
+        row, created = _create_transfer_pair(
+            session,
+            fingerprint=fingerprint,
+            draft=draft,
+            evidence=evidence,
+            subject_account_id=subject_account_id,
+            counterparty_account_id=counterparty_account_id,
+            actor_token_id=actor_token_id,
+        )
+        if created:
+            return row, True
+        # Another session created it first: go on as with any existing row.
+    if row.status == STATUS_REJECTED:
+        return None, False
+    if row.status == STATUS_OPEN:
+        if row.draft != stored:
+            # A moved account's path, an edited pending description: the card
+            # shows the pair as it is now.
+            row.draft = stored
+            row.evidence = evidence
+            row.subject_account_id = subject_account_id
+            row.counterparty_account_id = counterparty_account_id
+            row.updated_at = datetime.now(UTC)
+            session.flush()
+            audit.record(
+                session,
+                actor_token_id=actor_token_id,
+                action="suggestion.refresh",
+                entity_type="suggestion",
+                entity_id=row.id,
+                after={"fingerprint": fingerprint, "seen_count": row.seen_count},
+            )
+        return row, False
+    _reopen(
+        session,
+        row,
+        draft=stored,
+        evidence=evidence,
+        confidence=None,
+        subject_account_id=subject_account_id,
+        subject_payee_id=None,
+        counterparty_account_id=counterparty_account_id,
+        actor_token_id=actor_token_id,
+        keep_snooze=True,
+    )
+    return row, True
+
+
+def withdraw_transfer_pair(
+    session: Session, row: Suggestion, *, actor_token_id: uuid.UUID | None, reason: str
+) -> bool:
+    """The sync's withdrawal of an open card whose pair stopped being a
+    candidate (a row merged, absorbed, matched to a bill or voided; the pair
+    unlinked; a closer row paired instead). False when it was no longer
+    open: a person decided it meanwhile."""
+    return _withdraw_orphan(session, row, actor_token_id=actor_token_id, reason=reason)
+
+
+def on_transfer_pair_merged(
+    session: Session,
+    *,
+    outgoing_id: uuid.UUID,
+    incoming_id: uuid.UUID,
+    merged_id: uuid.UUID,
+    token_id: uuid.UUID | None,
+    accepted: bool,
+    reason: str,
+    via_suggestion: uuid.UUID | None = None,
+) -> None:
+    """``matching._merge_transfer_pair`` merged these two rows (#386). The
+    open card for exactly this pair becomes ``accepted`` — the merged
+    transfer is what it produced — only when ``accepted``: a person's (or
+    agent's) explicit confirm of the pair, ``confirm_transfer``. Any other
+    merge withdraws it, whoever ran it: the auto-linker, a conversion on the
+    machine path (the categorize pass, a rule's apply-history) even under a
+    token, an '[account]' edit that picked the counterpart itself — nobody
+    decided the pair the card showed (#386 review). Any other open card
+    naming either row is withdrawn: that row is gone. ``via_suggestion`` is
+    the card being decided right now, which ``decide`` closes itself."""
+    from purser import matching  # function-local: matching imports this module
+
+    # Cards name the first row of each correction chain (``matching.card_keys``).
+    roots = bank_lineage.correction_roots(session, (outgoing_id, incoming_id))
+    fingerprint = transfer_pair_fingerprint(
+        matching._pair_key(roots[outgoing_id], roots[incoming_id])
+    )
+    rows = session.execute(
+        select(Suggestion)
+        .where(
+            Suggestion.kind == KIND_TRANSFER_PAIR,
+            Suggestion.status == STATUS_OPEN,
+            or_(
+                Suggestion.fingerprint.contains(str(roots[outgoing_id]), autoescape=True),
+                Suggestion.fingerprint.contains(str(roots[incoming_id]), autoescape=True),
+            ),
+        )
+        .order_by(Suggestion.created_at, Suggestion.id)
+    ).scalars()
+    for row in list(rows):
+        if row.id == via_suggestion:
+            continue
+        _close_card(
+            session,
+            row,
+            status=STATUS_ACCEPTED
+            if accepted and row.fingerprint == fingerprint
+            else STATUS_WITHDRAWN,
+            actor_token_id=token_id,
+            reason=reason,
+            result=("transaction", merged_id),
+            withdraw_context={"merged_id": str(merged_id)},
+        )
+
+
+def reject_transfer_pair(
+    session: Session,
+    *,
+    outgoing_id: uuid.UUID,
+    incoming_id: uuid.UUID,
+    token: ApiToken,
+    note: str | None = None,
+) -> tuple[Suggestion, bool]:
+    """ "Not a transfer" for any candidate pair, with a card or without one
+    and whatever its age (#386): the pair's transfer_pair row becomes
+    ``rejected`` — written rejected when the pair has no card (its newer leg
+    is older than the card window, or no pass has run since it appeared),
+    the open or withdrawn card rejected otherwise — and from then on every
+    AUTO link path, the candidate list and the inbox leave the pair alone.
+    An explicit ``confirm_transfer`` can still link it, as after an unlink.
+
+    Returns ``(row, changed)``; a pair already rejected comes back unchanged.
+    Write scope, like rejecting the card. The ids may name rows that were
+    corrected or posted since: each is followed to the row that carries its
+    bank line now (#386 review), and those rows must still pair: both live
+    in the transfer pool, exactly opposite amounts on two accounts, inside
+    the transfer window."""
+    if not security.can_write(token.scopes):
+        raise SuggestionError("rejecting a transfer candidate requires write scope")
+    from purser import matching  # function-local: matching imports this module
+
+    heads = bank_lineage.current_rows(session, (outgoing_id, incoming_id))
+    outgoing_id, incoming_id = heads[outgoing_id], heads[incoming_id]
+    rejected = matching.lineage_pairs(session, rejected_transfer_pair_rows(session))
+    already = rejected.get(outgoing_id, incoming_id)
+    if already is not None:
+        return get_suggestion(session, already), False
+    live = matching.live_transfer_pair(session, outgoing_id, incoming_id)
+    if live is None:
+        raise SuggestionError(
+            "these rows are not a transfer candidate: both must be live one-sided bank rows "
+            "of exactly opposite amounts on two accounts, at most "
+            f"{core_matching.TRANSFER_WINDOW_DAYS} days apart"
+        )
+    pair, outgoing, incoming = live
+    fingerprint = transfer_pair_fingerprint(
+        matching.card_keys(session, [(outgoing.id, incoming.id)])[(outgoing.id, incoming.id)]
+    )
+    row = session.execute(
+        select(Suggestion).where(Suggestion.fingerprint == fingerprint)
+    ).scalar_one_or_none()
+    if row is None:
+        parts = _transfer_pair_card(
+            outgoing, incoming, amount=pair.amount, gap_days=pair.date_gap_days
+        )
+        assert parts is not None  # live_transfer_pair returned one-sided rows
+        draft, evidence, subject_account_id, counterparty_account_id = parts
+        row, _ = _create_transfer_pair(
+            session,
+            fingerprint=fingerprint,
+            draft=draft,
+            evidence=evidence,
+            subject_account_id=subject_account_id,
+            counterparty_account_id=counterparty_account_id,
+            actor_token_id=token.id,
+        )
+    if row.status == STATUS_REJECTED:
+        return row, False  # rejected meanwhile by another session
+    if note:
+        row.decision_note = note
+    _close_card(
+        session,
+        row,
+        status=STATUS_REJECTED,
+        actor_token_id=token.id,
+        reason="transfer_candidates.reject",
+    )
+    return row, True
+
+
 # --------------------------------------------------------------------------
 # Deciding — dispatched on kind, a typed draft per kind
 # --------------------------------------------------------------------------
@@ -1191,6 +1784,7 @@ def _apply_draft(
         account_ref=draft.account,
         rrule=draft.rrule,
         amount_type=draft.amount_type,
+        date_mode=draft.date_type,
         amount=draft.amount,
         token=token,
         payee_name=draft.payee,
@@ -1262,6 +1856,10 @@ def _accept_schedule(
     edits: dict[str, Any] | None,
     token: ApiToken,
 ) -> tuple[Schedule, dict[str, Any]]:
+    if not detector_evidence_current(row):
+        raise SuggestionError(
+            "This recurring pattern is stale. Run schedule detection again before creating it."
+        )
     stored = _edited_draft(row, decision, edits, frozenset(ScheduleDraft.model_fields))
     try:
         draft = ScheduleDraft.model_validate(stored)
@@ -1301,15 +1899,18 @@ def decide(
     edits: dict[str, Any] | None = None,
     note: str | None = None,
     reject_scope: str = "exact",
-    snooze_until: date_type | None = None,
-) -> tuple[Suggestion, Schedule | Rule | Match | None]:
+    snooze_until: date_value_type | None = None,
+) -> tuple[Suggestion, Schedule | Rule | Match | TransferPairConfirmed | None]:
     """accept | edit_then_accept -> what the draft produces: an active
     schedule (``schedule``), a DRAFT transfer_link rule awaiting its
-    activation confirm (``transfer_link``), or the confirmed match
-    (``match``); reject -> durable, scoped (a match card rejects exactly, and
-    rejects its proposal); snooze -> back in the inbox on the date (a match
-    card's proposal stays live and keeps holding its bank row). Write scope
-    for every decision: each one changes what Purser expects or links."""
+    activation confirm (``transfer_link``), the confirmed match (``match``),
+    or the merged transfer plus the transfer_link suggestion its confirm
+    proposed (``transfer_pair``); reject -> durable, scoped (a match card
+    rejects exactly, and rejects its proposal; a transfer_pair card rejects
+    exactly, and the auto paths remember it); snooze -> back in the inbox on
+    the date (a match card's proposal stays live and keeps holding its bank
+    row). Write scope for every decision: each one changes what Purser
+    expects or links."""
     if not security.can_write(token.scopes):
         raise SuggestionError("deciding a suggestion requires write scope")
     if decision not in DECISIONS:
@@ -1322,9 +1923,51 @@ def decide(
         "snooze_until": (row.snooze_until.isoformat() if row.snooze_until else None),
     }
     now = datetime.now(UTC)
-    created: Schedule | Rule | Match | None = None
+    created: Schedule | Rule | Match | TransferPairConfirmed | None = None
 
-    if row.kind == KIND_MATCH and decision != "snooze":
+    if row.kind == KIND_TRANSFER_PAIR and decision != "snooze":
+        if decision == "edit_then_accept":
+            raise SuggestionError(
+                "a transfer_pair suggestion has nothing to edit — use confirm_transfer to link"
+                " other rows"
+            )
+        if decision == "reject" and reject_scope != "exact":
+            raise SuggestionError(
+                "a transfer_pair suggestion is rejected exactly (reject_scope=exact): it names"
+                " one pair"
+            )
+        from purser import matching  # function-local: matching imports this module
+
+        # The card names the rows of its last refresh; a correction since
+        # (the categorize pass) moved a bank line onto a replacement, which
+        # is what a decision acts on (#386 review).
+        pair = TransferPairDraft.model_validate(row.draft)
+        heads = bank_lineage.current_rows(session, (pair.outgoing_id, pair.incoming_id))
+        live = matching.live_transfer_pair(
+            session, heads[pair.outgoing_id], heads[pair.incoming_id]
+        )
+        if live is None:
+            _withdraw_orphan(session, row, actor_token_id=token.id, reason="no_longer_candidate")
+            raise SuggestionWithdrawn(
+                "this pair is no longer a transfer candidate — a row was linked, matched,"
+                " corrected or voided; the suggestion is withdrawn"
+            )
+        if decision == "accept":
+            merged, proposed = matching.confirm_transfer_and_propose(
+                session,
+                outgoing_id=live[1].id,
+                incoming_id=live[2].id,
+                token=token,
+                via_suggestion=row.id,
+            )
+            created = TransferPairConfirmed(merged=merged, proposed=proposed)
+            row.status = STATUS_ACCEPTED
+            row.result_entity_type = "transaction"
+            row.result_entity_id = merged.id
+        else:
+            row.status = STATUS_REJECTED
+            row.reject_scope = "exact"
+    elif row.kind == KIND_MATCH and decision != "snooze":
         if decision == "edit_then_accept":
             raise SuggestionError(
                 "a match suggestion has nothing to edit — use match to pick another row"
@@ -1375,8 +2018,10 @@ def decide(
         row.status = STATUS_REJECTED
         row.reject_scope = reject_scope
     else:  # snooze
-        row.snooze_until = snooze_until or (date_type.today() + timedelta(days=DEFAULT_SNOOZE_DAYS))
-        if row.snooze_until <= date_type.today():
+        row.snooze_until = snooze_until or (
+            clock.ledger_today() + timedelta(days=DEFAULT_SNOOZE_DAYS)
+        )
+        if row.snooze_until <= clock.ledger_today():
             raise SuggestionError("snooze_until must be in the future")
 
     if decision != "snooze":
@@ -1432,6 +2077,102 @@ def _check_status(status: str) -> None:
         raise SuggestionError(f"status must be one of {', '.join((*STATUSES, 'all'))}")
 
 
+def _live_match_fingerprints(session: Session) -> set[str]:
+    """Read the source of truth, including before a scheduled cleanup runs.
+
+    Fingerprints are plaintext identities. One join checks all proposals;
+    counting and paging use the same filter without decrypting every card.
+    """
+    from sqlalchemy.orm import aliased
+
+    from purser import matching
+
+    posted = aliased(Transaction)
+    pairs = session.execute(
+        select(Transaction, Match.posted_id)
+        .join(Match, Match.expected_id == Transaction.id)
+        .join(posted, posted.id == Match.posted_id)
+        .where(
+            Match.state == "proposed",
+            Transaction.status == "expected",
+            Transaction.superseded_by.is_(None),
+            posted.status.in_(matching.MATCHABLE_STATUSES),
+            posted.superseded_by.is_(None),
+        )
+    )
+    return {match_fingerprint(expected, posted_id) for expected, posted_id in pairs}
+
+
+def detector_evidence_current(row: Suggestion) -> bool:
+    """Check detector-owned evidence without mutating a GET or an agent draft.
+
+    The nightly detector refreshes from the ledger and audits withdrawals.
+    This read-time gate also hides a lapsed card before that job runs.
+    """
+    if row.kind != KIND_SCHEDULE or row.detector != "recurrence_v2":
+        return True
+    from purser.core import recurrence
+
+    evidence = (row.evidence or {}).get("occurrences", [])
+    occurrences = [
+        recurrence.Occurrence(
+            date=date_value_type.fromisoformat(o["date"]), amount=Decimal(str(o["amount"]))
+        )
+        for o in evidence
+    ]
+    return recurrence.detect(occurrences, today=clock.ledger_today()) is not None
+
+
+def withdraw_missing_schedules(
+    session: Session,
+    *,
+    fingerprints: set[str],
+    account_id: uuid.UUID | None,
+    counterparty_id: uuid.UUID | None,
+    actor_token_id: uuid.UUID | None,
+) -> None:
+    """Retire detector-owned proposals absent from the completed scan's scope."""
+    query = select(Suggestion).where(
+        Suggestion.kind == KIND_SCHEDULE,
+        Suggestion.status == STATUS_OPEN,
+        Suggestion.detector == "recurrence_v2",
+        Suggestion.fingerprint.not_in(fingerprints),
+    )
+    if account_id is not None:
+        query = query.where(Suggestion.subject_account_id == account_id)
+    if counterparty_id is not None:
+        query = query.where(Suggestion.counterparty_account_id == counterparty_id)
+    for row in session.scalars(query):
+        _close_card(
+            session,
+            row,
+            status=STATUS_WITHDRAWN,
+            actor_token_id=actor_token_id,
+            reason="recurring pattern no longer supported by current history",
+        )
+
+
+def _live_card_clause(session: Session) -> Any:
+    stale = [
+        row.id
+        for row in session.scalars(
+            select(Suggestion).where(
+                Suggestion.kind == KIND_SCHEDULE,
+                Suggestion.status == STATUS_OPEN,
+                Suggestion.detector == "recurrence_v2",
+            )
+        )
+        if not detector_evidence_current(row)
+    ]
+    return and_(
+        or_(
+            Suggestion.kind != KIND_MATCH,
+            Suggestion.fingerprint.in_(_live_match_fingerprints(session)),
+        ),
+        Suggestion.id.not_in(stale),
+    )
+
+
 def list_suggestions(
     session: Session,
     *,
@@ -1440,14 +2181,26 @@ def list_suggestions(
     account_ref: str | None = None,
     include_snoozed: bool = False,
     limit: int = LIST_MAX_ROWS,
+    offset: int = 0,
+    sort: str = "confidence",
 ) -> list[Suggestion]:
+    """One page of the inbox, by confidence (unscored rows last), then age;
+    ``offset`` skips the rows of earlier pages — the order is total, so the
+    pages never overlap or skip a row while nothing changes."""
     _check_kind(kind)
     _check_status(status)
+    if offset < 0:
+        raise SuggestionError("offset must not be negative")
+    if sort not in {"confidence", "oldest"}:
+        raise SuggestionError("sort must be confidence or oldest")
+    order = [Suggestion.created_at, Suggestion.id]
     stmt = select(Suggestion).order_by(
-        Suggestion.confidence.desc().nulls_last(), Suggestion.created_at
+        *([Suggestion.confidence.desc().nulls_last(), *order] if sort == "confidence" else order)
     )
     if status != "all":
         stmt = stmt.where(Suggestion.status == status)
+        if status == STATUS_OPEN:
+            stmt = stmt.where(_live_card_clause(session))
     if kind is not None:
         stmt = stmt.where(Suggestion.kind == kind)
     if account_ref is not None:
@@ -1460,9 +2213,32 @@ def list_suggestions(
         )
     if status == STATUS_OPEN and not include_snoozed:
         stmt = stmt.where(
-            or_(Suggestion.snooze_until.is_(None), Suggestion.snooze_until <= date_type.today())
+            or_(Suggestion.snooze_until.is_(None), Suggestion.snooze_until <= clock.ledger_today())
         )
-    return list(session.execute(stmt.limit(min(limit, LIST_MAX_ROWS))).scalars())
+    return list(session.execute(stmt.offset(offset).limit(min(limit, LIST_MAX_ROWS))).scalars())
+
+
+def open_counts(session: Session, *, account_ref: str | None = None) -> dict[str, int]:
+    """Open, un-snoozed rows of every kind, zero included: each kind's total
+    beside the page the inbox lists, so a page never hides how many wait
+    (#386 review)."""
+    counts = dict.fromkeys(KINDS, 0)
+    stmt = select(Suggestion.kind, func.count(Suggestion.id)).where(
+        Suggestion.status == STATUS_OPEN,
+        _live_card_clause(session),
+        or_(Suggestion.snooze_until.is_(None), Suggestion.snooze_until <= clock.ledger_today()),
+    )
+    if account_ref is not None:
+        account = ledger_service.resolve_account(session, account_ref)
+        stmt = stmt.where(
+            or_(
+                Suggestion.subject_account_id == account.id,
+                Suggestion.counterparty_account_id == account.id,
+            )
+        )
+    for kind, count in session.execute(stmt.group_by(Suggestion.kind)):
+        counts[kind] = int(count)
+    return counts
 
 
 def open_count(
@@ -1474,7 +2250,7 @@ def open_count(
     _check_kind(kind)
     stmt = select(func.count(Suggestion.id)).where(
         Suggestion.status == STATUS_OPEN,
-        or_(Suggestion.snooze_until.is_(None), Suggestion.snooze_until <= date_type.today()),
+        or_(Suggestion.snooze_until.is_(None), Suggestion.snooze_until <= clock.ledger_today()),
     )
     if kind is not None:
         stmt = stmt.where(Suggestion.kind == kind)
@@ -1488,11 +2264,18 @@ def open_count(
     return int(session.execute(stmt).scalar_one())
 
 
-def headline(row: Suggestion) -> str:
+def headline(row: Suggestion, *, draft: dict[str, Any] | None = None) -> str:
     """One line an agent (or a card) can show — for a schedule who, cadence
     and how much; for a transfer link the pair and the payee it is scoped
-    to; for a match the bill against the bank row and the variance."""
-    draft = row.draft
+    to; for a match the bill against the bank row and the variance; for a
+    transfer pair the amount, where it left and arrived, and when."""
+    draft = row.draft if draft is None else draft
+    if row.kind == KIND_TRANSFER_PAIR:
+        moved = Decimal(str(draft.get("amount"))).quantize(Decimal("0.01"))
+        return (
+            f"Link {moved} from {draft.get('from_account')} ({draft.get('outgoing_date')})"
+            f" to {draft.get('to_account')} ({draft.get('incoming_date')}) as one transfer"
+        )
     if row.kind == KIND_MATCH:
         cents = Decimal("0.01")
         expected = Decimal(str(draft.get("expected_amount"))).quantize(cents)
@@ -1521,10 +2304,19 @@ def headline(row: Suggestion) -> str:
 
 def serialize(session: Session, row: Suggestion, *, with_evidence: bool = False) -> dict[str, Any]:
     """The compact shape shared by REST and MCP (guardrail 6: evidence is
-    summarized unless asked for). Both kinds keep their evidence as
+    summarized unless asked for). Every kind keeps its evidence as
     ``occurrences`` — detected rows for a schedule, confirmed pairs for a
-    transfer link — so the summary reads the same way for either."""
+    transfer link, the bank row for a match, the candidate pair for a
+    transfer pair — so the summary reads the same way for each."""
+    draft = row.draft
     evidence = row.evidence or {}
+    if row.kind == KIND_MATCH and row.status == STATUS_OPEN:
+        match = _live_proposal_for(session, row)
+        loaded = _match_rows(session, match) if match is not None else None
+        parts = _match_card(match, *loaded) if match is not None and loaded else None
+        if parts is not None:
+            draft = parts[0].stored()
+            evidence = parts[1]
     occurrences = evidence.get("occurrences") or []
     amounts = [Decimal(str(o["amount"])) for o in occurrences if o.get("amount") is not None]
     summary: dict[str, Any] = {
@@ -1541,6 +2333,11 @@ def serialize(session: Session, row: Suggestion, *, with_evidence: bool = False)
         ),
         "cadence": evidence.get("cadence"),
     }
+    if "amount" in evidence:
+        summary["latest_amount"] = evidence["amount"].get("latest")
+        summary["price_changed"] = evidence["amount"].get("price_changed", False)
+    if evidence.get("warning"):
+        summary["warning"] = evidence["warning"]
     if evidence.get("note"):
         # An agent's proposal note (#250), kept encrypted with the evidence.
         summary["note"] = evidence["note"]
@@ -1550,8 +2347,8 @@ def serialize(session: Session, row: Suggestion, *, with_evidence: bool = False)
         "status": row.status,
         "source": row.source,
         "confidence": str(row.confidence) if row.confidence is not None else None,
-        "headline": headline(row),
-        "draft": row.draft,
+        "headline": headline(row, draft=draft),
+        "draft": draft,
         "evidence_summary": summary,
         "snooze_until": row.snooze_until.isoformat() if row.snooze_until else None,
         "seen_count": row.seen_count,

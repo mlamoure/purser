@@ -6,18 +6,19 @@ Transfer merges NEVER happen without an explicit confirm.
 """
 
 import uuid
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import date as date_type
 from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import ColumnElement, and_, func, or_, select
 from sqlalchemy.orm import Session, aliased, selectinload
 
-from purser import audit, balances, events
+from purser import audit, balances, clock, events, occurrences
 from purser import ledger as ledger_service
+from purser import lineage as bank_lineage
 from purser import review as review_service
 from purser import suggestions as suggestions_service
 from purser.admin import security
@@ -37,6 +38,9 @@ from purser.models import (
 )
 
 MATCHABLE_STATUSES = ["pending", "posted"]
+# The farthest back the candidate list's lookback_days reaches (#386 review):
+# a century — far enough for any ledger, and well inside date arithmetic.
+CANDIDATE_LOOKBACK_MAX_DAYS = 36500
 # A match that holds its rows: at most one per expected and per posted row
 # (matches_expected_live_uniq / matches_posted_live_uniq).
 LIVE_MATCH_STATES = ["proposed", "confirmed"]
@@ -135,6 +139,7 @@ def _match_input(
         amount=Decimal(leg.amount),
         normalized_payee=payee,
         account_id=leg.account_id,
+        currency=leg.currency.strip(),
         counterparty_account_id=counterparty,
     )
 
@@ -167,8 +172,15 @@ def _expected_transactions(session: Session) -> list[Transaction]:
 
 
 def _candidates_for(
-    session: Session, account_id: uuid.UUID, around: date_type
+    session: Session,
+    account_id: uuid.UUID,
+    around: date_type,
+    claimed: set[uuid.UUID] | None = None,
 ) -> list[Transaction]:
+    """The rows that may settle an expected on ``account_id`` near ``around``.
+    ``claimed`` is the pass's trade-cash lineage (read here when absent)."""
+    if claimed is None:
+        claimed = ledger_service.trade_cash_lineage_set(session)
     window = timedelta(days=core_matching.DATE_WINDOW_DAYS)
     already_matched = select(Match.posted_id).where(Match.state.in_(["proposed", "confirmed"]))
     # Bank reality is origin=import, plus origin=system for the rows the
@@ -207,8 +219,14 @@ def _candidates_for(
         .join(bank_heads, reversal.reverses_id == bank_heads.c.id)
     )
     reversed_ids = select(Transaction.reverses_id).where(Transaction.reverses_id.is_not(None))
-    return list(
-        session.execute(
+    # A securities trade's cash (decision 103) moves with its trade and never
+    # settles a bill. Purser's own trade row carries no content hash, so it
+    # is not a bank head; the bank row a trade linked as its cash, and the
+    # correction chain between them, are: ``claimed``, the lineage read once
+    # per pass, filters them below.
+    return [
+        tx
+        for tx in session.execute(
             select(Transaction)
             .join(Posting, Posting.transaction_id == Transaction.id)
             .options(
@@ -228,10 +246,13 @@ def _candidates_for(
             )
             .distinct()
         ).scalars()
-    )
+        if tx.id not in claimed
+    ]
 
 
-def _best_for_expected(session: Session, expected: Transaction) -> core_matching.Scored | None:
+def _best_for_expected(
+    session: Session, expected: Transaction, claimed: set[uuid.UUID]
+) -> core_matching.Scored | None:
     """Score the expected against candidates on each of its real accounts —
     a two-leg expected transfer can be settled by a merged transfer or by the
     bank row on either side — and keep the best (#232).
@@ -250,30 +271,67 @@ def _best_for_expected(session: Session, expected: Transaction) -> core_matching
             ).scalars()
             if successor is not None
         }
-    best: core_matching.Scored | None = None
+    scored_by_id: dict[uuid.UUID, core_matching.Scored] = {}
     for leg in _real_legs(expected):
         expected_input = _match_input(expected, leg.account_id)
         if expected_input is None:
             continue
-        candidates = [
-            ci
-            for c in _candidates_for(session, leg.account_id, expected.date)
-            if c.id not in rejected and (ci := _match_input(c, leg.account_id)) is not None
-        ]
-        scored = core_matching.best_match(expected_input, candidates)
-        if scored is not None and (best is None or scored.score > best.score):
-            best = scored
-    return best
+        if expected.schedule_id is not None:
+            detail = occurrences.describe(session, expected)
+            expected_input = replace(
+                expected_input,
+                amount_estimated=detail["amount_estimated"],
+                date_estimated=detail["date_estimated"],
+            )
+        for candidate in _candidates_for(session, leg.account_id, expected.date, claimed):
+            ci = _match_input(candidate, leg.account_id)
+            if candidate.id in rejected or ci is None:
+                continue
+            score = core_matching.score(expected_input, ci)
+            if score.tier is core_matching.Tier.NONE:
+                continue
+            prior = scored_by_id.get(candidate.id)
+            if prior is None or score.score > prior.score:
+                scored_by_id[candidate.id] = score
+    if not scored_by_id:
+        return None
+    best = max(scored_by_id.values(), key=lambda item: (item.score, str(item.candidate_id)))
+    ambiguous = any(
+        item.candidate_id != best.candidate_id
+        and item.score >= best.score - core_matching.AMBIGUITY_MARGIN
+        for item in scored_by_id.values()
+    )
+    # Competing recurrence slots count too, even when the first proposal has
+    # already reserved the bank row in this pass. Never let iteration order decide.
+    candidate = _load_tx(session, best.candidate_id)
+    for other in _expected_transactions(session):
+        if other.id == expected.id:
+            continue
+        for leg in _real_legs(other):
+            ei, pi = _match_input(other, leg.account_id), _match_input(candidate, leg.account_id)
+            if ei is not None and pi is not None:
+                score = core_matching.score(ei, pi)
+                if (
+                    score.tier is not core_matching.Tier.NONE
+                    and score.score >= best.score - core_matching.AMBIGUITY_MARGIN
+                ):
+                    ambiguous = True
+    return replace(best, tier=core_matching.Tier.PROPOSED) if ambiguous else best
 
 
-def _match_expected(session: Session, expected: Transaction) -> str | None:
+def _match_expected(
+    session: Session, expected: Transaction, *, claimed: set[uuid.UUID] | None = None
+) -> str | None:
     """Score one open expected and act on its tier — the matcher's single
     decision, shared by the nightly pass and the re-match a transfer merge
     triggers (decision 65). Returns the stats key it counts toward, or None
-    when there is nothing to count (no real leg, or its live match stands)."""
+    when there is nothing to count (no real leg, or its live match stands).
+    ``claimed`` is the pass's trade-cash lineage (read here when absent)."""
     if not _real_legs(expected):
         return None
-    best = _best_for_expected(session, expected)
+    if claimed is None:
+        claimed = ledger_service.trade_cash_lineage_set(session)
+    best = _best_for_expected(session, expected, claimed)
     if best is None:
         return "unmatched"
     live = list(
@@ -287,19 +345,31 @@ def _match_expected(session: Session, expected: Transaction) -> str | None:
     if any(m.posted_id == best.candidate_id for m in live):
         return None
     if best.tier is core_matching.Tier.AUTO:
-        _execute_match(
-            session,
-            expected=expected,
-            posted_id=best.candidate_id,
-            score=best.score,
-            variance=best.variance,
-            token=None,
-            auto=True,
-        )
+        try:
+            _execute_match(
+                session,
+                expected=expected,
+                posted_id=best.candidate_id,
+                score=best.score,
+                variance=best.variance,
+                token=None,
+                auto=True,
+                claimed=claimed,
+            )
+        except ledger_service.RowBusy:
+            # Another writer holds the bank row (a sale linking it, a
+            # merge): the next pass decides it on what that writer commits.
+            return None
         return "auto_matched"
     if live:
         # An open proposal already exists for this expected; never stack a
         # competing one (matches_expected_live_uniq). Review resolves it.
+        return None
+    try:
+        # A proposal holds the bank row too: same lock and re-check as an
+        # auto-match, so it never lands on a row a sale is linking.
+        ledger_service.lock_transaction(session, best.candidate_id, skip_locked=True)
+    except ledger_service.RowBusy:
         return None
     match = Match(
         expected_id=expected.id,
@@ -310,6 +380,19 @@ def _match_expected(session: Session, expected: Transaction) -> str | None:
     )
     session.add(match)
     session.flush()
+    audit.record(
+        session,
+        actor_token_id=None,
+        action="match.propose",
+        entity_type="match",
+        entity_id=match.id,
+        after={
+            "expected_id": str(expected.id),
+            "posted_id": str(best.candidate_id),
+            "score": best.score,
+            "variance": str(best.variance),
+        },
+    )
     events.emit(
         session,
         type_="match.proposed",
@@ -373,8 +456,12 @@ def run_matching(session: Session, *, actor_token_id: uuid.UUID | None = None) -
     """Score every open expected against import reality; auto-execute the
     confident tier, queue the middle tier for review."""
     stats = {"auto_matched": 0, "proposed": 0, "unmatched": 0}
+    # Read once for the pass: an auto-match settles a bill and changes no
+    # trade's cash, so the set stays true while the pass runs (a concurrent
+    # link is caught by the row lock in _execute_match).
+    claimed = ledger_service.trade_cash_lineage_set(session)
     for expected in _expected_transactions(session):
-        outcome = _match_expected(session, expected)
+        outcome = _match_expected(session, expected, claimed=claimed)
         if outcome is not None:
             stats[outcome] += 1
     # Cards for every open proposal (the backfill, and held legs whose window
@@ -401,6 +488,7 @@ def _execute_match(
     auto: bool,
     match: Match | None = None,
     via_suggestion: uuid.UUID | None = None,
+    claimed: set[uuid.UUID] | None = None,
 ) -> Match:
     """Expected superseded (void + link), posted is truth, variance recorded.
 
@@ -411,15 +499,49 @@ def _execute_match(
     ``via='match'``. An auto-confirm is automation touching the row, which
     never marks it."""
     decided_by = token.id if token is not None else None
+    expected = ledger_service.lock_transaction(session, expected.id, skip_locked=auto)
     # Validate LIVE state — a match decided against rows that have since
     # moved on (voided originals, replayed confirms) is stale, not actionable.
     if expected.status != "expected":
         raise LedgerError(f"expected transaction is {expected.status}; match is stale")
-    posted = session.get(Transaction, posted_id)
-    if posted is None:
-        raise NotFoundError(f"transaction {posted_id} not found")
+    # The bank row is locked before the checks, so a sale linking it as its
+    # cash and this match exclude each other. The matcher's own auto-match
+    # (``auto``) never waits: it skips a row another writer holds (RowBusy).
+    posted = ledger_service.lock_transaction(session, posted_id, skip_locked=auto)
     if posted.status not in MATCHABLE_STATUSES:
         raise LedgerError(f"posted transaction is {posted.status}; match is stale")
+    # Sale cash never settles a bill (decision 103): not Purser's own trade
+    # row, not the bank row a trade linked, whichever path decided the match.
+    ledger_service.refuse_trade_cash_lineage(session, posted, what="settle a bill", claimed=claimed)
+    shared = {p.account_id for p in _real_legs(expected)} & {
+        p.account_id for p in _real_legs(posted)
+    }
+    compatible = []
+    for account_id in shared:
+        ei, pi = _match_input(expected, account_id), _match_input(posted, account_id)
+        if (
+            ei is not None
+            and pi is not None
+            and ei.amount * pi.amount > 0
+            and ei.currency == pi.currency
+            and not (
+                ei.counterparty_account_id is not None
+                and pi.counterparty_account_id is not None
+                and ei.counterparty_account_id != pi.counterparty_account_id
+            )
+        ):
+            compatible.append((ei, pi))
+    if not compatible:
+        raise LedgerError(
+            "match requires the same account, currency, direction and compatible counterparty"
+        )
+    existing = session.scalar(
+        select(Match).where(Match.posted_id == posted.id, Match.state == "confirmed")
+    )
+    if existing is not None and (match is None or existing.id != match.id):
+        raise LedgerError("posted transaction already has a live match")
+    if expected.schedule_id is not None:
+        occurrences.ensure(session, expected)
     estimate_probe = _estimate_probe(session, expected)
 
     # Rescind competing proposals on either side before this match goes live —
@@ -712,6 +834,9 @@ def release_settlement(
         raise LedgerError("original expected has no real leg")
     estimate_probe = _estimate_probe(session, old_expected)
 
+    if old_expected.schedule_id is not None:
+        occurrences.remember(session, old_expected, reason="unmatch", actor=actor_token_id)
+
     match.state = "rejected"
     match.decided_by = actor_token_id
 
@@ -740,7 +865,7 @@ def release_settlement(
                 memo=p.memo,
             )
         )
-    statement = session.get(InstanceStatement, old_expected.id) if keep_pin else None
+    statement = session.get(InstanceStatement, old_expected.id)
     if statement is not None:
         session.add(
             InstanceStatement(
@@ -753,6 +878,8 @@ def release_settlement(
             )
         )
     session.flush()
+    if clone.schedule_id is not None:
+        occurrences.clone(session, old_expected, clone)
     if clone.schedule_id is not None:
         from purser import schedules as schedules_service
 
@@ -845,14 +972,23 @@ def settle_voided_pending(
         if successor is not None:
             _match_expected(session, _load_tx(session, match.expected_id))
         return "rescinded"
-    if successor is not None and _carry_to_successor(session, match, successor):
+    # Sale cash never settles a bill (decision 103): a successor a securities
+    # trade holds as its cash (or its corrected original) takes no carry, and
+    # the bill is released, pin kept, to be settled by what really pays it.
+    trade_cash = successor is not None and ledger_service.is_trade_cash_lineage(session, successor)
+    if successor is not None and not trade_cash and _carry_to_successor(session, match, successor):
         _emit_price_change(session, live.probe, match=match)
         return "carried"
+    if reason is None:
+        if successor is None:
+            reason = "pending_vanished"
+        else:
+            reason = "successor_trade_cash" if trade_cash else "successor_matched"
     release_settlement(
         session,
         match=match,
         actor_token_id=actor_token_id,
-        reason=reason or ("pending_vanished" if successor is None else "successor_matched"),
+        reason=reason,
         keep_pin=True,
     )
     return "released"
@@ -987,6 +1123,16 @@ def _rescind(
     )
 
 
+def rescind_expected_proposals(
+    session: Session, expected_id: uuid.UUID, *, actor_token_id: uuid.UUID | None
+) -> None:
+    """Skipping an expectation immediately releases every proposed bank leg."""
+    for match in session.scalars(
+        select(Match).where(Match.expected_id == expected_id, Match.state == "proposed")
+    ):
+        _rescind(session, match, reason="expected_voided", actor_token_id=actor_token_id)
+
+
 # ---------------------------------------------------------------------------
 # Unmatched reporting (both directions, with aging)
 # ---------------------------------------------------------------------------
@@ -995,7 +1141,7 @@ def _rescind(
 def list_unmatched(
     session: Session, *, direction: str, as_of: date_type | None = None
 ) -> list[dict[str, Any]]:
-    today = as_of or date_type.today()
+    today = as_of or clock.ledger_today()
     if direction == "expected":
         rows = _expected_transactions(session)
         # The bank row each open proposal pairs an expected with (at most one
@@ -1017,9 +1163,26 @@ def list_unmatched(
         out = []
         for tx in rows:
             info = _match_input(tx)
+            from purser import occurrences
+            from purser.models import Schedule
+
+            schedule = session.get(Schedule, tx.schedule_id) if tx.schedule_id else None
+            legs = [p for p in tx.postings if not p.account.is_virtual]
+            leg = next(
+                (p for p in legs if schedule and p.account_id == schedule.account_id),
+                min(legs, key=lambda p: Decimal(p.amount)) if legs else None,
+            )
+            certainty = occurrences.describe(session, tx) if schedule else {}
             out.append(
                 {
                     "transaction_id": tx.id,
+                    "account_id": leg.account_id if leg else None,
+                    "account_path": leg.account.path if leg else None,
+                    "account_name": leg.account.name if leg else None,
+                    "schedule_id": tx.schedule_id,
+                    "schedule_status": schedule.status if schedule else None,
+                    "amount_estimated": certainty.get("amount_estimated"),
+                    "date_estimated": certainty.get("date_estimated"),
                     "date": tx.date,
                     "amount": info.amount if info else None,
                     "payee": tx.payee.name if tx.payee else None,
@@ -1048,8 +1211,13 @@ def list_unmatched(
                 )
             ).scalars()
         )
+        # A trade's cash and the bank row it linked are not new spending to
+        # triage, and offering them invites a match the guard refuses.
+        claimed = ledger_service.trade_cash_lineage_set(session)
         out = []
         for tx in rows:
+            if tx.id in claimed:
+                continue
             info = _match_input(tx)
             out.append(
                 {
@@ -1073,13 +1241,98 @@ def list_unmatched(
 # ---------------------------------------------------------------------------
 
 
-def _one_sided_import_rows(session: Session) -> list[Transaction]:
-    """Live import-origin rows with a single real leg that no live match
-    holds — the absorb pool, and the unheld part of ``transfer_pool``. A
-    split row (decision 87) is not in it: absorbing or merging one would void
-    its category legs, and split rows are read-only."""
-    matched = select(Match.posted_id).where(Match.state.in_(["proposed", "confirmed"]))
-    rows = session.execute(
+# The origins of a correction that leaves its bank line to automation: the
+# categorize pass and categorize rules write ``rule``, the token-less system
+# paths ``system``. A replacement a person or an agent wrote carries their
+# decision when it carries a category: no automatic merge may discard it
+# (#386 review).
+AUTOMATED_ORIGINS = ("rule", "system")
+
+
+def bank_line_head_clause() -> ColumnElement[bool]:
+    """SQL: the enclosing query's ``transactions`` row is a head transfer
+    pairing may take (DESIGN §5, #386 review) — the current row of its
+    correction chain, and either an import row or a row that carries an
+    earlier bank row on — a replacement, or an unlinked original's clone —
+    and leaves it to automation: one automation wrote, or one a person or an
+    agent wrote that is still uncategorized (a description or payee edit, no
+    category of theirs to lose). The categorize pass corrects most
+    uncategorized posted rows, and its replacement carries the bank line on:
+    a lineage must stay pairable through it, while its corrected original
+    never pairs (merging that would leave the replacement live beside the
+    transfer).
+
+    THE one filter on which heads the transfer pool takes, shared by the
+    unheld rows and the held legs: a head that must stay out whatever its
+    lineage — #390's trade-cash rows — is ``trade_cash_clause``, the one term
+    1b wires its helper into. That the row's lineage holds an import row is
+    checked in Python (``_import_rooted``)."""
+    # Function-local: the importer imports this module (through transfers).
+    from purser.feed.importer import UNCATEGORIZED_EXPENSE, UNCATEGORIZED_INCOME
+
+    uncategorized = (
+        select(Posting.id)
+        .join(Account, Account.id == Posting.account_id)
+        .where(
+            Posting.transaction_id == Transaction.id,
+            Account.path.in_((UNCATEGORIZED_EXPENSE, UNCATEGORIZED_INCOME)),
+        )
+        .correlate(Transaction)
+        .exists()
+    )
+    # A void row superseded by this one: the row carries an earlier bank
+    # row on — an unlinked original's clone (lineage._sightings).
+    earlier = aliased(Transaction)
+    carries_on = (
+        select(earlier.id)
+        .where(earlier.superseded_by == Transaction.id, earlier.status == "void")
+        .correlate(Transaction)
+        .exists()
+    )
+    return and_(
+        bank_lineage.chain_head_clause(),
+        ~trade_cash_clause(),
+        or_(
+            Transaction.origin == "import",
+            and_(
+                or_(Transaction.reverses_id.is_not(None), carries_on),
+                or_(Transaction.origin.in_(AUTOMATED_ORIGINS), uncategorized),
+            ),
+        ),
+    )
+
+
+def trade_cash_clause() -> ColumnElement[bool]:
+    """SQL: the enclosing query's ``transactions`` row is a trade-cash row
+    — a row with a leg on a system account (``equity.securities``: Purser's
+    own trade cash, or the replacement a link booked there, decision 103) —
+    which transfer pairing never takes: not as a pool head, an explicit
+    counterpart, or a transfer to absorb into. On chain heads this is the
+    whole trade-cash lineage test (``ledger.trade_cash_lineage_ids``): a
+    head is claimed exactly when it carries the system leg, and the corrected
+    originals behind it are no heads."""
+    system_leg = aliased(Account)
+    return (
+        select(Posting.id)
+        .join(system_leg, system_leg.id == Posting.account_id)
+        .where(
+            Posting.transaction_id == Transaction.id,
+            system_leg.is_virtual.is_(True),
+            system_leg.type.in_(ledger_service.SYSTEM_TYPES),
+        )
+        .correlate(Transaction)
+        .exists()
+    )
+
+
+def _bank_line_rows(
+    session: Session, *, only: Collection[uuid.UUID] | None = None
+) -> list[Transaction]:
+    """Live one-sided heads of import lineages (``bank_line_head_clause``):
+    one real leg on an open account, not a split row (decision 87: absorbing
+    or merging one would void its category legs, and split rows are
+    read-only). Matched or not — the callers split them."""
+    stmt = (
         select(Transaction)
         .options(
             selectinload(Transaction.postings).selectinload(Posting.account),
@@ -1087,20 +1340,93 @@ def _one_sided_import_rows(session: Session) -> list[Transaction]:
         )
         .where(
             Transaction.status.in_(MATCHABLE_STATUSES),
-            Transaction.origin == "import",
             Transaction.superseded_by.is_(None),
-            Transaction.id.not_in(matched),
+            bank_line_head_clause(),
         )
-    ).scalars()
+    )
+    if only is not None:
+        stmt = stmt.where(Transaction.id.in_(list(only)))
     # Rows on a CLOSED account leave the transfer pool: no new leg may post
     # there, so pairing/absorbing them could never complete (DESIGN §3.4).
-    out: list[Transaction] = []
-    for tx in rows:
-        leg = _real_leg(tx)
-        if leg is None or leg.account.closed_at is not None or _is_split(tx):
-            continue
-        out.append(tx)
-    return out
+    rows = [
+        tx
+        for tx in session.execute(stmt).scalars()
+        if (leg := _real_leg(tx)) is not None
+        and leg.account.closed_at is None
+        and not _is_split(tx)
+    ]
+    return _import_rooted(session, rows)
+
+
+def _import_rooted(session: Session, rows: list[Transaction]) -> list[Transaction]:
+    """``rows`` less those that carry no bank line (``bank_line_ids``): a
+    manual row the categorize pass corrected is still a manual row."""
+    rooted = bank_line_ids(session, [tx for tx in rows if tx.origin != "import"])
+    return [tx for tx in rows if tx.origin == "import" or tx.id in rooted]
+
+
+def bank_line_ids(session: Session, rows: Collection[Transaction]) -> set[uuid.UUID]:
+    """The ``rows`` that carry a bank line: an import row, or a row whose
+    lineage (``lineage.ancestry``: back through corrections, a pending's
+    posted successor, an unlinked original's clone) holds one — whoever
+    wrote the row."""
+    others = [tx.id for tx in rows if tx.origin != "import"]
+    earlier = bank_lineage.ancestry(session, others) if others else {}
+    ancestors = {row_id for ids in earlier.values() for row_id in ids}
+    imported = (
+        set(
+            session.execute(
+                select(Transaction.id).where(
+                    Transaction.id.in_(ancestors), Transaction.origin == "import"
+                )
+            ).scalars()
+        )
+        if ancestors
+        else set()
+    )
+    return {
+        tx.id
+        for tx in rows
+        if tx.origin == "import" or any(row_id in imported for row_id in earlier[tx.id])
+    }
+
+
+def _live_matches_on_lineage(
+    session: Session, rows: Collection[Transaction]
+) -> dict[uuid.UUID, list[Match]]:
+    """``{row: the live matches on it or on a row its correction chain
+    replaced}``. A correction leaves a match on the corrected original — the
+    matcher's bank row — so the bank line is matched (or held) however
+    often it was corrected since."""
+    ancestry = bank_lineage.correction_ancestry(
+        session, [tx.id for tx in rows if tx.reverses_id is not None]
+    )
+    owner = {tx.id: tx.id for tx in rows}
+    for row_id, ancestors in ancestry.items():
+        owner.update({ancestor: row_id for ancestor in ancestors})
+    found: dict[uuid.UUID, list[Match]] = {}
+    if not owner:
+        return found
+    for match in session.execute(
+        select(Match)
+        .where(Match.posted_id.in_(list(owner)), Match.state.in_(LIVE_MATCH_STATES))
+        .order_by(Match.created_at, Match.id)
+    ).scalars():
+        found.setdefault(owner[match.posted_id], []).append(match)
+    return found
+
+
+def _one_sided_import_rows(
+    session: Session, *, only: Collection[uuid.UUID] | None = None
+) -> list[Transaction]:
+    """The bank lines no live match holds — the absorb pool, and the unheld
+    part of ``transfer_pool``: the live heads of import lineages
+    (``_bank_line_rows``) with no live match on them or on a row their
+    correction chain replaced. ``only`` narrows it to those rows (one pair's
+    check, ``live_transfer_pair``)."""
+    rows = _bank_line_rows(session, only=only)
+    matched = _live_matches_on_lineage(session, rows)
+    return [tx for tx in rows if tx.id not in matched]
 
 
 def _is_split(tx: Transaction) -> bool:
@@ -1158,12 +1484,20 @@ def _hold_target(row: Transaction, expected: Transaction) -> uuid.UUID | None:
 
 
 def _transfer_holds(
-    session: Session, *, account_id: uuid.UUID | None = None
+    session: Session,
+    *,
+    account_id: uuid.UUID | None = None,
+    only: Collection[uuid.UUID] | None = None,
 ) -> dict[uuid.UUID, TransferHold]:
-    """Live one-sided bank rows that a live match holds for an expected
-    transfer, by row id (optionally only rows on ``account_id``). The SQL
-    keeps it to matches whose expected has no category leg — bills never
-    load — and the shape check runs on what is left."""
+    """Bank lines a live match holds for an expected transfer, by the id of
+    the row that carries the bank line now (optionally only bank lines on
+    ``account_id``, or only the heads ``only`` names). A correction leaves the
+    match on the corrected original, the matcher's bank row, while its
+    replacement carries the bank line on, so the held row is the head of the
+    matched row's correction chain — when that head is still in the pool
+    (``_bank_line_rows``). The SQL keeps it to matches whose expected has no
+    category leg — bills never load — and the shape check runs on what is
+    left."""
     has_category_leg = (
         select(Posting.id)
         .join(Account, Account.id == Posting.account_id)
@@ -1176,7 +1510,6 @@ def _transfer_holds(
         .where(
             Match.state.in_(LIVE_MATCH_STATES),
             Transaction.status.in_(MATCHABLE_STATUSES),
-            Transaction.origin == "import",
             Transaction.superseded_by.is_(None),
             ~has_category_leg,
         )
@@ -1187,31 +1520,36 @@ def _transfer_holds(
                 select(Posting.transaction_id).where(Posting.account_id == account_id)
             )
         )
-    matches = list(session.execute(select(Match).where(Match.id.in_(held))).scalars())
+    if only is not None:
+        ancestry = bank_lineage.correction_ancestry(session, only)
+        held = held.where(
+            Match.posted_id.in_(
+                [*only, *(ancestor for ancestors in ancestry.values() for ancestor in ancestors)]
+            )
+        )
+    matches = list(
+        session.execute(
+            select(Match).where(Match.id.in_(held)).order_by(Match.created_at, Match.id)
+        ).scalars()
+    )
     if not matches:
         return {}
-    wanted = (
-        select(Match.posted_id)
-        .where(Match.id.in_(held))
-        .union(select(Match.expected_id).where(Match.id.in_(held)))
-    )
-    loaded = {
+    heads = bank_lineage.current_rows(session, {m.posted_id for m in matches})
+    rows = {tx.id: tx for tx in _bank_line_rows(session, only=set(heads.values()))}
+    expected_of = {
         t.id: t
         for t in session.execute(
             select(Transaction)
-            .options(
-                selectinload(Transaction.postings).selectinload(Posting.account),
-                selectinload(Transaction.payee),
-            )
-            .where(Transaction.id.in_(wanted))
+            .options(selectinload(Transaction.postings).selectinload(Posting.account))
+            .where(Transaction.id.in_({m.expected_id for m in matches}))
         ).scalars()
     }
     holds: dict[uuid.UUID, TransferHold] = {}
     for match in matches:
-        row, expected = loaded[match.posted_id], loaded[match.expected_id]
-        leg = _real_leg(row)
-        if leg is None or leg.account.closed_at is not None:
-            continue  # a closed account leaves the transfer pool (DESIGN §3.4)
+        row = rows.get(heads[match.posted_id])
+        if row is None or row.id in holds:
+            continue  # merged, voided, out of the pool — or held already
+        expected = expected_of[match.expected_id]
         target = _hold_target(row, expected)
         if target is not None:
             holds[row.id] = TransferHold(
@@ -1220,16 +1558,90 @@ def _transfer_holds(
     return holds
 
 
-def transfer_pool(session: Session) -> tuple[list[Transaction], dict[uuid.UUID, TransferHold]]:
-    """The rows transfer pairing draws from (DESIGN §5, decision 65):
-    unmatched one-sided import rows, plus the ones a live match holds for an
-    expected transfer. A matched leg used to leave the pool, so when the two
+def transfer_pool(
+    session: Session, *, only: Collection[uuid.UUID] | None = None
+) -> tuple[list[Transaction], dict[uuid.UUID, TransferHold]]:
+    """The rows transfer pairing draws from (DESIGN §5, decision 65): the
+    bank lines — the live one-sided head of each import lineage, so a
+    corrected bank row pairs through its replacement — that no live match
+    holds, plus the ones a live match holds for an expected transfer. A
+    matched leg used to leave the pool, so when the two
     legs of a scheduled transfer posted on different days the matcher took
     the first and its counterpart never linked. Shared by the auto-linker's
     plan (``transfers.plan_auto_links`` — so a transfer_link rule's projected
-    count too) and the candidate listing, so they pair from one pool."""
-    holds = _transfer_holds(session)
-    return _one_sided_import_rows(session) + [h.row for h in holds.values()], holds
+    count too) and the candidate listing, so they pair from one pool.
+    ``only`` narrows it to the rows named (``live_transfer_pair``)."""
+    holds = _transfer_holds(session, only=only)
+    return _one_sided_import_rows(session, only=only) + [h.row for h in holds.values()], holds
+
+
+@dataclass(frozen=True)
+class LineagePairs:
+    """Pairs remembered by bank line (#386 review): a pair a person rejected
+    ("not a transfer") or unlinked stays that pair however its rows are
+    corrected or posted since — the categorize pass corrects most posted
+    rows, and a pending posts as a new row. ``values`` maps the pair key of
+    two lineage roots to what remembers it (the rejected suggestion's id;
+    None for an unlink); ``root_of`` maps every row of a remembered lineage
+    to its root. Any other row is its own root and can match no key."""
+
+    values: dict[str, uuid.UUID | None]
+    root_of: dict[uuid.UUID, uuid.UUID]
+
+    def key(self, a: uuid.UUID, b: uuid.UUID) -> str:
+        return _pair_key(self.root_of.get(a, a), self.root_of.get(b, b))
+
+    def __bool__(self) -> bool:
+        return bool(self.values)
+
+    def __contains__(self, pair: tuple[uuid.UUID, uuid.UUID]) -> bool:
+        return bool(self.values) and self.key(*pair) in self.values
+
+    def get(self, a: uuid.UUID, b: uuid.UUID) -> uuid.UUID | None:
+        return self.values.get(self.key(a, b)) if self.values else None
+
+
+NO_PAIRS = LineagePairs(values={}, root_of={})
+
+
+def lineage_pairs(
+    session: Session, pairs: Mapping[tuple[uuid.UUID, uuid.UUID], uuid.UUID | None]
+) -> LineagePairs:
+    """The :class:`LineagePairs` of stored ``pairs`` (two row ids each, as
+    they were when the pair was rejected or unlinked): each side is mapped to
+    its lineage root, and every row of those lineages to the same root —
+    including, for a lineage whose live row is an open pending, the posted
+    row a gap-window import brought in for it before any reconcile step
+    linked the two (``lineage.open_pending_successors``, #407), and the rows
+    that carry that one on. An unlinked original's clone is a member through
+    the ``superseded_by`` the unlink writes."""
+    if not pairs:
+        return NO_PAIRS
+    roots = bank_lineage.lineage_roots(session, {row_id for pair in pairs for row_id in pair})
+    root_of = bank_lineage.lineage_members(session, set(roots.values()))
+    root_of.update(roots)
+    waiting = bank_lineage.open_pending_successors(session, root_of)
+    if waiting:
+        pending_of = {posted: pending for pending, posted in waiting.items()}
+        for row_id, posted in bank_lineage.lineage_members(session, set(pending_of)).items():
+            root_of.setdefault(row_id, root_of[pending_of[posted]])
+    values: dict[str, uuid.UUID | None] = {}
+    for (a, b), value in pairs.items():
+        if roots[a] != roots[b]:
+            values.setdefault(_pair_key(roots[a], roots[b]), value)
+    return LineagePairs(values=values, root_of=root_of)
+
+
+def card_keys(
+    session: Session, pairs: Collection[tuple[uuid.UUID, uuid.UUID]]
+) -> dict[tuple[uuid.UUID, uuid.UUID], str]:
+    """The identity of each pair's transfer_pair card (#386): the pair key
+    of the first rows of the two correction chains, so a correction never
+    changes which card a pair has. Equal to the plain pair key for rows never
+    corrected — what every card and ``transfer.candidate`` was keyed by
+    before the review."""
+    roots = bank_lineage.correction_roots(session, {row_id for pair in pairs for row_id in pair})
+    return {(a, b): _pair_key(roots[a], roots[b]) for a, b in pairs}
 
 
 def detect_transfer_pairs_for(
@@ -1238,14 +1650,29 @@ def detect_transfer_pairs_for(
     *,
     holds: dict[uuid.UUID, TransferHold] | None = None,
     window: core_matching.PairWindow | None = None,
+    suppressed: LineagePairs = NO_PAIRS,
 ) -> tuple[list[core_matching.TransferCandidate], dict[uuid.UUID, Transaction]]:
     """Different-account opposite-amount pairs among ``rows`` + an id lookup.
     A row in ``holds`` pairs only with its expected's other side (decision
     65); ``window`` is ``core.matching.detect_transfer_pairs``'s per-pair
-    window (decision 66)."""
+    window (decision 66).
+
+    Two rows pair only in one currency: an equal number in two currencies
+    is not the same money, and ``create_transfer`` refuses the merge (v1 has
+    no FX), which would fail the whole auto-link pass (#386 review).
+
+    ``suppressed`` holds the pairs that may never form (unlinked or
+    rejected, ``transfers._suppressed_pairs``), by bank line: a correction
+    or a posting since does not make them a new pair.
+
+    Both rules act inside the greedy pairing, through the pair window, so
+    the rows of a pair they rule out stay free to pair with their real
+    counterparts; filtered out afterwards, such a pair would consume both
+    rows (#386 review)."""
     holds = holds or {}
     inputs: list[core_matching.MatchInput] = []
     account_of: dict[uuid.UUID, uuid.UUID] = {}
+    currency_of: dict[uuid.UUID, str] = {}
     tx_of: dict[uuid.UUID, Transaction] = {}
     for tx in rows:
         info = _match_input(tx)
@@ -1257,50 +1684,125 @@ def detect_transfer_pairs_for(
             info = replace(info, pair_account_id=hold.pair_account_id)
         inputs.append(info)
         account_of[tx.id] = leg.account_id
+        currency_of[tx.id] = leg.currency.strip()
         tx_of[tx.id] = tx
+    inner = window
+
+    def pair_window(out: core_matching.MatchInput, inc: core_matching.MatchInput) -> int | None:
+        if currency_of[out.id] != currency_of[inc.id]:
+            return None
+        if (out.id, inc.id) in suppressed:
+            return None
+        return core_matching.TRANSFER_WINDOW_DAYS if inner is None else inner(out, inc)
+
     # account_id rides inside MatchInput now (issue #173) so the pure
     # function refuses same-account pairs during pairing; this filter stays
     # as belt-and-suspenders.
     pairs = [
         pair
-        for pair in core_matching.detect_transfer_pairs(inputs, window=window)
+        for pair in core_matching.detect_transfer_pairs(inputs, window=pair_window)
         if account_of[pair.outgoing_id] != account_of[pair.incoming_id]
     ]
     return pairs, tx_of
 
 
-def list_transfer_candidates(session: Session) -> list[dict[str, Any]]:
-    rows, holds = transfer_pool(session)
-    pairs, tx_of = detect_transfer_pairs_for(session, rows, holds=holds)
+def list_transfer_candidates(
+    session: Session, *, lookback_days: int | None = None
+) -> list[dict[str, Any]]:
+    """The transfer candidates (DESIGN §5): opposite-amount pairs across
+    accounts with no signal that links them on their own — a pure read
+    (#386: it emits nothing and writes nothing; the matching pass emits
+    ``transfer.candidate`` and keeps the inbox cards).
+
+    Pairs a person unlinked or rejected are left out
+    (``transfers._suppressed_pairs``). ``lookback_days`` keeps the pairs
+    whose newer leg is at most that many days old (0 = dated today);
+    omitted, the whole history — what the register flags. Each pair names
+    its open inbox card, ``suggestion_id``, or None when it has none (older
+    than the card window, or no pass has run since it appeared)."""
+    from purser import transfers  # function-local: transfers imports this module
+
+    if lookback_days is not None and not 0 <= lookback_days <= CANDIDATE_LOOKBACK_MAX_DAYS:
+        raise LedgerError(f"lookback_days must be 0 to {CANDIDATE_LOOKBACK_MAX_DAYS}")
+    cutoff = (
+        clock.ledger_today() - timedelta(days=lookback_days) if lookback_days is not None else None
+    )
+    cards = suggestions_service.open_transfer_pair_cards(session)
+    candidates = [
+        (pair, outgoing, incoming)
+        for pair, outgoing, incoming in transfers.candidate_pairs(session)
+        if cutoff is None or max(outgoing.date, incoming.date) >= cutoff
+    ]
+    keys = (
+        card_keys(session, [(p.outgoing_id, p.incoming_id) for p, _, _ in candidates])
+        if cards
+        else {}
+    )
     out = []
-    for pair in pairs:
+    for pair, outgoing, incoming in candidates:
+        key = keys.get((pair.outgoing_id, pair.incoming_id))
+        fingerprint = (
+            suggestions_service.transfer_pair_fingerprint(key) if key is not None else None
+        )
         out.append(
             {
                 "outgoing_id": pair.outgoing_id,
                 "incoming_id": pair.incoming_id,
                 "amount": pair.amount,
                 "date_gap_days": pair.date_gap_days,
-                "outgoing_description": tx_of[pair.outgoing_id].description,
-                "incoming_description": tx_of[pair.incoming_id].description,
+                "outgoing_description": outgoing.description,
+                "incoming_description": incoming.description,
+                "suggestion_id": cards.get(fingerprint) if fingerprint is not None else None,
             }
         )
-        _emit_transfer_candidate_once(session, pair)
     return out
 
 
+def live_transfer_pair(
+    session: Session, a_id: uuid.UUID, b_id: uuid.UUID
+) -> tuple[core_matching.TransferCandidate, Transaction, Transaction] | None:
+    """These two rows as a transfer pair, ``(pair, outgoing, incoming)``, if
+    they still are one: both in the transfer pool (live one-sided bank rows,
+    unmatched or held for an expected transfer, decision 65), exactly
+    opposite amounts on two accounts, inside the transfer window, a held leg
+    only with its expected's other side. Whether a third row would pair
+    closer does not matter — this is the check before an explicit decision
+    about THIS pair (a card's accept or reject, "not a transfer"), the way
+    ``confirm_transfer`` merges any pair it is given."""
+    if a_id == b_id:
+        return None
+    rows, holds = transfer_pool(session, only=(a_id, b_id))
+    if len({r.id for r in rows}) != 2:
+        return None
+    pairs, tx_of = detect_transfer_pairs_for(session, rows, holds=holds)
+    if not pairs:
+        return None
+    pair = pairs[0]
+    return pair, tx_of[pair.outgoing_id], tx_of[pair.incoming_id]
+
+
 def _emit_transfer_candidate_once(session: Session, pair: core_matching.TransferCandidate) -> None:
+    """``transfer.candidate``, once per pair ever: emitted by the matching
+    pass (``transfers.sync_candidate_suggestions``), never by a read (#386).
+    Once per pair of BANK LINES: the event is keyed (``dedup_key``) like the
+    pair's card (``card_keys``), and a pair is quiet when an earlier event
+    named any rows of the same two lineages — what the rows were before a
+    correction, or the pendings they posted from (#386 review)."""
     from purser.models import Event
 
-    pair_key = (
-        f"{min(pair.outgoing_id, pair.incoming_id)}:{max(pair.outgoing_id, pair.incoming_id)}"
-    )
+    earlier = bank_lineage.ancestry(session, (pair.outgoing_id, pair.incoming_id))
+    seen = {
+        _pair_key(a, b)
+        for a in (pair.outgoing_id, *earlier[pair.outgoing_id])
+        for b in (pair.incoming_id, *earlier[pair.incoming_id])
+    }
     exists = session.execute(
-        select(Event.id).where(
-            Event.type == "transfer.candidate",
-            Event.dedup_key == pair_key,
-        )
+        select(Event.id).where(Event.type == "transfer.candidate", Event.dedup_key.in_(seen))
     ).first()
     if exists is None:
+        pair_key = card_keys(session, [(pair.outgoing_id, pair.incoming_id)])[
+            (pair.outgoing_id, pair.incoming_id)
+        ]
         events.emit(
             session,
             type_="transfer.candidate",
@@ -1327,10 +1829,26 @@ def _merge_transfer_pair(
     event_type: str = "transfer.confirmed",
     remainder_category_ref: str | None = None,
     signal: str | None = None,
+    via_suggestion: uuid.UUID | None = None,
+    accepts_card: bool = False,
+    card_reason: str | None = None,
+    claimed: set[uuid.UUID] | None = None,
+    skip_busy: bool = False,
 ) -> Transaction:
     """Merge two one-sided rows into ONE transfer transaction; the originals
     are voided with lineage links. ``token=None`` is the system auto-linker;
     human/agent confirms pass their token (scope checked by the caller).
+
+    The pair's inbox card follows the merge (#386): accepted only when
+    ``accepts_card`` — a person's (or agent's) explicit confirm of this pair,
+    ``confirm_transfer_and_propose`` — and otherwise withdrawn, whoever
+    merged it: the auto-linker, a conversion on the machine path even under
+    a token, or an '[account]' edit that chose the counterpart itself. Any
+    other open card naming either original is withdrawn too — except
+    ``via_suggestion``, the card being decided, which ``suggestions.decide``
+    closes itself. A withdrawn card's ``suggestion.withdraw`` audit row
+    records ``card_reason`` — the path that merged it, ``transfer.convert``
+    for an '[account]' conversion — or else ``action``.
 
     ``remainder_category_ref`` makes the merge a split loan payment (DESIGN
     §3.3, decision 62): the two bank legs keep their exact, unequal amounts
@@ -1340,11 +1858,27 @@ def _merge_transfer_pair(
     ``signal`` is the auto-linker's reason (``name``, ``rule:<id>``,
     ``schedule:<id>``), recorded on the audit row and the event. A live match
     on either original follows the bank line into the merge (decision 65,
-    ``_carry_settlements``)."""
+    ``_carry_settlements``).
+
+    Both rows are locked and reloaded before the checks, so a correction or
+    another merge that committed meanwhile is seen (#386 review), and a
+    sale's link of either row excludes the merge (decision 103). ``skip_busy``
+    is an automatic caller's: it never waits on a row another writer holds,
+    and skips it (``RowBusy``) for its next pass."""
+    if skip_busy:
+        for row_id in sorted({outgoing.id, incoming.id}):
+            ledger_service.lock_transaction(session, row_id, skip_locked=True)
+    ledger_service.lock_rows(session, (outgoing, incoming))
     for tx in (outgoing, incoming):
-        if tx.status not in MATCHABLE_STATUSES:
+        if tx.status not in MATCHABLE_STATUSES or tx.superseded_by is not None:
             # Replays land here: a confirmed merge already voided the originals.
-            raise LedgerError(f"transaction {tx.id} is {tx.status}, not matchable")
+            raise ledger_service.RowChanged(f"transaction {tx.id} is {tx.status}, not matchable")
+        ledger_service.refuse_corrected(session, tx)
+        # A trade's cash moves only with its trade (decision 103): voiding it
+        # into a transfer would leave the trade's undo nothing to correct.
+        ledger_service.refuse_trade_cash_lineage(
+            session, tx, what="be merged into a transfer", claimed=claimed
+        )
     out_leg, in_leg = _real_leg(outgoing), _real_leg(incoming)
     if out_leg is None or in_leg is None:
         raise LedgerError("both transactions need a single real-account leg")
@@ -1415,17 +1949,15 @@ def _merge_transfer_pair(
         "outgoing_status": outgoing.status,
         "incoming_status": incoming.status,
     }
-    # Read before the originals are voided: what the bank lines settle.
-    held = list(
-        session.execute(
-            select(Match)
-            .where(
-                Match.posted_id.in_([outgoing.id, incoming.id]),
-                Match.state.in_(LIVE_MATCH_STATES),
-            )
-            .order_by(Match.created_at, Match.id)
-        ).scalars()
-    )
+    # Read before the originals are voided: what the bank lines settle — a
+    # match on a row a correction replaced included, since the bank line
+    # lives on in its replacement (#386 review).
+    held = [
+        match
+        for matches in _live_matches_on_lineage(session, (outgoing, incoming)).values()
+        for match in matches
+    ]
+    held.sort(key=lambda m: (m.created_at, m.id))
     for original in (outgoing, incoming):
         original.status = "void"
         original.superseded_by = merged.id
@@ -1464,6 +1996,16 @@ def _merge_transfer_pair(
     )
     _carry_settlements(
         session, held=held, merged=merged, actor_token_id=token.id if token else None
+    )
+    suggestions_service.on_transfer_pair_merged(
+        session,
+        outgoing_id=outgoing.id,
+        incoming_id=incoming.id,
+        merged_id=merged.id,
+        token_id=token.id if token else None,
+        accepted=accepts_card,
+        reason=card_reason or action,
+        via_suggestion=via_suggestion,
     )
     return merged
 
@@ -1583,9 +2125,14 @@ def confirm_transfer_and_propose(
     incoming_id: uuid.UUID,
     token: ApiToken,
     remainder_category_ref: str | None = None,
+    via_suggestion: uuid.UUID | None = None,
 ) -> tuple[Transaction, Suggestion | None]:
     """Explicit human/agent confirm of a transfer merge (write scope), plus
     the transfer_link suggestion it proposed (decision 67), if any.
+
+    ``via_suggestion`` is the transfer_pair card being accepted (#386): the
+    merge leaves that card to ``suggestions.decide``, which records the merge
+    as what it produced.
 
     With ``remainder_category_ref`` the pair is a split loan payment (DESIGN
     §3.3, decision 62): the unequal bank legs stay exact and the difference
@@ -1598,8 +2145,14 @@ def confirm_transfer_and_propose(
     exactly opposite amounts, so a rule could never link its shape."""
     if not security.can_write(token.scopes):
         raise LedgerError("confirming a transfer requires write scope")
-    outgoing = _load_tx(session, outgoing_id)
-    incoming = _load_tx(session, incoming_id)
+    # A row the categorize pass (or an edit) corrected since the caller read
+    # it lives on in its replacement, a pending the bank posted in its posted
+    # successor: the same bank line, so the confirm acts on that (#386
+    # review) — merging the original would count it twice. The one forward
+    # walk a reject and a card's decision follow too.
+    heads = bank_lineage.current_rows(session, (outgoing_id, incoming_id))
+    outgoing = _load_tx(session, heads[outgoing_id])
+    incoming = _load_tx(session, heads[incoming_id])
     remainder_category = (remainder_category_ref or "").strip() or None
     merged = _merge_transfer_pair(
         session,
@@ -1607,6 +2160,8 @@ def confirm_transfer_and_propose(
         incoming=incoming,
         token=token,
         remainder_category_ref=remainder_category,
+        via_suggestion=via_suggestion,
+        accepts_card=True,
     )
     # Two bank rows becoming one transfer is precisely the class of automation
     # a reviewer is asked to sanity-check — but a HUMAN just did it, so the
@@ -1668,6 +2223,9 @@ def run_matching_job() -> None:
             from purser import transfers
 
             stats.update(transfers.auto_link_pass(session))
+            # What the sweep left unlinked: the inbox's transfer_pair cards
+            # and the transfer.candidate events (#386).
+            stats.update(transfers.sync_candidate_suggestions(session))
             session.commit()
             log.info("scheduled matching complete", **stats)
         except Exception:

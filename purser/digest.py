@@ -19,7 +19,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from purser import webhooks
+from purser import clock, webhooks
 from purser.models import Event, Match, Payee, Posting, Schedule, Transaction
 
 DEFAULT_MATERIALITY = Decimal("50")
@@ -36,6 +36,7 @@ PENDINGS_VANISHED_CAP = 3
 STALE_PRICES_CAP = 3
 UNPRICED_HOLDINGS_CAP = 3
 OPEN_PERIODS_CAP = 3
+FEED_PROBLEMS_CAP = 5  # per list: logins needing the user, failing, stale
 
 
 def _drift_line(event: Event) -> dict[str, Any]:
@@ -325,6 +326,19 @@ def _review_block(session: Session) -> dict[str, Any]:
     }
 
 
+def _feed_block(session: Session) -> dict[str, Any]:
+    """Feed problems open now (#480), from each connection's latest sync —
+    not the event window, so the brief keeps naming a bank until it is
+    fixed. Each list is capped; ``truncated`` says one was cut."""
+    from purser.feed import health
+
+    problems = health.open_problems(session)
+    return {
+        **{key: rows[:FEED_PROBLEMS_CAP] for key, rows in problems.items()},
+        "truncated": any(len(rows) > FEED_PROBLEMS_CAP for rows in problems.values()),
+    }
+
+
 def whats_new(
     session: Session,
     *,
@@ -455,9 +469,10 @@ def whats_new(
         "unpriced_holdings_truncated": len(unpriced_holdings) > UNPRICED_HOLDINGS_CAP,
         "open_manual_periods": open_periods[:OPEN_PERIODS_CAP],
         "open_manual_periods_truncated": len(open_periods) > OPEN_PERIODS_CAP,
-        "upcoming": _upcoming(session, now.date()),
+        "upcoming": _upcoming(session, clock.ledger_today()),
         "review": _review_block(session),
         "suggestions": _suggestions_block(session),
         "sync": {"failures": len(by_type.get("sync.failed", []))},
+        "feed": _feed_block(session),
         "events_truncated": len(events) == scan_limit,
     }
