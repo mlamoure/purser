@@ -271,6 +271,9 @@ def test_first_run_agent_access_and_logout() -> None:
             page.set_viewport_size({"width": 375, "height": 740})
             if not no_horizontal_overflow(page):
                 findings.append("dashboard: scrolls sideways at 375px " + overflow_culprits(page))
+            # Below md the main navigation folds behind a Menu button (#542/#547),
+            # so on a phone-width viewport Log out is reached through it.
+            page.get_by_role("button", name="Menu", exact=True).click()
             page.get_by_role("button", name="Log out", exact=True).click()
             playwright.expect(
                 page.get_by_role("button", name="Sign in", exact=True)
@@ -282,6 +285,8 @@ def test_first_run_agent_access_and_logout() -> None:
             page.get_by_label("Email", exact=True).fill("onboarding@example.com")
             page.get_by_label("Password", exact=True).fill("synthetic-onboarding-password")
             page.get_by_role("button", name="Sign in", exact=True).click()
+            # Still phone-width: the signed-in navigation sits behind Menu.
+            page.get_by_role("button", name="Menu", exact=True).click()
             playwright.expect(
                 page.get_by_role("link", name="Dashboard", exact=True)
             ).to_be_visible()
