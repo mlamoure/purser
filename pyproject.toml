@@ -1,6 +1,6 @@
 [project]
 name = "purser"
-version = "2026.11.3"
+version = "2026.11.4"
 description = "The privately hosted finance back-end, designed for use by your personal AI Agent"
 readme = "README.md"
 license = "AGPL-3.0-only"

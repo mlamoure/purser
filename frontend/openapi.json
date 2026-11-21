@@ -14595,7 +14595,7 @@
     },
     "summary": "The privately hosted finance back-end, designed for use by your personal AI Agent.",
     "title": "Purser",
-    "version": "2026.11.3"
+    "version": "2026.11.4"
   },
   "openapi": "3.1.0",
   "paths": {
