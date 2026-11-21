@@ -172,6 +172,24 @@ def institution_of(payload: dict[str, Any], sf_account: dict[str, Any]) -> Insti
     return Institution(conn_id=conn_id, name=None, org_id=None, org_name=None, org_url=None)
 
 
+def login_of_issue(payload: dict[str, Any], issue: Issue) -> Institution | None:
+    """The bank login a connection-level issue is about. The ids normally
+    match, but a server may name the login in ``errlist`` without the
+    provider prefix its ``connections`` entry carries (``MBR-1`` for
+    ``MX-MBR-1``), so an issue id that matches no login exactly is taken as
+    the one login whose id ends with ``-<issue id>``. None when no login, or
+    more than one, fits."""
+    if not issue.conn_id:
+        return None
+    logins = [i for i in institutions(payload) if i.conn_id]
+    for institution in logins:
+        if institution.conn_id == issue.conn_id:
+            return institution
+    suffix = f"-{issue.conn_id}"
+    fits = [i for i in logins if i.conn_id and i.conn_id.endswith(suffix)]
+    return fits[0] if len(fits) == 1 else None
+
+
 def duplicate_account_ids(payload: dict[str, Any]) -> set[str]:
     """Account ids that appear more than once in one payload.
 

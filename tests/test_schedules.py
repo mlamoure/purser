@@ -1373,7 +1373,7 @@ class TestTransferOverrideInvariants:
 
 
 def _bill(client: TestClient, **overrides: object) -> dict[str, object]:
-    """A payee-less flat bill: its name is its instances' payee too."""
+    """A bill sent the legacy way, name only: the name becomes its payee (#534)."""
     body: dict[str, object] = {
         "name": "Gym",
         "account": "assets.checking",
@@ -1411,8 +1411,10 @@ class TestInstanceLabels:
     ) -> None:
         sid = _bill(client, amount_type="estimated", estimate_basis="last")["id"]
         first, second = list(_live(client, sid))
-        resp = client.patch(f"/schedules/{sid}", json={"name": "Fitness club"})
+        # #534: the bill's name became its payee, so a rename is a payee edit.
+        resp = client.patch(f"/schedules/{sid}", json={"payee": "Fitness club"})
         assert resp.status_code == 200, resp.text
+        assert (resp.json()["payee"], resp.json()["memo"]) == ("Fitness club", None)
 
         for tid in (first, second):
             tx = _tx(client, tid)
@@ -1480,7 +1482,7 @@ class TestInstanceLabels:
         live = _live(client, sid)
         assert (live[first]["pinned"], live[second]["pinned"]) == (True, False)
 
-        client.patch(f"/schedules/{sid}", json={"name": "Fitness club"})
+        client.patch(f"/schedules/{sid}", json={"payee": "Fitness club"})
         pinned, custom = _tx(client, first), _tx(client, second)
         assert (pinned["description"], pinned["payee"]) == ("Fitness club", "Fitness club")
         assert (custom["description"], custom["payee"]) == ("My gym", "Fitness club")
@@ -1714,7 +1716,10 @@ class TestLabelPinStateMachine:
 
             @rule(name=_LABEL_NAMES)
             def rename(self, name: str) -> None:
-                resp = client.patch(f"/schedules/{self.sid}", json={"name": name})
+                # #534: the label is the memo, else the payee — a flat bill is
+                # renamed through its payee, a transfer through its memo.
+                field = "memo" if self.transfer else "payee"
+                resp = client.patch(f"/schedules/{self.sid}", json={field: name})
                 assert resp.status_code == 200, resp.text
                 old, self.name = self.name, name
                 from purser.core import ledger as core
@@ -2471,3 +2476,89 @@ def test_every_bank_row_is_counted_exactly_once(
         assert not listed & settled_ids
     finally:
         session.rollback()
+
+
+class TestPayeeAndMemo:
+    """Scheduled transactions carry a payee and a memo; the label is derived
+    (#534)."""
+
+    def _create(self, client: TestClient, **fields: object) -> dict[str, object]:
+        body: dict[str, object] = {
+            "account": "assets.checking",
+            "rrule": f"FREQ=MONTHLY;BYMONTHDAY={_near_term_bymonthday()}",
+            "amount_type": "fixed",
+            "amount": "-60.00",
+            "category": "expenses.housing",
+        }
+        body.update(fields)
+        resp = client.post("/schedules", json=body)
+        assert resp.status_code == 201, resp.text
+        return dict(resp.json())
+
+    def test_payee_and_memo_label_the_instances(self, seeded: None, client: TestClient) -> None:
+        out = self._create(client, payee="Planet Fitness", memo="Family membership")
+        assert (out["name"], out["payee"], out["memo"]) == (
+            "Family membership",
+            "Planet Fitness",
+            "Family membership",
+        )
+        for tid in _live(client, out["id"]):
+            tx = _tx(client, tid)
+            assert (tx["description"], tx["payee"]) == ("Family membership", "Planet Fitness")
+        listed = client.get("/schedules").json()
+        assert [(s["payee"], s["memo"]) for s in listed] == [
+            ("Planet Fitness", "Family membership")
+        ]
+
+    def test_without_a_memo_the_payee_is_the_label(self, seeded: None, client: TestClient) -> None:
+        out = self._create(client, payee="Planet Fitness")
+        assert (out["name"], out["memo"]) == ("Planet Fitness", None)
+
+    def test_legacy_name_splits(self, seeded: None, client: TestClient) -> None:
+        only_name = self._create(client, name="Gym")
+        assert (only_name["payee"], only_name["memo"]) == ("Gym", None)
+        differs = self._create(client, name="Gym dues", payee="Planet Fitness")
+        assert (differs["name"], differs["payee"], differs["memo"]) == (
+            "Gym dues",
+            "Planet Fitness",
+            "Gym dues",
+        )
+        same = self._create(client, name="planet fitness", payee="Planet Fitness")
+        assert same["memo"] is None
+
+    def test_a_transfer_needs_no_payee(self, with_card: None, client: TestClient) -> None:
+        bare = self._create(client, category=None, counterparty_account="liabilities.citicard")
+        assert (bare["name"], bare["payee"], bare["memo"]) == ("Citi Card", None, None)
+        named = self._create(
+            client, category=None, counterparty_account="liabilities.citicard", name="Pay Citi"
+        )
+        assert (named["name"], named["payee"], named["memo"]) == ("Pay Citi", None, "Pay Citi")
+
+    def test_a_flat_schedule_needs_a_payee_or_memo(self, seeded: None, client: TestClient) -> None:
+        resp = client.post(
+            "/schedules",
+            json={
+                "account": "assets.checking",
+                "rrule": "FREQ=MONTHLY;BYMONTHDAY=5",
+                "amount": "-60.00",
+                "category": "expenses.housing",
+            },
+        )
+        assert resp.status_code == 422
+        assert "payee" in resp.text
+
+    def test_update_edits_and_clears(self, seeded: None, client: TestClient) -> None:
+        sid = self._create(client, payee="Planet Fitness", memo="Family membership")["id"]
+        cleared = client.patch(f"/schedules/{sid}", json={"memo": ""})
+        assert cleared.status_code == 200, cleared.text
+        assert (cleared.json()["name"], cleared.json()["memo"]) == ("Planet Fitness", None)
+        for tid in _live(client, sid):
+            assert _tx(client, tid)["description"] == "Planet Fitness"
+        # The payee can't go while nothing else would label the bill.
+        refused = client.patch(f"/schedules/{sid}", json={"payee": ""})
+        assert refused.status_code == 422
+        memo = client.patch(f"/schedules/{sid}", json={"memo": "Gym"})
+        assert memo.json()["name"] == "Gym"
+        # An unrelated edit keeps both.
+        amount = client.patch(f"/schedules/{sid}", json={"amount": "-61.00"})
+        assert (amount.json()["payee"], amount.json()["memo"]) == ("Planet Fitness", "Gym")

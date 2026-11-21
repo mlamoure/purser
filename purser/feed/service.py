@@ -12,14 +12,22 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from purser import appsettings, audit, clock, crypto, events
 from purser import ledger as ledger_service
 from purser.feed import drift, envelope, health, importer, reconcile, simplefin
 from purser.logging import get_logger
-from purser.models import Account, AuditLog, Connection, Posting, RawFetch, Transaction
+from purser.models import (
+    Account,
+    AuditLog,
+    Connection,
+    IgnoredFeedAccount,
+    Posting,
+    RawFetch,
+    Transaction,
+)
 
 log = get_logger(__name__)
 
@@ -924,7 +932,7 @@ def discover_accounts(session: Session, connection_id: uuid.UUID) -> list[dict[s
     """SimpleFIN accounts from the latest archived payload, with their current
     Purser mapping and — for mapped cash/card accounts, and a hand-tracked
     brokerage account whose feed balance is its cash (decision 103) — the live
-    reported-vs-ledger drift (the wizard and Config → SimpleFIN consume this).
+    reported-vs-ledger drift (the wizard and Settings → Connections consume this).
 
     The drift here is ungated and recomputed on every read: the UI shows the
     current raw comparison immediately, while the event stream stays behind
@@ -941,6 +949,7 @@ def discover_accounts(session: Session, connection_id: uuid.UUID) -> list[dict[s
     blocks = drift.recent_blocks(session, connection.id)  # basis history, read once
     payload = crypto.decrypt_json(latest.payload_enc)
     ambiguous = envelope.duplicate_account_ids(payload)
+    ignored = ignored_external_ids(session, connection.id)
     discovered = []
     for sf_account in payload.get("accounts", []):
         institution = envelope.institution_of(payload, sf_account)
@@ -962,6 +971,7 @@ def discover_accounts(session: Session, connection_id: uuid.UUID) -> list[dict[s
                 "org": institution.name if institution else None,
                 "conn_id": institution.conn_id if institution else None,
                 "ambiguous": sf_account["id"] in ambiguous,
+                "ignored": mapped is None and sf_account["id"] in ignored,
                 "currency": sf_account.get("currency", "USD"),
                 "balance": sf_account.get("balance"),
                 "available_balance": _available(sf_account, mapped),
@@ -976,6 +986,82 @@ def discover_accounts(session: Session, connection_id: uuid.UUID) -> list[dict[s
             }
         )
     return discovered
+
+
+def ignored_external_ids(session: Session, connection_id: uuid.UUID) -> set[str]:
+    """The connection's feed accounts an admin chose not to track (#560)."""
+    return set(
+        session.execute(
+            select(IgnoredFeedAccount.external_id).where(
+                IgnoredFeedAccount.connection_id == connection_id
+            )
+        ).scalars()
+    )
+
+
+def set_ignored(
+    session: Session,
+    *,
+    connection_id: uuid.UUID,
+    external_id: str,
+    ignored: bool,
+    actor_token_id: uuid.UUID | None,
+) -> bool:
+    """Ignore a delivered, unmapped feed account, or track it again (#560,
+    decision 112). Ignoring changes what is reported, nothing else: the
+    account was not imported before and is not after, and the archive keeps
+    its rows, so mapping it later imports them as for any unmapped account.
+    Returns whether it is ignored now; a repeat is a no-op without an audit
+    row."""
+    connection = get_connection(session, connection_id)
+    latest = latest_sync_fetch(session, connection.id)
+    payload = crypto.decrypt_json(latest.payload_enc) if latest else {}
+    delivered = next(
+        (
+            a
+            for a in payload.get("accounts") or []
+            if isinstance(a, dict) and a.get("id") == external_id
+        ),
+        None,
+    )
+    row = session.get(IgnoredFeedAccount, (connection.id, external_id))
+    if not ignored:
+        if row is not None:
+            session.delete(row)
+            audit.record(
+                session,
+                actor_token_id=actor_token_id,
+                action="feed_account.unignore",
+                entity_type="connection",
+                entity_id=connection.id,
+                before={"external_id": external_id, "ignored": True},
+                after={"external_id": external_id, "ignored": False},
+            )
+        return False
+    if delivered is None:
+        raise FeedError("the latest sync delivers no account with that id")
+    mapped = session.execute(
+        select(Account.path).where(
+            Account.connection_id == connection.id, Account.external_id == external_id
+        )
+    ).scalar_one_or_none()
+    if mapped is not None:
+        raise FeedError(f"that bank account feeds {mapped}; only an unmapped account is ignored")
+    if row is None:
+        session.add(IgnoredFeedAccount(connection_id=connection.id, external_id=external_id))
+        audit.record(
+            session,
+            actor_token_id=actor_token_id,
+            action="feed_account.ignore",
+            entity_type="connection",
+            entity_id=connection.id,
+            after={
+                "external_id": external_id,
+                "name": delivered.get("name"),
+                "ignored": True,
+            },
+        )
+    return True
 
 
 def map_account(
@@ -1064,6 +1150,13 @@ def map_account(
 
     account.external_id = external_id
     account.connection_id = connection.id
+    # A mapped account is tracked: an earlier "ignore" no longer applies.
+    session.execute(
+        delete(IgnoredFeedAccount).where(
+            IgnoredFeedAccount.connection_id == connection.id,
+            IgnoredFeedAccount.external_id == external_id,
+        )
+    )
     session.flush()
     audit.record(
         session,

@@ -2029,7 +2029,9 @@ class TestWidenedTail:
         (start, _end) = backend.calls[-1]
         assert start is not None
         assert start >= date.today() - timedelta(days=service.RESYNC_OVERLAP_DAYS + 1)
-        (still_open,) = _live_rows(harness, valued_path)
+        # A feed-mapped asset also carries the value change that moved it to
+        # the reported balance (decision 113); the purchase is still pending.
+        (still_open,) = [r for r in _live_rows(harness, valued_path) if r["status"] == "pending"]
         assert still_open["status"] == "pending"
 
     def test_redescribed_copy_in_the_tail_imports_nothing(
@@ -3097,8 +3099,9 @@ class TestBalanceDrift:
     def test_loan_and_property_excluded(
         self, harness: FeedHarness, migrated_engine: Engine
     ) -> None:
-        """loan/property reported balances feed the valuation path (DESIGN §8),
-        never the drift check."""
+        """A loan's reported balance feeds the valuation path and a
+        property's a value change (DESIGN §8, decision 113), never the drift
+        check."""
         harness.use_payload(
             multi_payload_of(
                 [
@@ -3135,7 +3138,16 @@ class TestBalanceDrift:
         assert _drift_block(cid) == {}
         with migrated_engine.connect() as conn:
             valuations = conn.execute(text("SELECT COUNT(*) FROM valuations")).scalar_one()
-        assert valuations == 2
+        assert valuations == 1  # the loan's
+        listed = harness.client.get("/accounts", params={"include_hidden": True}).json()
+        (house_id,) = [a["id"] for a in listed if a["path"] == "assets.house"]
+        row = harness.client.get(f"/accounts/{house_id}").json()
+        assert Decimal(row["balance"]) == Decimal("400000.00")
+        assert row["balance_method"] == "postings"
+        # A second sync with the same balance changes nothing.
+        harness.sync(cid)
+        row = harness.client.get(f"/accounts/{house_id}").json()
+        assert Decimal(row["balance"]) == Decimal("400000.00")
 
     def test_unmapped_account_ignored(self, harness: FeedHarness, migrated_engine: Engine) -> None:
         harness.use_payload(payload_of([], balance="999.99", balance_date=_recent_epoch(0)))

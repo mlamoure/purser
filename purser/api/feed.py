@@ -68,6 +68,8 @@ class DiscoveredOut(BaseModel):
     # True when another account in the same fetch has this external id (two
     # logins): it is neither imported nor drift-checked until the ids differ.
     ambiguous: bool = False
+    # An admin chose not to track this unmapped account (#560).
+    ignored: bool = False
     currency: str
     balance: str | None
     # The bank's available balance (#483), on cash and card accounts only and
@@ -124,6 +126,8 @@ class InventoryAccountOut(BaseModel):
     transactions: int
     issue: InventoryIssueOut | None = None
     ambiguous: bool = False
+    # Not connected by choice (#560): an admin ignored it.
+    ignored: bool = False
 
 
 class InventoryLoginOut(BaseModel):
@@ -150,6 +154,17 @@ class MapRequest(BaseModel):
     external_id: str
     account_id: uuid.UUID | None = None
     create: dict[str, str] | None = None
+
+
+class IgnoreRequest(BaseModel):
+    external_id: str
+    # False tracks the account again (it shows as unmapped).
+    ignored: bool = True
+
+
+class IgnoreOut(BaseModel):
+    external_id: str
+    ignored: bool
 
 
 class GapRepairOut(BaseModel):
@@ -438,3 +453,25 @@ def map_account(
         raise HTTPException(422, str(exc)) from exc
     session.commit()
     return {"account_id": str(account.id), "path": account.path}
+
+
+@router.post("/{connection_id}/ignore")
+def ignore_account(
+    connection_id: uuid.UUID, body: IgnoreRequest, token: AdminToken, session: DbSession
+) -> IgnoreOut:
+    """Ignore an unmapped feed account (the same account delivered through a
+    second bank login, or one that does not belong in the ledger), or track
+    it again with ``ignored: false``. An ignored account is not reported as
+    waiting to be mapped; nothing is imported or removed."""
+    try:
+        now = service.set_ignored(
+            session,
+            connection_id=connection_id,
+            external_id=body.external_id,
+            ignored=body.ignored,
+            actor_token_id=token.id,
+        )
+    except service.FeedError as exc:
+        raise _wrap(exc) from exc
+    session.commit()
+    return IgnoreOut(external_id=body.external_id, ignored=now)

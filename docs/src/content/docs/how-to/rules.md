@@ -247,6 +247,11 @@ edit is refused.
 Disable the rule, edit it, and activate it again, so a wider scope goes
 through the same confirmation.
 
+The Rules page reads each rule as words with account and category names — for
+example *Payee contains "acme" on Checking*, then *Category Fitness* — and keeps
+the stored one-line form, with paths, under **As stored** for matching a rule
+against an audit row.
+
 The **Applied** column on the Rules page (`applied_count` on `GET /rules`,
 `applied` in the MCP `list_rules` tool) counts how many times a rule has
 fired. A pair rule counts each link it makes, merged pairs and absorbed rows

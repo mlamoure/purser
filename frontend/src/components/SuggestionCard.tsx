@@ -20,7 +20,8 @@ import { useId, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api, errorDetail } from "../lib/api";
-import { fmtAmount } from "../lib/utils";
+import { formatMoney, negateMoney } from "../lib/money";
+import { formatDate } from "../lib/dates";
 import type { components } from "../api/schema";
 import { Badge, Button, ErrorText, Input, Label, Table, Td, Th } from "./ui";
 
@@ -92,14 +93,14 @@ function EvidenceTable({ id }: { id: string }) {
               <Td>
                 {o.transaction_id ? (
                   <Link className="underline" to={`/selection?id=${o.transaction_id}`}>
-                    {o.date}
+                    {formatDate(o.date)}
                   </Link>
                 ) : (
-                  o.date
+                  formatDate(o.date)
                 )}
               </Td>
-              {pairs && <Td>{o.incoming_date ?? ""}</Td>}
-              <Td className="text-right font-mono">{fmtAmount(o.amount)}</Td>
+              {pairs && <Td>{o.incoming_date ? formatDate(o.incoming_date) : ""}</Td>}
+              <Td className="text-right font-mono">{formatMoney(o.amount)}</Td>
             </tr>
           ))}
         </tbody>
@@ -167,13 +168,13 @@ function EvidenceLine({ suggestion, noun }: { suggestion: SuggestionOut; noun: s
         {summary.count ? `${summary.count} ${noun}` : "no history"}
         {summary.first && summary.last
           ? summary.first === summary.last
-            ? ` on ${summary.first}`
-            : ` from ${summary.first} to ${summary.last}`
+            ? ` on ${formatDate(summary.first)}`
+            : ` from ${formatDate(summary.first)} to ${formatDate(summary.last)}`
           : ""}
         {summary.amount_range
           ? summary.amount_range.low === summary.amount_range.high
-            ? ` · ${fmtAmount(summary.amount_range.low)}`
-            : ` · ${fmtAmount(summary.amount_range.low)} to ${fmtAmount(summary.amount_range.high)}`
+            ? ` · ${formatMoney(summary.amount_range.low)}`
+            : ` · ${formatMoney(summary.amount_range.low)} to ${formatMoney(summary.amount_range.high)}`
           : ""}
         {summary.cadence ? ` · ${summary.cadence}` : ""}
         {" · "}
@@ -181,10 +182,10 @@ function EvidenceLine({ suggestion, noun }: { suggestion: SuggestionOut; noun: s
           {showEvidence ? "hide evidence" : "evidence"}
         </button>
       </p>
-      {summary.warning && <p className="mt-2 text-sm text-amber-700">{summary.warning}</p>}
+      {summary.warning && <p className="mt-2 text-sm text-warning">{summary.warning}</p>}
       {summary.price_changed && (
-        <p className="mt-2 text-sm text-amber-700">
-          Recent amount changed to {fmtAmount(summary.latest_amount)}. Verify the current price
+        <p className="mt-2 text-sm text-warning">
+          Recent amount changed to {formatMoney(summary.latest_amount)}. Verify the current price
           before creating a schedule.
         </p>
       )}
@@ -335,16 +336,16 @@ function TransferPairCard({
           <tr>
             <Td>Leaves</Td>
             <Td className="font-mono">{draft.from_account}</Td>
-            <Td>{draft.outgoing_date}</Td>
+            <Td>{formatDate(draft.outgoing_date)}</Td>
             <Td className="max-w-56 truncate">{draft.outgoing_description ?? ""}</Td>
-            <Td className="text-right font-mono">{fmtAmount(`-${draft.amount}`)}</Td>
+            <Td className="text-right font-mono">{formatMoney(negateMoney(draft.amount))}</Td>
           </tr>
           <tr>
             <Td>Arrives</Td>
             <Td className="font-mono">{draft.to_account}</Td>
-            <Td>{draft.incoming_date}</Td>
+            <Td>{formatDate(draft.incoming_date)}</Td>
             <Td className="max-w-56 truncate">{draft.incoming_description ?? ""}</Td>
-            <Td className="text-right font-mono">{fmtAmount(draft.amount)}</Td>
+            <Td className="text-right font-mono">{formatMoney(draft.amount)}</Td>
           </tr>
         </tbody>
       </Table>
@@ -461,19 +462,19 @@ function MatchCard({
         <tbody>
           <tr>
             <Td>Expected · {draft.label}</Td>
-            <Td>{draft.expected_date}</Td>
-            <Td className="text-right font-mono">{fmtAmount(draft.expected_amount)}</Td>
+            <Td>{formatDate(draft.expected_date)}</Td>
+            <Td className="text-right font-mono">{formatMoney(draft.expected_amount)}</Td>
           </tr>
           <tr>
             <Td>Bank row</Td>
-            <Td>{draft.posted_date}</Td>
-            <Td className="text-right font-mono">{fmtAmount(draft.posted_amount)}</Td>
+            <Td>{formatDate(draft.posted_date)}</Td>
+            <Td className="text-right font-mono">{formatMoney(draft.posted_amount)}</Td>
           </tr>
         </tbody>
       </Table>
       <p className="mt-1 text-xs text-muted-foreground">
         on <span className="font-mono">{draft.account}</span> ·{" "}
-        {sameAmount ? "same amount" : <>variance {fmtAmount(draft.variance)}</>}
+        {sameAmount ? "same amount" : <>variance {formatMoney(draft.variance, { signDisplay: "always" })}</>}
       </p>
 
       <Link
@@ -545,7 +546,8 @@ function ScheduleCard({
   const formId = useId();
   const draft = suggestion.draft as Record<string, string | null>;
   const [edits, setEdits] = useState<Record<string, string>>({
-    name: draft.name ?? "",
+    payee: draft.payee ?? "",
+    memo: draft.memo ?? "",
     rrule: draft.rrule ?? "",
     dtstart: draft.dtstart ?? "",
     amount: draft.amount ?? "",
@@ -563,6 +565,12 @@ function ScheduleCard({
       const before = draft[key] ?? "";
       if (value !== before) changed[key] = value === "" ? null : value;
     }
+    // The draft's name is the derived label (#534): keep it in step with a
+    // payee or memo edit, so accepting doesn't read the old name as a memo.
+    if ("payee" in changed || "memo" in changed) {
+      const label = (edits.memo || edits.payee || draft.name || "").trim();
+      if (label) changed.name = label;
+    }
     if (Object.keys(changed).length === 0) {
       decide.mutate({ decision: "accept", reject_scope: "exact" });
       return;
@@ -575,18 +583,19 @@ function ScheduleCard({
       <CardHeader suggestion={suggestion} />
       <EvidenceLine suggestion={suggestion} noun="occurrences" />
       <p className="mt-2 text-xs text-muted-foreground">
-        Creates an active forecast schedule on {draft.account}; no payment is sent. First date:{" "}
-        {edits.dtstart}. Amount: {fmtAmount(edits.amount)}. Pause or edit it from Schedules.
+        Creates an active scheduled transaction on {draft.account}; no payment is sent. First date:{" "}
+        {formatDate(edits.dtstart)}. Amount: {formatMoney(edits.amount)}. Pause or edit it from Scheduled transactions.
       </p>
 
       {editing && (
         <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-3">
-          {(["name", "rrule", "dtstart", "amount", "category"] as const).map((key) => (
+          {(["payee", "memo", "rrule", "dtstart", "amount", "category"] as const).map((key) => (
             <div key={key}>
               <Label className="text-xs" htmlFor={`${formId}-${key}`}>
                 {
                   {
-                    name: "Schedule name",
+                    payee: "Payee",
+                    memo: "Memo",
                     rrule: "Repeats",
                     dtstart: "First date",
                     amount: "Amount (negative for money out)",
@@ -622,10 +631,10 @@ function ScheduleCard({
               disabled={decide.isPending}
               onClick={() => decide.mutate({ decision: "accept", reject_scope: "exact" })}
             >
-              Create schedule
+              Create scheduled transaction
             </Button>
             <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
-              Edit schedule
+              Edit first
             </Button>
             <Button
               size="sm"
@@ -777,7 +786,7 @@ function TransferLinkCard({
           <Button size="sm" variant="ghost" onClick={finish}>
             Leave as draft
           </Button>
-          <Link to="/config/rules" className="self-center text-xs underline">
+          <Link to="/settings/rules" className="self-center text-xs underline">
             review on the Rules page
           </Link>
         </div>
@@ -794,7 +803,7 @@ function TransferLinkCard({
         <span className="font-mono">{draft.to_account}</span> · payee{" "}
         <span className="font-medium">{draft.payee}</span> or an alias · legs within {windowDays}{" "}
         days{draft.window_days == null ? " (standard)" : ""}
-        {draft.amount_exact ? ` · exactly ${fmtAmount(draft.amount_exact)}` : " · any amount"}
+        {draft.amount_exact ? ` · exactly ${formatMoney(draft.amount_exact)}` : " · any amount"}
         {draft.effective_from ? ` · from ${draft.effective_from}` : ""}
       </p>
       <EvidenceLine suggestion={suggestion} noun="confirmed pair(s)" />

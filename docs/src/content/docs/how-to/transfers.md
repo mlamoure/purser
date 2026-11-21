@@ -37,7 +37,7 @@ linked it — `rule:<rule id>`, `name` or `schedule:<schedule id>`, the first
 that applies — shows a badge in the register, and can be undone with unlink.
 The auto path acts on **posted rows only**; pending pairs stay confirm-first
 until they post. Turn it off entirely with the `PURSER_TRANSFER_AUTO_LINK`
-setting (Config -> Settings, default on) — then every candidate waits for
+setting (Settings -> General, default on) — then every candidate waits for
 you.
 
 ## Scheduled transfers

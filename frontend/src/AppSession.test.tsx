@@ -47,7 +47,7 @@ describe("App session (#220)", () => {
       "GET /auth/methods": ok({ password: true, oidc: false }),
     });
     renderWithProviders(<App />, { route: "/users" });
-    expect(await screen.findByRole("link", { name: "Audit Log" })).toBeInTheDocument();
+    expect(await screen.findByRole("link", { name: "Audit log" })).toBeInTheDocument();
 
     // The session expires; the next API call 401s and fires the hook.
     mockApi({ "GET /auth/me": fail(401, "not authenticated") });

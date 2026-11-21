@@ -14,7 +14,8 @@ database. A database dump contains ciphertext and the wrapped data-encryption
 keys, but not the master key that unwraps them. **A backup is useless without
 the key.** Record the key separately — a password manager, not the same bucket
 as your dumps — or your archived bank history is unrecoverable. This is the same
-key the setup wizard reveals once at install.
+key the setup wizard reveals at install (or **Settings -> Security**, if setup was
+interrupted), until you acknowledge that you have recorded it.
 
 ## Back up
 
@@ -32,17 +33,13 @@ records of *where* the dumps live — never inside them.
 
 ## What is and is not encrypted
 
-Encrypted at rest (ciphertext in the dump): the raw bank envelopes, SimpleFIN
-access URLs, webhook secrets, the AI and OIDC config secrets, and the
-**narrative layer** — payee names, transaction descriptions, posting memos,
-schedule names, audit before/after detail, and event payloads.
-
-Left as plaintext (the numeric skeleton every query computes on): amounts,
-dates, statuses, ltree category paths, ids, and the keyed content hashes and
-blind indexes that make dedup and search work over ciphertext.
-
-Encrypting the database *files* themselves is a storage and deployment concern,
-outside Purser's control.
+A dump holds ciphertext for the archived bank data, SimpleFIN access URLs,
+secrets and descriptive text (payees, descriptions, memos, notes, audit
+detail), and plaintext for amounts, dates, statuses, account names, category
+paths and ids. Encrypting the database files and the disks that hold your
+dumps is outside Purser's control. See
+[Encryption at rest](../../explanation/encryption-at-rest/) for the complete
+list and what a dump reveals.
 
 ## Rotate the encryption key
 

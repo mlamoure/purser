@@ -70,11 +70,17 @@ class TestNetWorthEngine:
         _income(client, "1000.00", TODAY - timedelta(days=10))
         house = seeded["assets.house"]
         mortgage = seeded["liabilities.mortgage"]
+        # A hand-valued asset is a ledger (decision 113): its value is set by
+        # a reconcile and moved by value changes.
         r = client.post(
-            f"/accounts/{house}/valuations",
-            json={"as_of": (TODAY - timedelta(days=30)).isoformat(), "value": "400000.00"},
+            f"/accounts/{house}/reconcile",
+            json={
+                "as_of": (TODAY - timedelta(days=30)).isoformat(),
+                "statement_balance": "400000.00",
+            },
         )
-        assert r.status_code == 201, r.text
+        assert r.status_code == 200, r.text
+        assert r.json()["category"] == "equity.revaluation"
         client.post(
             f"/accounts/{mortgage}/valuations",
             json={"as_of": (TODAY - timedelta(days=30)).isoformat(), "value": "-250000.00"},
@@ -84,14 +90,15 @@ class TestNetWorthEngine:
         assert Decimal(result["assets"]) == Decimal("401000.00")
         assert Decimal(result["liabilities"]) == Decimal("250000.00")
         methods = {b["path"]: b["method"] for b in result["breakdown"]}
-        assert methods["assets.house"] == "valuation"
+        assert methods["assets.house"] == "postings"
         assert methods["liabilities.mortgage"] == "valuation"
 
-        # A new valuation updates the series from its date forward only.
-        client.post(
-            f"/accounts/{house}/valuations",
-            json={"as_of": TODAY.isoformat(), "value": "425000.00"},
+        # A change in value moves the series from its date forward only.
+        r = client.post(
+            f"/accounts/{house}/value-changes",
+            json={"as_of": TODAY.isoformat(), "amount": "25000.00"},
         )
+        assert r.status_code == 201, r.text
         now = client.get("/networth").json()
         assert Decimal(now["net_worth"]) == Decimal("176000.00")
         past = client.get(
@@ -188,31 +195,16 @@ class TestValuationSign:
         assert account["balance_method"] == "valuation"
         assert Decimal(account["balance"]) == Decimal("-250000.00")
 
-    def test_asset_positive_is_accepted_in_either_convention(
-        self, seeded: dict[str, str], client: TestClient
-    ) -> None:
-        house = seeded["assets.house"]
-        resp = _valuation(client, house, "400000.00")
-        assert resp.status_code == 201, resp.text
-        assert Decimal(resp.json()["value"]) == Decimal("400000.00")
-        # An asset's statement figure reads the same as its ledger figure.
-        resp = _valuation(client, house, "410000.00", days_ago=1, convention="statement")
-        assert resp.status_code == 201, resp.text
-        assert Decimal(resp.json()["value"]) == Decimal("410000.00")
-        result = client.get("/networth").json()
-        assert Decimal(result["assets"]) == Decimal("410000.00")
-        assert Decimal(result["liabilities"]) == Decimal("0")
-
     def test_an_unknown_convention_is_rejected(
         self, seeded: dict[str, str], client: TestClient
     ) -> None:
-        resp = _valuation(client, seeded["assets.house"], "1.00", convention="bank")
+        resp = _valuation(client, seeded["liabilities.mortgage"], "-1.00", convention="bank")
         assert resp.status_code == 422
 
 
 class TestValuationAccountTypes:
-    """Issue #343 (decision 81): every reader of valuations reads loan and
-    property accounts only, so a valuation on any other type was stored,
+    """Issue #343 (decision 81; property left in decision 113): every reader
+    of valuations reads loan accounts only, so a valuation on any other type was stored,
     audited and announced, and then never read. It is refused instead, and the
     refusal says where that account's balance comes from."""
 
@@ -234,7 +226,7 @@ class TestValuationAccountTypes:
             assert refused.status_code == 422, refused.text
             detail = refused.json()["detail"]
             assert f"{path} is a {type_} account" in detail
-            assert "valuations apply only to loan and property accounts" in detail
+            assert "valuations apply only to loan accounts" in detail
             if type_ == "brokerage":
                 assert "holdings snapshot" in detail
             else:
@@ -243,13 +235,16 @@ class TestValuationAccountTypes:
         assert client.get("/audit", params={"action": "valuation.create"}).json()["items"] == []
         assert client.get("/events", params={"type": "valuation.recorded"}).json() == []
 
-    def test_a_loan_and_a_property_still_take_valuations(
+    def test_a_loan_still_takes_valuations_and_a_property_is_pointed_at_its_ledger(
         self, seeded: dict[str, str], client: TestClient
     ) -> None:
-        assert _valuation(client, seeded["assets.house"], "400000.00").status_code == 201
+        refused = _valuation(client, seeded["assets.house"], "400000.00")
+        assert refused.status_code == 422, refused.text
+        assert "hand-valued asset" in refused.json()["detail"]
+        assert "record_value_change" in refused.json()["detail"]
         assert _valuation(client, seeded["liabilities.mortgage"], "-250000.00").status_code == 201
         methods = {b["path"]: b["method"] for b in client.get("/networth").json()["breakdown"]}
-        assert methods == {"assets.house": "valuation", "liabilities.mortgage": "valuation"}
+        assert methods == {"liabilities.mortgage": "valuation"}
 
 
 class TestHoldingsViaFeed:
@@ -347,7 +342,7 @@ from hypothesis import strategies as st  # noqa: E402
 from sqlalchemy import select, text  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
-from purser import ledger, networth, reconciliation  # noqa: E402
+from purser import assets, ledger, networth, reconciliation  # noqa: E402
 from purser.core import ledger as core  # noqa: E402
 from purser.db import get_sessionmaker  # noqa: E402
 from purser.models import Account, ApiToken, NetWorthDaily, User  # noqa: E402
@@ -418,6 +413,13 @@ class TestWatermarkRecompute:
                 path=f"assets.house_{uuid.uuid4().hex[:8]}",
                 actor_token_id=token.id,
             )
+            loan = ledger.create_account(
+                session,
+                name="NW Loan",
+                type_="loan",
+                path=f"liabilities.loan_{uuid.uuid4().hex[:8]}",
+                actor_token_id=token.id,
+            )
             category = ledger.ensure_category_path(
                 session, "income.nw_seed", actor_token_id=token.id
             )
@@ -432,9 +434,12 @@ class TestWatermarkRecompute:
             assert token is not None
             checking_row = ledger.account_by_path(session, checking.path)
             house_row = ledger.account_by_path(session, house.path)
+            loan_row = ledger.account_by_path(session, loan.path)
             category_row = ledger.account_by_path(session, "income.nw_seed")
             for _ in range(data.draw(st.integers(min_value=1, max_value=4), label="n_ops")):
-                op = data.draw(st.sampled_from(["flat", "valuation", "correct"]), label="op")
+                op = data.draw(
+                    st.sampled_from(["flat", "valuation", "value_change", "correct"]), label="op"
+                )
                 days = data.draw(st.integers(min_value=0, max_value=44), label="days")
                 if op == "flat":
                     tx = ledger.create_flat_transaction(
@@ -452,10 +457,18 @@ class TestWatermarkRecompute:
                 elif op == "valuation":
                     networth.record_valuation(
                         session,
+                        account_ref=str(loan_row.id),
+                        as_of=today - timedelta(days=days),
+                        value=Decimal("-300000.00") + days,
+                        actor_token_id=token.id,
+                    )
+                elif op == "value_change":
+                    assets.record_value_change(
+                        session,
                         account_ref=str(house_row.id),
                         as_of=today - timedelta(days=days),
-                        value=Decimal("300000.00") + days,
-                        actor_token_id=token.id,
+                        amount=Decimal("1000.00") + days,
+                        token=token,
                     )
                 elif op == "correct" and posted:
                     tx_id = posted.pop()
@@ -610,14 +623,14 @@ class TestValuationSignForEveryCaller:
         NUMERIC(20,4) would round away or overflow (decision 73)."""
         on = TODAY - timedelta(days=3)
         for figure, reason in (
-            ("400000.00001", "more than 4 decimal places"),
-            ("1e16", "out of range"),
+            ("-400000.00001", "more than 4 decimal places"),
+            ("-1e16", "out of range"),
             ("NaN", "out of range"),
         ):
             with pytest.raises(ledger.LedgerError, match=reason):
                 networth.record_valuation(
                     db_session,
-                    account_ref="assets.house",
+                    account_ref="liabilities.mortgage",
                     as_of=on,
                     value=Decimal(figure),
                     actor_token_id=None,
@@ -698,7 +711,7 @@ class TestValuationTypeRuleForEveryCaller:
                 value=Decimal("425.00"),
                 actor_token_id=None,
             )
-        assert "valuations apply only to loan and property accounts" in str(refused.value)
+        assert "valuations apply only to loan accounts" in str(refused.value)
         assert "positive valuation" not in str(refused.value)
         assert networth.list_valuations(db_session, card.id) == []
 

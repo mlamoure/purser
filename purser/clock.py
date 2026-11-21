@@ -13,7 +13,8 @@ Purser keeps two kinds of time apart (DESIGN decision 105):
 Every calendar-day decision reads ``ledger_today()`` (or turns an instant
 into a day with ``ledger_date()``); nothing calls ``date.today()``, which
 follows the host's local zone, or ``datetime.now(UTC).date()``, which is the
-UTC day. The scheduler's job times stay in UTC.
+UTC day. The scheduler's job times stay in UTC, except the daily SimpleFIN
+sync, which reads its time in the household zone (decision 111).
 
 One frame is deliberately not the ledger day: the SimpleFIN fetch window
 (``feed.service`` sync and outage repair). Imported rows are dated by their

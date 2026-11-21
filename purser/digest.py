@@ -36,6 +36,7 @@ PENDINGS_VANISHED_CAP = 3
 STALE_PRICES_CAP = 3
 UNPRICED_HOLDINGS_CAP = 3
 OPEN_PERIODS_CAP = 3
+STALE_ASSETS_CAP = 10
 FEED_PROBLEMS_CAP = 5  # per list: logins needing the user, failing, stale
 
 
@@ -339,6 +340,22 @@ def _feed_block(session: Session) -> dict[str, Any]:
     }
 
 
+def _stale_assets_block(session: Session) -> list[dict[str, Any]]:
+    """Hand-valued assets whose value is older than their limit (#568), read
+    live (not the event window), so the brief names an asset until its value
+    is refreshed. Capped."""
+    from purser import assets
+
+    return [
+        {
+            "account": s.account.path,
+            "last_valued": s.last_valued.isoformat() if s.last_valued else None,
+            "revalue_after_days": s.revalue_after_days,
+        }
+        for s in assets.stale_assets(session)[:STALE_ASSETS_CAP]
+    ]
+
+
 def whats_new(
     session: Session,
     *,
@@ -474,5 +491,6 @@ def whats_new(
         "suggestions": _suggestions_block(session),
         "sync": {"failures": len(by_type.get("sync.failed", []))},
         "feed": _feed_block(session),
+        "stale_assets": _stale_assets_block(session),
         "events_truncated": len(events) == scan_limit,
     }

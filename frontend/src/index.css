@@ -1,5 +1,15 @@
 @import "tailwindcss";
 
+/* Theme tokens (#543). Every color the SPA paints comes from one of these:
+ * components use the Tailwind utilities they generate (`text-success`,
+ * `bg-warning-soft`, ...) and never a literal palette color, so the dark
+ * scheme below re-colors the whole app. The scheme follows the OS
+ * (prefers-color-scheme); there is no in-app switch.
+ *
+ * Contrast (WCAG AA, 4.5:1 for text) is checked for each text token on
+ * background, card and muted, and for each `*-soft` badge pair, in both
+ * schemes; the PR for #543 lists the ratios. Keep that true when a value
+ * changes. */
 @theme {
   --color-background: oklch(0.985 0.002 250);
   --color-foreground: oklch(0.2 0.02 260);
@@ -10,17 +20,44 @@
   --color-primary: oklch(0.45 0.15 165);
   --color-primary-foreground: oklch(0.99 0 0);
   --color-destructive: oklch(0.55 0.2 25);
+  --color-destructive-foreground: oklch(0.99 0 0);
+  --color-destructive-soft: oklch(0.96 0.025 18);
   --color-ring: oklch(0.45 0.15 165);
+  /* Money in and things that went right ("Saved", positive amounts). */
+  --color-success: oklch(0.5 0.115 165);
+  --color-success-soft: oklch(0.95 0.05 163);
+  /* Needs a look, not an error (stale prices, overdue bills). */
+  --color-warning: oklch(0.5 0.13 50);
+  --color-warning-soft: oklch(0.96 0.06 90);
   --radius: 0.5rem;
 }
 
-/* The forecast's estimate range band (#247), light and dark. */
 :root {
+  /* Native controls (selects and their menus, date pickers, scrollbars)
+   * follow the scheme too. */
+  color-scheme: light dark;
+  /* The forecast's estimate range band (#247), read by the chart's SVG. */
   --chart-band: oklch(0.6 0.13 250 / 0.16);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
+    --color-background: oklch(0.17 0.012 260);
+    --color-foreground: oklch(0.94 0.006 250);
+    --color-card: oklch(0.21 0.014 260);
+    --color-muted: oklch(0.27 0.014 260);
+    --color-muted-foreground: oklch(0.74 0.016 260);
+    --color-border: oklch(0.34 0.014 260);
+    --color-primary: oklch(0.76 0.13 165);
+    --color-primary-foreground: oklch(0.18 0.03 165);
+    --color-destructive: oklch(0.72 0.16 22);
+    --color-destructive-foreground: oklch(0.18 0.03 25);
+    --color-destructive-soft: oklch(0.32 0.08 22);
+    --color-ring: oklch(0.76 0.13 165);
+    --color-success: oklch(0.8 0.13 163);
+    --color-success-soft: oklch(0.32 0.06 165);
+    --color-warning: oklch(0.83 0.13 80);
+    --color-warning-soft: oklch(0.33 0.06 70);
     --chart-band: oklch(0.7 0.12 250 / 0.3);
   }
 }
@@ -28,4 +65,14 @@
 body {
   @apply bg-background text-foreground antialiased;
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+/* Tailwind's default placeholder is the text color at half strength, which
+ * falls under 4.5:1 on a card in both schemes; the muted token keeps AA. */
+@layer base {
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--color-muted-foreground);
+    opacity: 1;
+  }
 }

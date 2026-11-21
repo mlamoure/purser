@@ -161,6 +161,20 @@ class TestConfigApi:
             "minute": 0,
         }
 
+    def test_timezone_change_reschedules_the_sync(
+        self, admin_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#556, decision 111: the daily sync time reads in the household
+        zone, so a zone change (set or reset) moves its trigger too."""
+        from purser import scheduler
+
+        calls: list[str] = []
+        monkeypatch.setattr(scheduler, "reschedule_sync", lambda: calls.append("x") or False)
+        assert admin_client.put("/config", json={"timezone": "America/New_York"}).status_code == 200
+        assert admin_client.delete("/config/timezone").status_code == 200
+        assert admin_client.put("/config", json={"feed_stale_days": 5}).status_code == 200
+        assert len(calls) == 2
+
     def test_oidc_enabled_once_trio_complete(self, admin_client: TestClient) -> None:
         body = admin_client.get("/config").json()
         assert body["values"]["oidc_enabled"] is False

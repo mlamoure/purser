@@ -382,11 +382,36 @@ def _record_balance_valuation(
     sf_account: dict[str, Any],
     account: Account,
 ) -> None:
-    """SimpleFIN-synced loans/property are valued by their reported balance
-    (DESIGN §8: 'SimpleFIN-synced or manual valuations')."""
+    """SimpleFIN-synced loans are valued by their reported balance (DESIGN §8:
+    'SimpleFIN-synced or manual valuations'). A feed-mapped hand-valued asset
+    (property) is a ledger (decision 113): when the reported balance differs
+    from its balance on the fetch's ledger day, a value change for the
+    difference moves it there."""
+    from purser import assets, clock, reconciliation
     from purser.models import Valuation
-    from purser.networth import VALUATION_TYPES
+    from purser.networth import VALUATION_NEWEST_FIRST, VALUATION_TYPES
 
+    if account.type in assets.ASSET_TYPES and sf_account.get("balance") is not None:
+        if account.closed_at is not None:
+            return
+        reported = core.quantize(Decimal(str(sf_account["balance"])))
+        on = clock.ledger_date(raw_fetch.fetched_at)
+        held = reconciliation.ledger_balance(
+            session, account.id, on, reconciliation.BASIS_PENDING_INCLUSIVE
+        )
+        if reported != held:
+            assets.record_value_change(
+                session,
+                account_ref=str(account.id),
+                as_of=on,
+                amount=reported - held,
+                token=None,
+                note="Balance the bank reported",
+                origin=core.Origin.IMPORT,
+                today=max(on, clock.ledger_today()),
+                lock=False,
+            )
+        return
     if account.type not in VALUATION_TYPES or sf_account.get("balance") is None:
         return
     value = Decimal(str(sf_account["balance"]))
@@ -394,7 +419,7 @@ def _record_balance_valuation(
     latest = session.execute(
         select(Valuation.value)
         .where(Valuation.account_id == account.id)
-        .order_by(Valuation.as_of.desc(), Valuation.id.desc())
+        .order_by(*VALUATION_NEWEST_FIRST)
         .limit(1)
     ).scalar_one_or_none()
     if latest is not None and Decimal(latest) == value:

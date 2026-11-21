@@ -6,8 +6,8 @@ import { AccountRow } from "./AccountRow";
 import { CREATE, SKIP, type Mapping } from "./model";
 
 const ACCOUNTS = [
-  accountOut({ id: "a-1", path: "assets.checking" }),
-  accountOut({ id: "a-2", path: "assets.feed_checking", connection_id: "c-1" }),
+  accountOut({ id: "a-1", name: "Checking", path: "assets.checking" }),
+  accountOut({ id: "a-2", name: "Feed Checking", path: "assets.feed_checking", connection_id: "c-1" }),
 ];
 
 const mapping = (over: Partial<Mapping> = {}): Mapping => ({
@@ -47,13 +47,16 @@ function renderRow(over: Partial<Parameters<typeof AccountRow>[0]> = {}) {
 const target = () => screen.getAllByRole("combobox")[0];
 
 describe("AccountRow", () => {
-  it("offers manual and SimpleFIN accounts, and patches the chosen target", async () => {
+  it("offers manual and SimpleFIN accounts by name, and patches the chosen target", async () => {
     const { props, user } = renderRow();
 
-    expect(within(screen.getByRole("group", { name: "Accounts" })).getByText("assets.checking")).toBeInTheDocument();
+    // Names, not paths (#541); the option values stay account ids.
+    expect(within(screen.getByRole("group", { name: "Accounts" })).getByText("Checking")).toBeInTheDocument();
     expect(
-      within(screen.getByRole("group", { name: "SimpleFIN accounts" })).getByText("assets.feed_checking (SimpleFIN)"),
+      within(screen.getByRole("group", { name: "SimpleFIN accounts" })).getByText("Feed Checking (SimpleFIN)"),
     ).toBeInTheDocument();
+    expect(screen.queryByText("assets.checking")).not.toBeInTheDocument();
+    expect(screen.getByText("Checking", { selector: "span" })).toBeInTheDocument();
     expect(screen.queryByRole("option", { name: "Don't import" })).not.toBeInTheDocument();
 
     await user.selectOptions(target(), "a-2");
@@ -140,6 +143,6 @@ describe("AccountRow", () => {
       }),
     });
 
-    expect(screen.getByText("Looks income-positive for a credit_card — invert suggested.")).toBeInTheDocument();
+    expect(screen.getByText("Looks income-positive for a credit card — invert suggested.")).toBeInTheDocument();
   });
 });

@@ -10,7 +10,8 @@ in later sessions.
 
 The API calls these records **memories**. The existing `/memories` endpoints,
 `list_memories`, `propose_memory` and `archive_memory` tools manage them. In the
-admin UI, they appear under **Config → Memories**.
+admin UI, they appear under **Settings → Agent memory**, where you record a note and
+tick the accounts it is about (none ticked: it applies everywhere).
 
 ## Notes and rules
 
@@ -42,7 +43,7 @@ it. Link to the relevant account or payee when you want it used there.
 
 When an agent proposes a note, it starts as a draft unless you explicitly
 asked the agent to save it as active context. You can approve drafts in
-**Config → Memories**. Drafts are excluded from `describe()`, ordinary listings,
+**Settings → Agent memory**. Drafts are excluded from `describe()`, ordinary listings,
 review context and classifier prompts. Listings can request them explicitly
 with `include_drafts` for inspection.
 

@@ -100,7 +100,7 @@ The action names state what they do: **Confirm payment match**, **Link as
 transfer**, **Create schedule**, or **Create draft rule**. Inspect the records
 before confirming. A schedule editor offers monthly, weekly, two-week and
 four-week choices and preserves custom recurrence rules. A created schedule
-can be edited or paused in Schedules; matches and transfers can be undone in
+can be edited or paused in Scheduled transactions; matches and transfers can be undone in
 the register. A transfer rule still requires its separate activation preview.
 
 **Transaction review** shows per-account links for posted and pending rows.
@@ -214,5 +214,5 @@ The authoritative spec is
 [`DESIGN.md`](https://github.com/mlamoure/purser/blob/main/DESIGN.md)
 section 6 (schedules and forecasting) and decisions 57, 67, 86 and 102. Schedules
 themselves are covered in
-[Schedules and recurring bills](../../how-to/schedules-and-bills/), rules in
+[Scheduled transactions and recurring bills](../../how-to/schedules-and-bills/), rules in
 [Write deterministic rules](../../how-to/rules/).

@@ -17,7 +17,7 @@ fresh session; a running instance also serves this guide at `GET /llms.txt`.
 ## account_balance
 
 Point-in-time balance of one real account (UUID or path). Open
-loan/property accounts answer with their latest valuation at or before
+loan accounts answer with their latest valuation at or before
 as_of (method 'valuation'); open brokerage accounts add their latest
 holdings market value on top of the postings basis (method
 'postings+holdings'); everything else answers from the STORED running
@@ -136,6 +136,13 @@ names it). note (200 characters or fewer) is a proposal's evidence for
 the person deciding it, such as the statement line you read; it shows on
 the suggestion's card. A direct create keeps no note.
 
+payee is who is paid or pays (required for a flat schedule unless memo is
+sent); memo is an optional free-text note. The schedule's label (its
+instances' description) is the memo, else the payee, else a transfer's
+counterparty account. name is the older single field: sent without memo
+it becomes a transfer's memo, a flat schedule's payee when payee is
+omitted, or otherwise its memo — prefer payee and memo.
+
 rrule is RFC 5545 (FREQ=MONTHLY;BYMONTHDAY=6,20 is semi-monthly); dtstart
 (YYYY-MM-DD) anchors it — pass the last real occurrence so anchor-sensitive
 rules count from it. amount is the schedule account's leg (negative =
@@ -154,13 +161,14 @@ instance once.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
-| `name` | string | yes | — |
 | `account` | string | yes | — |
 | `rrule` | string | yes | — |
+| `payee` | string \| null | no | `null` |
+| `memo` | string \| null | no | `null` |
 | `amount` | string \| null | no | `null` |
 | `amount_type` | string | no | `"fixed"` |
 | `date_mode` | string | no | `"fixed"` |
-| `payee` | string \| null | no | `null` |
+| `name` | string \| null | no | `null` |
 | `category` | string \| null | no | `null` |
 | `dtstart` | string \| null | no | `null` |
 | `estimate_basis` | string \| null | no | `null` |
@@ -248,6 +256,29 @@ include: fields to return although the user's privacy defaults withhold them —
 | `account` | string \| null | no | `null` |
 | `include` | array of string \| null | no | `null` |
 
+## dispose_asset
+
+Sell, trade in or write off a hand-valued asset (write scope). First
+record the sale's money as transfers out of the asset dated on or before
+as_of: the bank's deposit of the proceeds (update_transaction on that
+row with category="[asset path]") and any loan payoff. Then call this:
+what is left on the asset is the rest of its change in value — a gain or
+loss at sale, or its whole value for a write-off — posted against
+equity.revaluation on as_of, and the account closes at zero. Refused when
+an entry on the asset is dated after as_of. dry_run=true answers the
+same without writing; read value_before back to the user first: a value
+equal to the whole asset means no proceeds were recorded (a write-off).
+
+include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `account` | string | yes | — |
+| `as_of` | string | yes | — |
+| `note` | string \| null | no | `null` |
+| `dry_run` | boolean | no | `false` |
+| `include` | array of string \| null | no | `null` |
+
 ## end_schedule
 
 Pause, resume or end a schedule (write scope). action=pause stops
@@ -268,7 +299,8 @@ Bank feed health in one look: one line per bank login (status ok,
 needs_login — log in again at the bank through SimpleFIN Bridge — or
 error, with how many accounts it delivers and how many feed a ledger
 account), then only the accounts that need attention: not_connected (a
-feed account no ledger account takes, e.g. a newly opened one), stale Nd
+feed account no ledger account takes, e.g. a newly opened one; one the
+user chose to ignore is not listed), stale Nd
 (the bank balance has not updated for N days), an act.* code (the bank
 failed to deliver it), ambiguous_id. Account numbers are never shown.
 Use it for "did a new account show up?" or "which bank needs me?".
@@ -354,8 +386,8 @@ include: fields to return although the user's privacy defaults withhold them —
 
 ## list_accounts
 
-Real accounts with current balances (pending+posted). Loan/property
-accounts report their latest valuation instead of the postings sum
+Real accounts with current balances (pending+posted). Loan accounts
+report their latest valuation instead of the postings sum
 (marked balance_method='valuation'); brokerage accounts add their latest
 holdings market value on top of it (balance_method='postings+holdings').
 Both carry the overlay's balance_as_of date. A reconciled account carries
@@ -363,7 +395,13 @@ Both carry the overlay's balance_as_of date. A reconciled account carries
 only for brokerage, balance for other accounts), and whether the
 ledger still matches the statement on that date (difference = ledger
 minus statement target, ledger sign; nonzero means a later write moved
-it).
+it). A hand-valued asset (type property) carries asset_kind (house, car,
+...) and, when it secures loans, equity (its value plus those loans,
+ledger sign) with secured_loans (their paths); a secured loan carries
+secured_by (the asset's path). An asset whose value is older than its
+revalue_after_days carries value_stale=true and last_valued. Every asset
+carries gain (the sum of its changes in value) and money_put_in (its
+purchase and transfers); together they are its value.
 
 include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
 
@@ -539,7 +577,9 @@ include: fields to return although the user's privacy defaults withhold them —
 
 ## list_schedules
 
-Bill/income schedules with next due dates.
+Bill/income schedules with next due dates. name is the label (memo,
+else payee, else the transfer counterparty); payee and memo are the
+fields create_schedule and update_schedule take.
 
 include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
 
@@ -806,9 +846,10 @@ computes no tax.
 ## reconcile_account
 
 Reconcile a checking, savings, cash or credit-card account to a
-statement (write scope). statement_balance is the figure AS THE STATEMENT
-SHOWS IT: positive = money in the account, or for a credit card the amount
-owed. Purser converts it to ledger sign (cards are negative when owed), and
+statement, or set a hand-valued asset's value on a date (write scope).
+statement_balance is the figure AS THE STATEMENT SHOWS IT: positive =
+money in the account, or for a credit card the amount owed. Purser
+converts it to ledger sign (cards are negative when owed), and
 every other amount in the answer is ledger sign. basis is posted (default)
 or pending_inclusive (posted plus pending); as_of is YYYY-MM-DD, today or
 earlier. Purser posts ONE adjustment for the difference to a system
@@ -822,6 +863,13 @@ statement_balance must be cash only, excluding securities and unvested
 awards. Holdings and prices never change. Other accounts use the default
 component="balance". Results and list_accounts identify which component
 was reconciled; list_accounts checks whether it still holds.
+A hand-valued asset (type property: a house, a car) reconciles to its
+value: statement_balance is what it is worth on as_of, and the difference
+posts against the system account equity.revaluation as a change in value
+(category in the answer), so net worth moves and spending does not. One
+value per date; a date before the latest one is refused (record a
+backdated change with record_value_change instead). note says where the
+figure came from (an appraisal, an estimate) and is kept on the entry.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -831,6 +879,7 @@ was reconciled; list_accounts checks whether it still holds.
 | `basis` | string | no | `"posted"` |
 | `dry_run` | boolean | no | `false` |
 | `component` | string | no | `"balance"` |
+| `note` | string \| null | no | `null` |
 
 ## record_position
 
@@ -985,13 +1034,15 @@ lot_method fifo/lifo/hifo. Undo with reverse_position_event.
 
 ## record_valuation
 
-Record a loan or property account's value on a date (write scope).
-Such an account's balance IS its latest valuation, in net worth and on
-every account surface, so this is how it is kept current: it cannot be
-reconciled (reconcile_account is for checking, savings, cash and credit
-cards). as_of is YYYY-MM-DD. value is a decimal string in ledger sign by
-default (convention='ledger'): a property positive, a loan NEGATIVE while
-money is owed. To enter the figure as the statement prints it, a loan's
+Record a loan account's value on a date (write scope). A loan's
+balance IS its latest valuation, in net worth and on every account
+surface, so this is how it is kept current: it cannot be reconciled
+(reconcile_account is for checking, savings, cash, credit cards and
+hand-valued assets). A hand-valued asset (type property) is refused here:
+its value is a ledger, changed with record_value_change or set on a date
+with reconcile_account. as_of is YYYY-MM-DD. value is a decimal string in
+ledger sign by default (convention='ledger'): a loan NEGATIVE while money
+is owed. To enter the figure as the statement prints it, a loan's
 amount owed positive, pass convention='statement' and Purser negates it,
 exactly as reconcile_account converts a statement balance. Never flip the
 sign yourself: a positive loan value in ledger convention is refused,
@@ -1004,6 +1055,38 @@ ledger sign.
 | `as_of` | string | yes | — |
 | `value` | string | yes | — |
 | `convention` | string | no | `"ledger"` |
+
+## record_value_change
+
+Record a change in a hand-valued asset's value (a house, a car: an
+account of type property; write scope). amount is a signed decimal
+string: "25000.00" when it gained value, "-4000.00" when it lost value.
+as_of is YYYY-MM-DD, today or earlier; a backdated change moves every
+balance after it, like any transaction. Purser posts one entry against
+the system account equity.revaluation, so net worth moves and spending
+does not. note says where the figure came from. reference (letters,
+digits, . _ : - only) makes a retry safe: a reference already used on the
+account posts nothing and answers with the first change (created=false).
+To set the value on a date ("worth X"), use reconcile_account with the
+value as statement_balance; it posts the difference the same way. A wrong
+change is undone with reverse_value_change. The answer's balance is the
+asset's value now. kind="capital" records money put in instead of a
+change in market value: the purchase price before the user's records, or
+an improvement paid in cash (never a gain). An improvement paid from a
+tracked account is a transfer to the asset (update_transaction with
+category="[asset path]"), not a value change.
+
+include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `account` | string | yes | — |
+| `as_of` | string | yes | — |
+| `amount` | string | yes | — |
+| `note` | string \| null | no | `null` |
+| `reference` | string \| null | no | `null` |
+| `kind` | string | no | `"revaluation"` |
+| `include` | array of string \| null | no | `null` |
 
 ## record_vest
 
@@ -1106,6 +1189,23 @@ update_transaction or confirm_transfer. note says why (optional).
 | --- | --- | --- | --- |
 | `event_id` | string | yes | — |
 | `note` | string \| null | no | `null` |
+
+## reverse_value_change
+
+Undo a change in a hand-valued asset's value (write scope): one made
+with record_value_change or posted by reconcile_account on a property
+account. transaction_id is the change's id (search_transactions on the
+account shows it; a row flagged value_change in review_batch is one).
+Purser corrects it through a reversal pair, so the history keeps both;
+amount in the answer is what was taken back and balance the asset's value
+now. Record the right figure afterwards if there is one.
+
+include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `transaction_id` | string | yes | — |
+| `include` | array of string \| null | no | `null` |
 
 ## review_batch
 
@@ -1228,9 +1328,16 @@ connection_id to sync every active connection.
 ## update_account
 
 Rename, re-describe or hide a real account, or set its floor (write
-scope); only the fields sent change. name is the display name only: the
-account's path, which tools, rules and outside integrations use to find
-it, never changes, so a rename breaks nothing that refers to the account. The name is also
+scope); only the fields sent change. asset_kind sets what a hand-valued
+asset (type property) is: house, land, car, boat, rv, jewelry, art,
+equipment or other (a label and an icon only). secured_by, on a loan,
+names the hand-valued asset that secures it (its path or id; "" clears
+it), so the asset reports its equity. revalue_after_days, on an asset,
+is how many days its value may go without an update before Purser calls
+it stale (asset.stale, whats_new.stale_assets); 0 turns that off.
+name is the display name only: the account's path, which tools, rules
+and outside integrations use to find it, never changes, so a rename breaks
+nothing that refers to the account. The name is also
 what transfer auto-link looks for in bank text (a row that mentions the
 counterparty account's name is a transfer signal), so a rename changes
 which bank descriptions link to the account. description="" clears it.
@@ -1254,6 +1361,9 @@ app too.
 | `description` | string \| null | no | `null` |
 | `hidden` | boolean \| null | no | `null` |
 | `min_balance` | string \| null | no | `null` |
+| `asset_kind` | string \| null | no | `null` |
+| `secured_by` | string \| null | no | `null` |
+| `revalue_after_days` | integer \| null | no | `null` |
 
 ## update_award_vest
 
@@ -1300,11 +1410,12 @@ include: fields to return although the user's privacy defaults withhold them —
 
 ## update_schedule
 
-Edit a schedule's rule (write scope); only the fields sent change.
+Edit a schedule's rule (write scope); only the fields sent change
+("" clears payee or memo; a flat schedule keeps at least one).
 Live instances the user has not overridden follow the new rule (slots the
 rule no longer produces are dropped, amounts re-estimated, missing slots
 added); overridden ("pinned") instances keep their amounts and dates.
-A new name or payee relabels every live instance, pinned ones too, whose
+A new payee or memo relabels every live instance, pinned ones too, whose
 description or payee still equals the old one (`relabeled` counts them);
 labels set by hand stay. category and counterparty_account are mutually
 exclusive: sending one switches the schedule's shape between flat and
@@ -1321,6 +1432,7 @@ transfer.
 | `date_mode` | string \| null | no | `null` |
 | `estimate_basis` | string \| null | no | `null` |
 | `payee` | string \| null | no | `null` |
+| `memo` | string \| null | no | `null` |
 | `category` | string \| null | no | `null` |
 | `autopost_policy` | string \| null | no | `null` |
 | `counterparty_account` | string \| null | no | `null` |

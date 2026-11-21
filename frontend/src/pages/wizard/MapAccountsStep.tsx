@@ -1,19 +1,20 @@
-import { Badge, Button, Card, CardTitle, ErrorText, Table, Td, Th } from "../../components/ui";
-import type { Discovered } from "./useFeedConnection";
-import { useStepRunner } from "./useStepRunner";
+import { Fragment, useState } from "react";
+import { Badge, Button, Card, CardTitle, Table, Td, Th } from "../../components/ui";
+import { MapFeedAccountForm, type Discovered, type MapTarget } from "./MapFeedAccountForm";
 
-/** Step 4: map each discovered bank account to a new Purser account
- * (`mapAccount`, from useFeedConnection). */
+/** Step 4: map each discovered bank account to a Purser account, new or
+ * existing (`mapAccount`, from useFeedConnection). Map opens the same form
+ * Settings -> Connections uses for accounts that appear after setup. */
 export function MapAccountsStep({
   discovered,
   mapAccount,
   onContinue,
 }: {
   discovered: Discovered[];
-  mapAccount: (d: Discovered) => Promise<void>;
+  mapAccount: (d: Discovered, target: MapTarget) => Promise<void>;
   onContinue: () => void;
 }) {
-  const { busy, error, run } = useStepRunner();
+  const [open, setOpen] = useState<string | null>(null); // external_id being mapped
 
   return (
     <Card>
@@ -28,29 +29,44 @@ export function MapAccountsStep({
         </thead>
         <tbody>
           {discovered.map((d) => (
-            <tr key={d.external_id}>
-              <Td>{d.name ?? d.external_id}{d.org ? ` · ${d.org}` : ""}</Td>
-              <Td>{d.balance ?? "—"}</Td>
-              <Td>
-                {d.mapped_account_path
-                  ? <Badge variant="green">{d.mapped_account_path}</Badge>
-                  : <Badge variant="amber">unmapped</Badge>}
-              </Td>
-              <Td>
-                {!d.mapped_account_path && (
-                  <Button size="sm" variant="outline" disabled={busy} onClick={() => run(() => mapAccount(d))}>
-                    Map
-                  </Button>
-                )}
-              </Td>
-            </tr>
+            <Fragment key={d.external_id}>
+              <tr>
+                <Td>{d.name ?? d.external_id}{d.org ? ` · ${d.org}` : ""}</Td>
+                <Td>{d.balance ?? "—"}</Td>
+                <Td>
+                  {d.mapped_account_path
+                    ? <Badge variant="green">{d.mapped_account_path}</Badge>
+                    : <Badge variant="amber">unmapped</Badge>}
+                </Td>
+                <Td>
+                  {!d.mapped_account_path && open !== d.external_id && (
+                    <Button size="sm" variant="outline" onClick={() => setOpen(d.external_id)}>
+                      Map
+                    </Button>
+                  )}
+                </Td>
+              </tr>
+              {!d.mapped_account_path && open === d.external_id && (
+                <tr>
+                  <Td colSpan={4}>
+                    <MapFeedAccountForm
+                      account={d}
+                      onMap={async (target) => {
+                        await mapAccount(d, target);
+                        setOpen(null);
+                      }}
+                      onCancel={() => setOpen(null)}
+                    />
+                  </Td>
+                </tr>
+              )}
+            </Fragment>
           ))}
         </tbody>
       </Table>
       <div className="mt-4 flex gap-2">
         <Button onClick={() => onContinue()}>Continue</Button>
       </div>
-      <ErrorText>{error}</ErrorText>
     </Card>
   );
 }

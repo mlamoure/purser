@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from purser import balances, clock, ledger, networth, reconciliation
+from purser import assets, balances, clock, ledger, networth, reconciliation
 from purser.admin import security
 from purser.admin.auth import ReadToken, WriteToken
 from purser.db import get_session
@@ -79,6 +79,28 @@ def _drift_basis(value: str | None) -> DriftBasis | None:
     return None
 
 
+AssetKind = Literal["house", "land", "car", "boat", "rv", "jewelry", "art", "equipment", "other"]
+
+
+class AssetOut(BaseModel):
+    """What a hand-valued asset (type property) is (#567)."""
+
+    kind: AssetKind
+    acquired_on: date | None
+    description: str | None  # narrative (an address, a VIN), encrypted at rest
+    # Staleness (#568): how old the value may get (null = never), when it was
+    # last stated (a value entry or a recorded value), and whether it is
+    # older than the limit now.
+    revalue_after_days: int | None = None
+    last_valued: date | None = None
+    stale: bool = False
+    # Money put in (the purchase and transfers in or out) and gain (the sum of
+    # its changes in value); together they are its value (#569). Ledger sums,
+    # no tax computation.
+    money_put_in: Decimal | None = None
+    gain: Decimal | None = None
+
+
 class AccountOut(BaseModel):
     id: uuid.UUID
     parent_id: uuid.UUID | None
@@ -114,7 +136,7 @@ class AccountOut(BaseModel):
     # (§7.3, decision 103): admin opt-in that puts it in the drift check.
     feed_balance_is_cash: bool = False
     balance: Decimal | None = None
-    # Valuation overlay (DESIGN §8, decision 42): open loan/property accounts
+    # Valuation overlay (DESIGN §8, decision 42): open loan accounts
     # report their latest valuation as `balance` (method "valuation",
     # `balance_as_of` = the valuation date); everything else reports the
     # postings sum (method "postings"). `postings_balance` carries the
@@ -128,6 +150,13 @@ class AccountOut(BaseModel):
     # other — a marker shown without its check could be silently stale.
     reconciled_through: date | None = None
     reconciliation: ReconciliationOut | None = None
+    # Hand-valued assets (#567): what the asset is, and — with balances — its
+    # equity (value plus the open loans it secures, ledger sign) and those
+    # loans. On a loan, the asset that secures it.
+    asset: AssetOut | None = None
+    equity: Decimal | None = None
+    secured_loan_ids: list[uuid.UUID] = []
+    secured_by_id: uuid.UUID | None = None
     created_at: datetime
 
     @classmethod
@@ -141,6 +170,9 @@ class AccountOut(BaseModel):
         balance_as_of: date | None = None,
         postings_balance: Decimal | None = None,
         reconciliation: ReconciliationOut | None = None,
+        asset: AssetOut | None = None,
+        equity: Decimal | None = None,
+        secured_loan_ids: list[uuid.UUID] | None = None,
     ) -> "AccountOut":
         return cls(
             id=a.id,
@@ -167,6 +199,10 @@ class AccountOut(BaseModel):
             postings_balance=postings_balance,
             reconciled_through=a.reconciled_through,
             reconciliation=reconciliation,
+            asset=asset,
+            equity=equity,
+            secured_loan_ids=secured_loan_ids or [],
+            secured_by_id=a.secured_by_id,
             created_at=a.created_at,
         )
 
@@ -194,6 +230,26 @@ class AccountCreate(BaseModel):
         description=_MIN_BALANCE_HELP,
     )
     description: str | None = None
+    asset_kind: AssetKind | None = Field(
+        default=None,
+        description="A hand-valued asset (type property) only: what it is, a label and an "
+        "icon (default `other`).",
+    )
+    acquired_on: date | None = Field(
+        default=None, description="A hand-valued asset only: when it was acquired."
+    )
+    asset_description: str | None = Field(
+        default=None,
+        max_length=500,
+        description="A hand-valued asset only: an address, a VIN, a note (stored encrypted).",
+    )
+    revalue_after_days: int | None = Field(
+        default=None,
+        ge=1,
+        le=3650,
+        description="A hand-valued asset only: how many days its value may go without an "
+        "update before Purser calls it stale (`asset.stale`, `whats_new`).",
+    )
 
 
 class CategoryUpdate(BaseModel):
@@ -260,6 +316,36 @@ class AccountUpdate(BaseModel):
         "brokers report the whole account value instead. Turning it off clears a "
         "drift-basis pin; switching the account back to the feed turns it off. Admin scope.",
     )
+    asset_kind: AssetKind | None = Field(
+        default=None,
+        description="A hand-valued asset (type property) only: what it is, a label and an "
+        "icon. Absent leaves it unchanged. Write scope.",
+    )
+    acquired_on: date | None = Field(
+        default=None,
+        description="A hand-valued asset only: when it was acquired. An explicit null "
+        "clears it; absent leaves it unchanged.",
+    )
+    asset_description: str | None = Field(
+        default=None,
+        max_length=500,
+        description="A hand-valued asset only: an address, a VIN, a note (stored encrypted). "
+        "An explicit null clears it; absent leaves it unchanged.",
+    )
+    revalue_after_days: int | None = Field(
+        default=None,
+        ge=1,
+        le=3650,
+        description="A hand-valued asset only: how many days its value may go without an "
+        "update before Purser calls it stale (`asset.stale`, `whats_new`). An explicit null "
+        "turns the reminder off; absent leaves it unchanged.",
+    )
+    secured_by_id: uuid.UUID | None = Field(
+        default=None,
+        description="A loan only: the hand-valued asset that secures it (a mortgage's "
+        "house, a car loan's car); the asset then reports its equity. An explicit null "
+        "clears it; absent leaves it unchanged. Write scope.",
+    )
     path: str | None = Field(
         default=None,
         description="Move the account to this ltree path, e.g. `liabilities.citicard`. "
@@ -312,7 +398,7 @@ def _balance_fields(
     session: Session, accounts: list[Account], *, all_accounts: bool = False
 ) -> dict[uuid.UUID, dict[str, object]]:
     """Per-account `from_model` balance kwargs: postings sum everywhere,
-    replaced by the latest valuation for open loan/property (decision 42),
+    replaced by the latest valuation for open loans (decision 42),
     plus the latest holdings market value for open brokerage (decision 50).
     `balance_as_of`/`postings_balance` ride along only when an overlay
     actually produced the answer."""
@@ -331,15 +417,59 @@ def _balance_fields(
     return fields
 
 
+def _asset_fields(
+    session: Session,
+    accounts: list[Account],
+    balance_fields: dict[uuid.UUID, dict[str, object]] | None,
+) -> dict[uuid.UUID, dict[str, object]]:
+    """`asset` for every hand-valued asset, and — when balances were read —
+    its `equity` and `secured_loan_ids` (#567)."""
+    asset_rows = [a for a in accounts if not a.is_virtual and a.type in assets.ASSET_TYPES]
+    if not asset_rows:
+        return {}
+    found = assets.details_for(session, [a.id for a in asset_rows])
+    last = assets.last_valued(session, [a.id for a in asset_rows])
+    sums = assets.gains(session, [a.id for a in asset_rows])
+    today = clock.ledger_today()
+    fields: dict[uuid.UUID, dict[str, object]] = {}
+    for a in asset_rows:
+        row = found.get(a.id)
+        limit = row.revalue_after_days if row else None
+        fields[a.id] = {
+            "asset": AssetOut(
+                kind=row.kind if row else "other",
+                acquired_on=row.acquired_on if row else None,
+                description=row.description if row else None,
+                revalue_after_days=limit,
+                last_valued=last.get(a.id),
+                stale=a.closed_at is None and assets.is_stale(last.get(a.id), limit, today),
+                money_put_in=sums[a.id][0],
+                gain=sums[a.id][1],
+            )
+        }
+    if balance_fields is not None:
+        balances = {
+            account_id: Decimal(str(f["balance"]))
+            for account_id, f in balance_fields.items()
+            if f.get("balance") is not None
+        }
+        for asset_id, (equity, loans) in assets.equities(session, asset_rows, balances).items():
+            fields[asset_id]["equity"] = equity
+            fields[asset_id]["secured_loan_ids"] = loans
+    return fields
+
+
 def _account_out(session: Session, account: Account, token: ApiToken) -> AccountOut:
     """One real account with its balance fields and reconciliation check."""
     fields = _balance_fields(session, [account])
     reconciled = _reconciliation_fields(session, [account])
+    asset = _asset_fields(session, [account], fields)
     return AccountOut.from_model(
         account,
         redacted=security.withholds_external_ids(token.kind, token.scopes),
         **fields[account.id],  # type: ignore[arg-type]
         **reconciled.get(account.id, {}),  # type: ignore[arg-type]
+        **asset.get(account.id, {}),  # type: ignore[arg-type]
     )
 
 
@@ -366,12 +496,14 @@ def list_accounts(
     accounts = list(session.execute(stmt).scalars())
     fields = _balance_fields(session, accounts, all_accounts=True) if include_balances else {}
     reconciled = _reconciliation_fields(session, accounts)
+    asset = _asset_fields(session, accounts, fields if include_balances else None)
     return [
         AccountOut.from_model(
             a,
             redacted=redacted,
             **fields.get(a.id, {}),  # type: ignore[arg-type]
             **reconciled.get(a.id, {}),  # type: ignore[arg-type]
+            **asset.get(a.id, {}),  # type: ignore[arg-type]
         )
         for a in accounts
     ]
@@ -398,7 +530,7 @@ def get_account(account_id: uuid.UUID, token: ReadToken, session: DbSession) -> 
 class BalanceAsOf(BaseModel):
     """Point-in-time balance from the stored running-balance table
     (decision 37: chain-head pending+posted register semantics), or the
-    latest valuation for open loan/property accounts (decision 42)."""
+    latest valuation for open loan accounts (decision 42)."""
 
     account_id: uuid.UUID
     path: str
@@ -416,7 +548,7 @@ def balance_as_of(
     session: DbSession,
     as_of: Annotated[date | None, Query(description="defaults to the ledger day")] = None,
 ) -> BalanceAsOf:
-    """Balance at end of ``as_of``. Open loan/property accounts answer with
+    """Balance at end of ``as_of``. Open loan accounts answer with
     their latest valuation at or before that date (decision 42); open
     brokerage accounts add their latest holdings market value on top of the
     postings basis (decision 50); everything else answers from the stored
@@ -527,6 +659,17 @@ def balance_series(
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_account(body: AccountCreate, token: WriteToken, session: DbSession) -> AccountOut:
+    asset_fields = {
+        "asset_kind",
+        "acquired_on",
+        "asset_description",
+        "revalue_after_days",
+    } & body.model_fields_set
+    if asset_fields and body.type not in assets.ASSET_TYPES:
+        raise HTTPException(
+            422,
+            f"{', '.join(sorted(asset_fields))} apply to hand-valued assets (type property) only",
+        )
     try:
         account = ledger.create_account(
             session,
@@ -540,6 +683,19 @@ def create_account(body: AccountCreate, token: WriteToken, session: DbSession) -
             description=body.description,
             actor_token_id=token.id,
         )
+        if account.type in assets.ASSET_TYPES and asset_fields:
+            assets.update_details(
+                session,
+                account=account,
+                kind=body.asset_kind,
+                acquired_on=body.acquired_on,
+                acquired_on_set="acquired_on" in asset_fields,
+                description=body.asset_description,
+                description_set="asset_description" in asset_fields,
+                revalue_after_days=body.revalue_after_days,
+                revalue_after_days_set="revalue_after_days" in asset_fields,
+                actor_token_id=token.id,
+            )
         # A new card/loan is a strong signal its payments already sit in the
         # other accounts' history: suggest them, never activate (#234).
         from purser import schedules as schedules_service
@@ -549,7 +705,9 @@ def create_account(body: AccountCreate, token: WriteToken, session: DbSession) -
         raise _handle(exc) from exc
     session.commit()
     return AccountOut.from_model(
-        account, redacted=security.withholds_external_ids(token.kind, token.scopes)
+        account,
+        redacted=security.withholds_external_ids(token.kind, token.scopes),
+        **_asset_fields(session, [account], None).get(account.id, {}),  # type: ignore[arg-type]
     )
 
 
@@ -607,6 +765,29 @@ def update_account(
             path=body.path,
             actor_token_id=token.id,
         )
+        asset_set = {
+            "asset_kind",
+            "acquired_on",
+            "asset_description",
+            "revalue_after_days",
+        } & body.model_fields_set
+        if asset_set:
+            assets.update_details(
+                session,
+                account=account,
+                kind=body.asset_kind,
+                acquired_on=body.acquired_on,
+                acquired_on_set="acquired_on" in asset_set,
+                description=body.asset_description,
+                description_set="asset_description" in asset_set,
+                revalue_after_days=body.revalue_after_days,
+                revalue_after_days_set="revalue_after_days" in asset_set,
+                actor_token_id=token.id,
+            )
+        if "secured_by_id" in body.model_fields_set:
+            assets.secure_loan(
+                session, loan=account, asset_id=body.secured_by_id, actor_token_id=token.id
+            )
     except ledger.LedgerError as exc:
         raise _handle(exc) from exc
     session.commit()
@@ -675,7 +856,7 @@ class ReconcileRequest(BaseModel):
         description="The balance AS THE STATEMENT SHOWS IT. Checking, savings and cash: "
         "positive = money in the account. Credit card: positive = the amount owed "
         "(a credit balance is negative). Purser converts it to ledger sign, where a card "
-        "is negative when owed.",
+        "is negative when owed. A hand-valued asset (property): its value on as_of.",
     )
     basis: Literal["posted", "pending_inclusive"] = Field(
         default="posted",
@@ -687,6 +868,12 @@ class ReconcileRequest(BaseModel):
         default=False,
         description="Return exactly what the call would do — the same computation, "
         "conflicts included — without writing anything.",
+    )
+    note: str | None = Field(
+        default=None,
+        max_length=500,
+        description="Where the figure came from (a statement, an appraisal, an estimate). "
+        "Kept on the adjustment row (encrypted) and the audit entry.",
     )
 
 
@@ -728,6 +915,10 @@ def reconcile_account(
     with ``component="cash"``. Never pass total brokerage value as cash.
     Holdings, awards and prices are unchanged; readbacks identify the component.
 
+    A hand-valued asset (type ``property``) reconciles to its value on
+    ``as_of``: the difference posts against the system account
+    ``equity.revaluation`` as a change in value (decision 113).
+
     Purser compares the statement figure with its own balance on ``as_of`` in
     the chosen ``basis`` and posts ONE adjustment for the difference, dated
     ``as_of``, to the system category ``expenses.reconciliation_adjustments``.
@@ -751,6 +942,7 @@ def reconcile_account(
             basis=body.basis,
             dry_run=body.dry_run,
             token=token,
+            note=body.note,
         )
     except reconciliation.ReconciliationConflict as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, detail=exc.detail) from exc

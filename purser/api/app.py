@@ -102,6 +102,7 @@ def create_app() -> FastAPI:
     from purser.admin.routes import audit_router, auth_router, tokens_router, users_router
     from purser.api.accounts import categories_router
     from purser.api.accounts import router as accounts_router
+    from purser.api.assets import router as assets_router
     from purser.api.categorize import router as categorize_router
     from purser.api.config import clock_router
     from purser.api.config import router as config_router
@@ -132,6 +133,7 @@ def create_app() -> FastAPI:
     app.include_router(sharing_audit_router)
     app.include_router(accounts_router)
     app.include_router(categories_router)
+    app.include_router(assets_router)
     app.include_router(transactions_router)
     app.include_router(feed_router)
     app.include_router(matching_router)

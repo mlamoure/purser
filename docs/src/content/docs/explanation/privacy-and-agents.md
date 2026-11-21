@@ -17,7 +17,7 @@ are not field-level access restrictions. For scope details, see
 
 ## Two settings
 
-Both are in Config, Settings, under **Privacy with agents**, and both are off
+Both are in **Settings -> Agents & API**, under **Privacy with agents**, and both are off
 by default (`PURSER_PRIVACY_PURCHASE`, `PURSER_PRIVACY_AMOUNT`; see
 [Configuration](../../reference/configuration/)).
 
@@ -49,7 +49,7 @@ A setting is a default, not a limit. Every tool that can return a withheld
 field takes `include`, any of `payee`, `description`, `amount` and
 `external_ids`, and returns exactly those fields on that call. The audit log
 separately records additional fields requested and fields observed in the final
-response. Open **Audit Log > Data shared** for all integration reads, including
+response. Open **Settings -> Audit log > Data shared** for all integration reads, including
 ordinary reads within the defaults and aggregate answers. **Only fields returned
 beyond privacy defaults** narrows the view to observed extra fields; it is not a
 list of all sharing. Failed or empty requests do not prove those fields were

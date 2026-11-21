@@ -14,6 +14,7 @@ from purser import audit, balances, events
 from purser.admin import security
 from purser.core import ledger as core
 from purser.ledger.accounts import (
+    ASSET_ENTRY_PATHS,
     _assert_accounts_open,
     is_system_account,
     lock_transaction,
@@ -234,6 +235,13 @@ def _flat_legs(tx: Transaction) -> tuple[Posting, Posting]:
     if len(tx.postings) != 2 or len(real) != 1 or len(virtual) != 1:
         raise LedgerError(
             "only a row with one real leg and one category leg can be edited this way"
+        )
+    if is_system_account(virtual[0].account) and virtual[0].account.path in ASSET_ENTRY_PATHS:
+        # A change in an asset's value (decision 113) is corrected by its own
+        # reversal, so it stays against equity.revaluation.
+        raise LedgerError(
+            "this row is a change in an asset's value; reverse it (reverse_value_change, "
+            "or POST /value-changes/{transaction_id}/reverse) and record the right figure"
         )
     if is_system_account(virtual[0].account):
         # The cash of a securities trade (decision 103) moves with its trade:

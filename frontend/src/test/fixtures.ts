@@ -23,6 +23,7 @@ export const accountOut = (over: Partial<Schemas["AccountOut"]> = {}): Schemas["
   closed_at: null,
   hidden_at: null,
   created_at: "2026-01-05T12:00:00Z",
+  secured_loan_ids: [],
   ...over,
 });
 
@@ -241,5 +242,48 @@ export const transferCandidate = (
   outgoing_description: "EXAMPLE BANK WEB DEBIT",
   incoming_description: "THANK YOU FOR YOUR REMITTANCE",
   suggestion_id: null,
+  ...over,
+});
+
+/** GET /config as the server answers it: every value at its default, key and
+ * secrets unset, encryption on with the key not yet recorded. */
+export const configOut = (
+  values: Partial<Schemas["ConfigOut"]["values"]> = {},
+  over: Partial<Omit<Schemas["ConfigOut"], "values">> = {},
+): Schemas["ConfigOut"] => ({
+  values: {
+    sync_schedule: { preset: "daily", hour: 6, minute: 30 },
+    transfer_auto_link: true,
+    privacy_purchase: false,
+    privacy_amount: false,
+    ai_provider: "none",
+    ai_model: null,
+    ai_base_url: "https://api.example.com/v1",
+    grafana_url: null,
+    session_ttl_days: 7,
+    session_idle_hours: 8,
+    audit_retention_days: 90,
+    oidc_issuer: null,
+    oidc_client_id: null,
+    oidc_enabled: false,
+    oidc_auto_provision: false,
+    price_provider: "none",
+    price_stale_days: 7,
+    feed_stale_days: 4,
+    timezone: "UTC",
+    ...values,
+  },
+  overridden: [],
+  ai_api_key_set: false,
+  oidc_client_secret_set: false,
+  price_api_key_set: false,
+  sync_reschedule_live: true,
+  encryption: {
+    field_encryption_active: true,
+    canary_ok: true,
+    key_fingerprint: "abcd1234",
+    key_acknowledged_at: null,
+    encrypted_scopes: [],
+  },
   ...over,
 });

@@ -129,3 +129,34 @@ def test_api_messages() -> None:
     assert envelope.api_messages({"x-api-message": ["note"]}) == ["note"]
     assert envelope.api_messages({"x-api-message": "one"}) == ["one"]
     assert envelope.api_messages({}) == []
+
+
+def test_login_of_issue_exact_then_unprefixed() -> None:
+    first, second = envelope.institutions(V2)
+    exact = envelope.Issue(code="con.auth", msg="m", conn_id="CON-2")
+    assert envelope.login_of_issue(V2, exact) == second
+    # The error list names the login without the prefix its entry carries.
+    prefixed = dict(
+        V2, connections=[dict(c, conn_id=f"MX-{c['conn_id']}") for c in V2["connections"]]
+    )
+    found = envelope.login_of_issue(
+        prefixed, envelope.Issue(code="con.auth", msg="m", conn_id="CON-1")
+    )
+    assert found is not None and (found.conn_id, found.name) == ("MX-CON-1", first.name)
+
+
+def test_login_of_issue_refuses_a_guess() -> None:
+    unknown = envelope.Issue(code="con.auth", msg="m", conn_id="CON-9")
+    assert envelope.login_of_issue(V2, unknown) is None
+    assert envelope.login_of_issue(V2, envelope.Issue(code="gen.auth", msg="m")) is None
+    # "1" is the tail of one id only at a separator; two logins ending the
+    # same way are not told apart.
+    twins = dict(V2, connections=[{"conn_id": "A-CON-7"}, {"conn_id": "B-CON-7"}])
+    assert (
+        envelope.login_of_issue(twins, envelope.Issue(code="con.auth", msg="m", conn_id="CON-7"))
+        is None
+    )
+    assert (
+        envelope.login_of_issue(V2, envelope.Issue(code="con.auth", msg="m", conn_id="ON-1"))
+        is None
+    )

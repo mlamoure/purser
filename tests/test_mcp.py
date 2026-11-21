@@ -51,6 +51,10 @@ EXPECTED_TOOLS = {
     "forecast_balance",
     "list_recurring",
     "whats_new",
+    # tools_assets (#566)
+    "record_value_change",
+    "reverse_value_change",
+    "dispose_asset",
     # tools_holdings (#390)
     "list_holdings",
     "record_position",
@@ -572,7 +576,7 @@ class TestMcpServer:
     def test_record_valuation_refuses_a_non_valuation_account_as_rest_does(
         self, seeded_tokens: dict[str, str], live_server: LiveServer, client: TestClient
     ) -> None:
-        """#343 (decision 81): only loan and property accounts are read by
+        """#343 (decision 81, 113): only loan accounts are read by
         their valuations, so a checking or brokerage valuation is refused with
         REST's 422 message word for word, and nothing is stored."""
         resp = client.post(
@@ -602,7 +606,7 @@ class TestMcpServer:
         assert [refused["error"].removeprefix(prefix) for refused in refusals] == [
             r.json()["detail"] for r in rest
         ]
-        assert "valuations apply only to loan and property accounts" in rest[0].json()["detail"]
+        assert "valuations apply only to loan accounts" in rest[0].json()["detail"]
         for path in paths:
             assert client.get(f"/accounts/{listed[path]}/valuations").json() == []
         assert client.get("/events", params={"type": "valuation.recorded"}).json() == []
@@ -1460,7 +1464,9 @@ class TestMcpServer:
                     "override_instance",
                     {"transaction_id": first["transaction_id"], "amount": "-99.00"},
                 ),
-                ("update_schedule", {"schedule_id": created["id"], "name": "Fitness club"}),
+                # #534: a name-only bill's name became its payee, so the
+                # rename is a payee edit.
+                ("update_schedule", {"schedule_id": created["id"], "payee": "Fitness club"}),
             ],
         )
         assert "error" not in labelled

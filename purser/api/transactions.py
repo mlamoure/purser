@@ -108,6 +108,13 @@ class TransactionOut(BaseModel):
     # the system account equity.securities. It moves only with its trade, so
     # it cannot be edited or recategorized; reverse the trade instead.
     securities_trade: bool = False
+    # A change in a hand-valued asset's value (#566, decision 113): its other
+    # leg is the system account equity.revaluation. Corrected by reversing it
+    # (POST /value-changes/{id}/reverse), never edited.
+    value_change: bool = False
+    # Of those, money put into the asset (its other leg equity.capital, #567)
+    # rather than a change in market value.
+    money_put_in: bool = False
     created_at: datetime
 
     @classmethod
@@ -175,7 +182,9 @@ class TransactionOut(BaseModel):
             needs_review=needs_review,
             schedule_id=t.schedule_id,
             schedule_pinned=t.schedule_pinned_at is not None,
-            securities_trade=ledger.has_system_leg(t.postings),
+            securities_trade=ledger.is_securities_trade(t.postings),
+            value_change=ledger.is_value_change(t.postings),
+            money_put_in=ledger.is_capital(t.postings),
             created_at=t.created_at,
         )
 

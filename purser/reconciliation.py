@@ -38,6 +38,7 @@ from sqlalchemy.orm import Session
 
 from purser import audit, clock, events, ledger, locks
 from purser.admin import security
+from purser.assets import ASSET_TYPES
 from purser.core import ledger as core
 from purser.feed.drift import ELIGIBLE_TYPES as _DRIFT_TYPES
 from purser.models import Account, AccountReconciliation, ApiToken
@@ -48,8 +49,11 @@ BASES = (BASIS_POSTED, BASIS_PENDING_INCLUSIVE)
 
 # Ordinary postings-balance accounts. Manual brokerage requires explicit
 # cash-only intent: its overall balance also includes holdings (§8).
-# Loan/property accounts use valuations instead.
+# Hand-valued assets (property) reconcile too (decision 113): "worth X on D",
+# with the difference posted against equity.revaluation instead of the
+# adjustments category. Loan accounts use valuations instead.
 ELIGIBLE_TYPES = _DRIFT_TYPES
+ASSET_PAYEE = "Asset value"
 
 # A liability's statement shows the amount OWED as a positive number, while
 # its ledger balance is negative when owed (§7.3 — SimpleFIN uses the ledger's
@@ -287,14 +291,21 @@ def _lock_account(session: Session, account_id: uuid.UUID, component: str) -> Ac
             raise ledger.LedgerError("brokerage cash reconciliation requires manual holdings")
     elif component != "balance":
         raise ledger.LedgerError("component='cash' is only for manual brokerage accounts")
-    elif account.type not in ELIGIBLE_TYPES:
+    elif account.type not in ELIGIBLE_TYPES | ASSET_TYPES:
         raise ledger.LedgerError(
             f"{account.path} is a {account.type} account; reconciliation compares a "
-            f"postings balance ({', '.join(sorted(ELIGIBLE_TYPES))}). Record a "
-            "valuation for loan and property accounts instead (MCP record_valuation, "
+            f"postings balance ({', '.join(sorted(ELIGIBLE_TYPES | ASSET_TYPES))}). Record a "
+            "valuation for loan accounts instead (MCP record_valuation, "
             "or POST /accounts/{id}/valuations)."
         )
     return account
+
+
+def adjustment_path(account_type: str) -> str:
+    """Where a reconciliation's difference posts: an asset's against
+    equity.revaluation (a change in its value), anything else's to the
+    reconciliation-adjustments category (a plug)."""
+    return ledger.REVALUATION_PATH if account_type in ASSET_TYPES else CATEGORY_PATH
 
 
 def reconcile(
@@ -308,9 +319,13 @@ def reconcile(
     component: Literal["balance", "cash"] = "balance",
     dry_run: bool = False,
     today: date | None = None,
+    note: str | None = None,
 ) -> Outcome:
     """Reconcile ``account_id`` to ``statement_balance`` (statement convention)
-    at the end of ``as_of`` in ``basis``.
+    at the end of ``as_of`` in ``basis``. For a hand-valued asset the figure
+    is its value on ``as_of`` and the difference is a change in value
+    (decision 113). ``note`` (where the figure came from) goes on the
+    adjustment row.
 
     Raises :class:`ReconciliationConflict` when the request contradicts a
     recorded reconciliation — a different claim for the same date, a date
@@ -366,7 +381,7 @@ def reconcile(
         target_balance=target,
         ledger_balance=observed,
         adjustment=adjustment,
-        category_path=CATEGORY_PATH if adjustment != 0 else None,
+        category_path=adjustment_path(account.type) if adjustment != 0 else None,
         reconciled_through=as_of,
         reconciliation_id=None,
         adjustment_tx_id=None,
@@ -375,7 +390,7 @@ def reconcile(
     )
     if dry_run:
         return outcome
-    return _record(session, account, outcome, token=token)
+    return _record(session, account, outcome, token=token, note=note)
 
 
 def _repeat(
@@ -436,7 +451,7 @@ def _repeat(
         target_balance=recorded_target,
         ledger_balance=_q(recorded_target - adjustment),
         adjustment=adjustment,
-        category_path=CATEGORY_PATH if adjustment != 0 else None,
+        category_path=adjustment_path(account.type) if adjustment != 0 else None,
         reconciled_through=account.reconciled_through,
         reconciliation_id=existing.id,
         adjustment_tx_id=existing.adjustment_tx_id,
@@ -464,9 +479,40 @@ def _category(session: Session, *, actor_token_id: uuid.UUID) -> Account:
     return category
 
 
-def _record(session: Session, account: Account, outcome: Outcome, *, token: ApiToken) -> Outcome:
+def _record(
+    session: Session,
+    account: Account,
+    outcome: Outcome,
+    *,
+    token: ApiToken,
+    note: str | None = None,
+) -> Outcome:
     adjustment_tx_id: uuid.UUID | None = None
-    if outcome.adjustment != 0:
+    note = note.strip() if note and note.strip() else None
+    if outcome.adjustment != 0 and account.type in ASSET_TYPES:
+        # A change in the asset's value (decision 113): Purser's own entry
+        # against equity.revaluation, origin system so it joins the review set.
+        tx = ledger.create_flat_transaction(
+            session,
+            account_ref=str(account.id),
+            category_ref=str(ledger.revaluation_account(session).id),
+            amount=outcome.adjustment,
+            date=outcome.as_of,
+            payee_name=ASSET_PAYEE,
+            description=note
+            or (
+                f"Value on {outcome.as_of} set to {outcome.target_balance} "
+                f"(was {outcome.ledger_balance})"
+            ),
+            requested_status=core.Status.POSTED,
+            origin=core.Origin.SYSTEM,
+            token=token,
+            system_leg=True,
+        )
+        if tx.status != core.Status.POSTED.value:
+            raise ledger.LedgerError("the value change did not post")
+        adjustment_tx_id = tx.id
+    elif outcome.adjustment != 0:
         category = _category(session, actor_token_id=token.id)
         # origin=system: Purser computed this row, so it joins the review set
         # (§4) and a human sees it, whoever asked for the reconcile. The
@@ -482,6 +528,7 @@ def _record(session: Session, account: Account, outcome: Outcome, *, token: ApiT
                 f"Reconciliation adjustment: {outcome.basis} {outcome.component} "
                 f"on {outcome.as_of} "
                 f"was {outcome.ledger_balance}, statement target {outcome.target_balance}"
+                + (f" ({note})" if note else "")
             ),
             requested_status=core.Status.POSTED,
             origin=core.Origin.SYSTEM,
@@ -519,6 +566,8 @@ def _record(session: Session, account: Account, outcome: Outcome, *, token: ApiT
         "adjustment": str(outcome.adjustment),
         "adjustment_tx_id": str(adjustment_tx_id) if adjustment_tx_id else None,
     }
+    if note:
+        facts["note"] = note
     audit.record(
         session,
         actor_token_id=token.id,

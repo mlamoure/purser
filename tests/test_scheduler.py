@@ -16,6 +16,7 @@ EXPECTED_JOB_IDS = {
     "schedules.materialize_daily",
     "schedules.detect_daily",
     "forecast.shortfall_scan",
+    "assets.stale_check",
     "networth.materialize_daily",
     "webhooks.delivery",
     "sessions.cleanup",
@@ -173,3 +174,93 @@ class TestConfigurableSyncSchedule:
     ) -> None:
         monkeypatch.setattr(scheduler_module, "_active", None)
         assert scheduler_module.reschedule_sync() is False
+
+
+class TestSyncTimeFollowsHouseholdZone:
+    """#556, decision 111: the daily sync time is a clock time in the
+    household zone, so it does not move when the clocks change; the interval
+    presets and every other job stay in UTC."""
+
+    @staticmethod
+    def _build(monkeypatch: pytest.MonkeyPatch, schedule: object, zone: str) -> object:
+        from purser import appsettings, clock
+
+        monkeypatch.setattr(scheduler_module, "_JOBS", [])
+        monkeypatch.setattr(appsettings, "sync_schedule", lambda: schedule)
+        monkeypatch.setattr(clock, "timezone_name", lambda: zone)
+        return scheduler_module.build_scheduler()
+
+    def test_daily_reads_in_the_household_zone_across_dst(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        from purser import appsettings
+
+        scheduler = self._build(
+            monkeypatch,
+            appsettings.SyncSchedule(preset="daily", hour=6, minute=30),
+            "America/New_York",
+        )
+        trigger = scheduler.get_job("feed.sync_daily").trigger  # type: ignore[attr-defined]
+        assert str(trigger.timezone) == "America/New_York"
+        utc = ZoneInfo("UTC")
+        # 06:30 on the clock in winter and in summer (11:30 and 10:30 UTC),
+        # plus the Bridge's 0-10 minute jitter.
+        winter = trigger.get_next_fire_time(None, datetime(2026, 1, 15, tzinfo=utc))
+        summer = trigger.get_next_fire_time(None, datetime(2026, 7, 15, tzinfo=utc))
+        for fire in (winter, summer):
+            local = fire.astimezone(ZoneInfo("America/New_York"))
+            assert local.hour == 6 and 30 <= local.minute <= 40
+        assert winter.astimezone(utc).hour == 11
+        assert summer.astimezone(utc).hour == 10
+        # The rest of the train stays on UTC times.
+        matching = scheduler.get_job("matching.run_daily").trigger  # type: ignore[attr-defined]
+        assert str(matching.timezone) == "UTC"
+
+    def test_interval_presets_stay_in_utc(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from purser import appsettings
+
+        scheduler = self._build(
+            monkeypatch, appsettings.SyncSchedule(preset="every_6h"), "America/New_York"
+        )
+        trigger = scheduler.get_job("feed.sync_daily").trigger  # type: ignore[attr-defined]
+        assert str(trigger.timezone) == "UTC"
+
+    def test_zone_unreachable_falls_back_to_the_env_zone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from purser import appsettings, clock
+
+        def boom() -> str:
+            raise RuntimeError("no database")
+
+        monkeypatch.setattr(scheduler_module, "_JOBS", [])
+        monkeypatch.setattr(appsettings, "sync_schedule", lambda: appsettings.SyncSchedule())
+        monkeypatch.setattr(clock, "timezone_name", boom)
+        monkeypatch.setenv("PURSER_TIMEZONE", "Europe/Berlin")
+        from purser.config import get_settings
+
+        get_settings.cache_clear()
+        try:
+            scheduler = scheduler_module.build_scheduler()
+            trigger = scheduler.get_job("feed.sync_daily").trigger
+            assert str(trigger.timezone) == "Europe/Berlin"
+        finally:
+            monkeypatch.delenv("PURSER_TIMEZONE")
+            get_settings.cache_clear()
+
+    def test_reschedule_picks_up_a_new_zone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from purser import appsettings, clock
+
+        scheduler = self._build(monkeypatch, appsettings.SyncSchedule(), "America/New_York")
+        scheduler.start(paused=True)  # type: ignore[attr-defined]
+        try:
+            monkeypatch.setattr(clock, "timezone_name", lambda: "Asia/Tokyo")
+            assert scheduler_module.reschedule_sync() is True
+            trigger = scheduler.get_job("feed.sync_daily").trigger  # type: ignore[attr-defined]
+            assert str(trigger.timezone) == "Asia/Tokyo"
+            assert trigger.jitter == scheduler_module.SYNC_JITTER_SECONDS
+        finally:
+            scheduler.shutdown(wait=False)  # type: ignore[attr-defined]

@@ -3,6 +3,7 @@ connected or not, with freshness and issues; ids and account numbers
 withheld from non-admin API tokens; the MCP summary stays small."""
 
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -96,6 +97,21 @@ class TestInventory:
         (new_card,) = other["accounts"]
         assert (new_card["account"], new_card["connected"]) == (None, False)
 
+    def test_login_issue_named_without_the_id_prefix(self, harness: FeedHarness) -> None:
+        """#559: the error list may name a login by its id without the
+        provider prefix the connection list carries."""
+        payload = _payload()
+        payload["errlist"][0]["conn_id"] = "DEMO-2"  # the login is CON-DEMO-2
+        harness.use_payload(payload)
+        connection_id = harness.connect()
+        _only(connection_id)
+        harness.sync(connection_id)
+        (connection,) = harness.client.get("/connections/inventory").json()
+        first, other = connection["logins"]
+        assert first["issue"] is None
+        assert other["conn_id"] == OTHER["conn_id"]
+        assert other["issue"] == {"code": "con.auth", "message": "Log in again"}
+
     def test_api_tokens_get_no_ids_or_account_numbers(self, harness: FeedHarness) -> None:
         _ready(harness)
         token = _token(harness, ["read"])
@@ -120,6 +136,89 @@ class TestInventory:
         (login,) = connection["logins"]
         assert login["institution"] == "Demo Bank" and login["conn_id"] is None
         assert connection["protocol_version"] == 1
+
+
+class TestIgnoredFeedAccount:
+    """#560: an unmapped feed account an admin chose not to track."""
+
+    def _ignore(self, harness: FeedHarness, connection_id: str, **body: Any) -> Any:
+        return harness.client.post(f"/connections/{connection_id}/ignore", json=body)
+
+    def test_ignored_account_is_not_reported_as_waiting(self, harness: FeedHarness) -> None:
+        connection_id = _ready(harness)
+        assert _attention_names() == {"Brokerage", "New Card"}
+        resp = self._ignore(harness, connection_id, external_id="ACT-NEW")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"external_id": "ACT-NEW", "ignored": True}
+
+        rows = harness.client.get(f"/connections/{connection_id}/discovered").json()
+        assert {r["external_id"]: r["ignored"] for r in rows} == {
+            "ACT-CHK": False,
+            "ACT-BRK": False,
+            "ACT-NEW": True,
+        }
+        (connection,) = harness.client.get("/connections/inventory").json()
+        new_card = connection["logins"][1]["accounts"][0]
+        assert (new_card["connected"], new_card["ignored"]) == (False, True)
+        assert _attention_names() == {"Brokerage"}  # still stale; the card is by choice
+
+    def test_ignore_is_audited_once_and_reversible(self, harness: FeedHarness) -> None:
+        connection_id = _ready(harness)
+        for _ in range(2):  # a repeat changes nothing and records nothing
+            assert self._ignore(harness, connection_id, external_id="ACT-NEW").status_code == 200
+        assert _audit_actions(connection_id) == ["feed_account.ignore"]
+        resp = self._ignore(harness, connection_id, external_id="ACT-NEW", ignored=False)
+        assert resp.json()["ignored"] is False
+        assert _audit_actions(connection_id) == ["feed_account.ignore", "feed_account.unignore"]
+        assert "New Card" in _attention_names()
+
+    def test_only_a_delivered_unmapped_account_is_ignored(self, harness: FeedHarness) -> None:
+        connection_id = _ready(harness)
+        mapped = self._ignore(harness, connection_id, external_id="ACT-CHK")
+        assert mapped.status_code == 422 and "assets.checking" in mapped.json()["detail"]
+        assert self._ignore(harness, connection_id, external_id="ACT-NONE").status_code == 422
+
+    def test_mapping_an_ignored_account_tracks_it(self, harness: FeedHarness) -> None:
+        connection_id = _ready(harness)
+        self._ignore(harness, connection_id, external_id="ACT-NEW")
+        harness.map_new(connection_id, "ACT-NEW", "liabilities.new_card")
+        rows = harness.client.get(f"/connections/{connection_id}/discovered").json()
+        card = next(r for r in rows if r["external_id"] == "ACT-NEW")
+        assert (card["ignored"], card["mapped_account_path"]) == (False, "liabilities.new_card")
+        with db.get_sessionmaker()() as session:
+            from purser.feed import service
+
+            assert service.ignored_external_ids(session, uuid.UUID(connection_id)) == set()
+
+    def test_ignore_needs_admin(self, harness: FeedHarness) -> None:
+        connection_id = _ready(harness)
+        token = _token(harness, ["read", "write"])
+        resp = harness.client.post(
+            f"/connections/{connection_id}/ignore",
+            json={"external_id": "ACT-NEW"},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 403, resp.text
+
+
+def _attention_names() -> set[str]:
+    with db.get_sessionmaker()() as session:
+        return {a["name"] for a in inventory.feed_status(session)["attention"]}
+
+
+def _audit_actions(connection_id: str) -> list[str]:
+    from sqlalchemy import text
+
+    with db.get_engine().connect() as conn:
+        return list(
+            conn.execute(
+                text(
+                    "SELECT action FROM audit_log WHERE entity_id = :id "
+                    "AND action LIKE 'feed_account.%' ORDER BY at, id"
+                ),
+                {"id": connection_id},
+            ).scalars()
+        )
 
 
 class TestFeedStatusSummary:

@@ -2,7 +2,8 @@
 
 Net worth at time T = sum of postings <= T (cash-flow accounts, incl.
 brokerage cash) + latest holdings snapshot <= T (brokerage market value)
-+ latest valuation <= T (property, loans). Categories never count.
++ latest valuation <= T (loans). A hand-valued asset (property) is a ledger
+whose value is its postings (decision 113). Categories never count.
 Materialized nightly into net_worth_daily.
 """
 
@@ -33,8 +34,16 @@ from purser.models import (
     Valuation,
 )
 
-# Accounts valued by their latest valuation row rather than postings.
-VALUATION_TYPES = {"property", "loan"}
+# Accounts valued by their latest valuation row rather than postings: loans,
+# whose feed reports a balance and nothing else. A hand-valued asset
+# (property) left this set in decision 113: its value is its postings, and a
+# change in value is an entry against equity.revaluation (purser.assets).
+VALUATION_TYPES = {"loan"}
+
+# The newest valuation first: by date, then by when it was recorded, so of two
+# rows on one date the later recorded wins (#565). The id only breaks a tie
+# between rows recorded in the same instant. Every reader orders with this.
+VALUATION_NEWEST_FIRST = (Valuation.as_of.desc(), Valuation.created_at.desc(), Valuation.id.desc())
 
 # The longest window a daily net-worth series spans: ten years. A day not
 # already stored is a full per-account valuation computed live, so the bound
@@ -95,9 +104,16 @@ def ledger_signed_value(account: Account, value: Decimal, convention: str) -> De
 
 def _not_valued(account: Account) -> str:
     """Why ``account`` takes no valuation, and where its balance comes from
-    instead (decision 81). Every reader of valuations reads loan and property
-    accounts only, so a valuation on any other type would be stored, audited
-    and announced, and then never read."""
+    instead (decision 81). Every reader of valuations reads loan accounts
+    only, so a valuation on any other type would be stored, audited and
+    announced, and then never read."""
+    if account.type == "property":
+        return (
+            f"{account.path} is a hand-valued asset: its value is a ledger, changed by "
+            "entries. Record a change (MCP record_value_change, or POST "
+            "/accounts/{id}/value-changes) or its value on a date (MCP reconcile_account, "
+            "or POST /accounts/{id}/reconcile)."
+        )
     if account.type == "brokerage":
         source = (
             "its transactions plus the market value of its latest holdings snapshot, "
@@ -110,7 +126,7 @@ def _not_valued(account: Account) -> str:
         )
     return (
         f"{account.path} is a {account.type} account: valuations apply only to loan "
-        f"and property accounts. Its balance comes from {source}."
+        f"accounts. Its balance comes from {source}."
     )
 
 
@@ -124,8 +140,8 @@ def record_valuation(
     convention: str = CONVENTION_LEDGER,
     actor_token_id: uuid.UUID | None,
 ) -> Valuation:
-    """Record ``account_ref``'s value on ``as_of``. Only a loan or property
-    account takes one (decision 81). ``value`` is in ledger sign unless
+    """Record ``account_ref``'s value on ``as_of``. Only a loan account takes
+    one (decisions 81, 113). ``value`` is in ledger sign unless
     ``convention`` is ``statement`` (decision 71); the stored row, the audit
     entry and the event all carry the ledger-sign figure."""
     account = ledger_service.resolve_account(session, account_ref)
@@ -163,7 +179,7 @@ def list_valuations(session: Session, account_id: uuid.UUID) -> list[Valuation]:
         session.execute(
             select(Valuation)
             .where(Valuation.account_id == account_id)
-            .order_by(Valuation.as_of.desc())
+            .order_by(*VALUATION_NEWEST_FIRST)
         ).scalars()
     )
 
@@ -237,7 +253,7 @@ def _latest_valuation(session: Session, account_id: uuid.UUID, as_of: date_type)
     row = session.execute(
         select(Valuation.value)
         .where(Valuation.account_id == account_id, Valuation.as_of <= as_of)
-        .order_by(Valuation.as_of.desc(), Valuation.id.desc())
+        .order_by(*VALUATION_NEWEST_FIRST)
         .limit(1)
     ).scalar_one_or_none()
     return Decimal(row) if row is not None else None
@@ -250,7 +266,7 @@ def valuation_balances(
 ) -> dict[uuid.UUID, tuple[Decimal, date_type]]:
     """Presentation overlay for account surfaces (DESIGN §8, decision 42):
     the latest valuation at or before ``as_of`` (default the ledger day) per
-    OPEN loan/property account, as {account_id: (value, valuation_as_of)}.
+    OPEN loan account, as {account_id: (value, valuation_as_of)}.
 
     Postings stay the ledger truth — ``ledger.account_balances()`` and the
     running-balance store are untouched (parity probe and close_account
@@ -264,7 +280,7 @@ def valuation_balances(
         .distinct(Valuation.account_id)
         .join(Account, Account.id == Valuation.account_id)
         .where(Account.type.in_(VALUATION_TYPES), Valuation.as_of <= effective)
-        .order_by(Valuation.account_id, Valuation.as_of.desc(), Valuation.id.desc())
+        .order_by(Valuation.account_id, *VALUATION_NEWEST_FIRST)
     )
     if account_ids is not None:
         stmt = stmt.where(Valuation.account_id.in_(account_ids))
@@ -422,7 +438,7 @@ def account_balance_at(
     ``GET /accounts/{id}/balance``, MCP ``account_balance`` and the
     per-account balance series.
 
-    Open loan/property answer with their latest valuation (decision 42); open
+    Open loans answer with their latest valuation (decision 42); open
     brokerage adds its latest holdings market value to the postings basis
     (decision 50); everything else is the stored running balance alone
     (decision 37 register semantics — chain heads, pending included, never
@@ -447,7 +463,7 @@ FROM unnest(CAST(:dates AS date[])) AS d
 LEFT JOIN LATERAL (
     SELECT value, as_of FROM valuations
     WHERE account_id = CAST(:a AS UUID) AND as_of <= d
-    ORDER BY as_of DESC, id DESC LIMIT 1
+    ORDER BY as_of DESC, created_at DESC, id DESC LIMIT 1  -- VALUATION_NEWEST_FIRST
 ) v ON true
 ORDER BY d
 """
@@ -482,7 +498,7 @@ def account_balance_series(
     Branches ONCE on account type rather than per date, because an account
     does not change how it is valued mid-window:
 
-    - loan/property -> the valuations series (``valuation``); the running
+    - loan -> the valuations series (``valuation``); the running
       balance store is not consulted at all
     - brokerage -> the running balance plus that date's holdings market value
       (``postings+holdings``)

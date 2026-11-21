@@ -12,7 +12,7 @@ export const buttonVariants = cva(
         default: "bg-primary text-primary-foreground hover:opacity-90",
         outline: "border border-border bg-card hover:bg-muted",
         ghost: "hover:bg-muted",
-        destructive: "bg-destructive text-primary-foreground hover:opacity-90",
+        destructive: "bg-destructive text-destructive-foreground hover:opacity-90",
       },
       size: {
         default: "h-9 px-4 py-2",
@@ -62,14 +62,14 @@ export function CardTitle({ className, ...props }: React.HTMLAttributes<HTMLHead
 }
 
 const badgeVariants = cva(
-  "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium",
+  "inline-flex items-center whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-medium",
   {
     variants: {
       variant: {
         default: "bg-muted text-muted-foreground",
-        green: "bg-emerald-100 text-emerald-800",
-        amber: "bg-amber-100 text-amber-800",
-        red: "bg-red-100 text-red-800",
+        green: "bg-success-soft text-success",
+        amber: "bg-warning-soft text-warning",
+        red: "bg-destructive-soft text-destructive",
       },
     },
     defaultVariants: { variant: "default" },
@@ -86,7 +86,7 @@ export function Badge({
 
 export function Table({ className, ...props }: React.TableHTMLAttributes<HTMLTableElement>) {
   return (
-    <div className="min-w-0 max-w-full overflow-x-auto">
+    <div className="relative min-w-0 max-w-full overflow-x-auto">
       <table className={cn("w-full text-sm", className)} {...props} />
     </div>
   );

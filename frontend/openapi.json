@@ -3,6 +3,55 @@
     "schemas": {
       "AccountCreate": {
         "properties": {
+          "acquired_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A hand-valued asset only: when it was acquired.",
+            "title": "Acquired On"
+          },
+          "asset_description": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A hand-valued asset only: an address, a VIN, a note (stored encrypted).",
+            "title": "Asset Description"
+          },
+          "asset_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "house",
+                  "land",
+                  "car",
+                  "boat",
+                  "rv",
+                  "jewelry",
+                  "art",
+                  "equipment",
+                  "other"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A hand-valued asset (type property) only: what it is, a label and an icon (default `other`).",
+            "title": "Asset Kind"
+          },
           "currency": {
             "default": "USD",
             "maxLength": 3,
@@ -74,6 +123,20 @@
             ],
             "title": "Path"
           },
+          "revalue_after_days": {
+            "anyOf": [
+              {
+                "maximum": 3650.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A hand-valued asset only: how many days its value may go without an update before Purser calls it stale (`asset.stale`, `whats_new`).",
+            "title": "Revalue After Days"
+          },
           "type": {
             "title": "Type",
             "type": "string"
@@ -88,6 +151,16 @@
       },
       "AccountDetailOut": {
         "properties": {
+          "asset": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AssetOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "balance": {
             "anyOf": [
               {
@@ -184,6 +257,17 @@
             ],
             "title": "Drift Basis Override"
           },
+          "equity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Equity"
+          },
           "external_id": {
             "anyOf": [
               {
@@ -311,6 +395,27 @@
               }
             ]
           },
+          "secured_by_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secured By Id"
+          },
+          "secured_loan_ids": {
+            "default": [],
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Secured Loan Ids",
+            "type": "array"
+          },
           "type": {
             "title": "Type",
             "type": "string"
@@ -362,6 +467,16 @@
       },
       "AccountOut": {
         "properties": {
+          "asset": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AssetOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "balance": {
             "anyOf": [
               {
@@ -455,6 +570,17 @@
             ],
             "title": "Drift Basis Override"
           },
+          "equity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Equity"
+          },
           "external_id": {
             "anyOf": [
               {
@@ -582,6 +708,27 @@
               }
             ]
           },
+          "secured_by_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Secured By Id"
+          },
+          "secured_loan_ids": {
+            "default": [],
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Secured Loan Ids",
+            "type": "array"
+          },
           "type": {
             "title": "Type",
             "type": "string"
@@ -609,6 +756,55 @@
       "AccountUpdate": {
         "description": "Rename / re-describe / hide / move a real account (DESIGN \u00a73.4).\n``hidden`` toggles the display-only ``hidden_at`` timestamp; ``path``\nmoves the account and everything beneath it (decision 72).\n\n``feed_start`` (\u00a77.1, decision 40) is admin-only: explicit null clears,\nabsent leaves unchanged (model_fields_set distinguishes the two).\n``feed_invert`` (\u00a77.1, decision 43) is admin-only feed configuration\ntoo; a plain bool, so absent/None simply leaves it unchanged.\n``drift_basis_override`` (\u00a77.3, decision 83) is admin-only as well, with\n``feed_start``'s explicit-null-clears rule. ``holdings_source`` (\u00a78,\ndecision 88) and ``feed_balance_is_cash`` (\u00a77.3, decision 103) are\nadmin-only too; absent/None leaves them unchanged. ``min_balance`` (\u00a73.4,\n#466) is write scope, with the explicit-null-clears rule.",
         "properties": {
+          "acquired_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A hand-valued asset only: when it was acquired. An explicit null clears it; absent leaves it unchanged.",
+            "title": "Acquired On"
+          },
+          "asset_description": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A hand-valued asset only: an address, a VIN, a note (stored encrypted). An explicit null clears it; absent leaves it unchanged.",
+            "title": "Asset Description"
+          },
+          "asset_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "house",
+                  "land",
+                  "car",
+                  "boat",
+                  "rv",
+                  "jewelry",
+                  "art",
+                  "equipment",
+                  "other"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A hand-valued asset (type property) only: what it is, a label and an icon. Absent leaves it unchanged. Write scope.",
+            "title": "Asset Kind"
+          },
           "description": {
             "anyOf": [
               {
@@ -736,6 +932,33 @@
             ],
             "description": "Move the account to this ltree path, e.g. `liabilities.citicard`. Accounts beneath it move along and keep their relative paths. Refused with 409 when an account already sits at or under the new path, and with 422 for a malformed path or a destination under a category root such as `expenses`. Categories keep their paths.",
             "title": "Path"
+          },
+          "revalue_after_days": {
+            "anyOf": [
+              {
+                "maximum": 3650.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A hand-valued asset only: how many days its value may go without an update before Purser calls it stale (`asset.stale`, `whats_new`). An explicit null turns the reminder off; absent leaves it unchanged.",
+            "title": "Revalue After Days"
+          },
+          "secured_by_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A loan only: the hand-valued asset that secures it (a mortgage's house, a car loan's car); the asset then reports its equity. An explicit null clears it; absent leaves it unchanged. Write scope.",
+            "title": "Secured By Id"
           }
         },
         "title": "AccountUpdate",
@@ -1055,6 +1278,106 @@
           }
         },
         "title": "ApplyHistory",
+        "type": "object"
+      },
+      "AssetOut": {
+        "description": "What a hand-valued asset (type property) is (#567).",
+        "properties": {
+          "acquired_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Acquired On"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "gain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gain"
+          },
+          "kind": {
+            "enum": [
+              "house",
+              "land",
+              "car",
+              "boat",
+              "rv",
+              "jewelry",
+              "art",
+              "equipment",
+              "other"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "last_valued": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Valued"
+          },
+          "money_put_in": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Money Put In"
+          },
+          "revalue_after_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revalue After Days"
+          },
+          "stale": {
+            "default": false,
+            "title": "Stale",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "kind",
+          "acquired_on",
+          "description"
+        ],
+        "title": "AssetOut",
         "type": "object"
       },
       "AuditIdentity": {
@@ -2121,7 +2444,7 @@
         "type": "object"
       },
       "BalanceAsOf": {
-        "description": "Point-in-time balance from the stored running-balance table\n(decision 37: chain-head pending+posted register semantics), or the\nlatest valuation for open loan/property accounts (decision 42).",
+        "description": "Point-in-time balance from the stored running-balance table\n(decision 37: chain-head pending+posted register semantics), or the\nlatest valuation for open loan accounts (decision 42).",
         "properties": {
           "account_id": {
             "format": "uuid",
@@ -4338,6 +4661,11 @@
             "title": "External Id",
             "type": "string"
           },
+          "ignored": {
+            "default": false,
+            "title": "Ignored",
+            "type": "boolean"
+          },
           "ledger_balance": {
             "anyOf": [
               {
@@ -4405,6 +4733,85 @@
           "mapped_account_path"
         ],
         "title": "DiscoveredOut",
+        "type": "object"
+      },
+      "DisposalOut": {
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "as_of": {
+            "format": "date",
+            "title": "As Of",
+            "type": "string"
+          },
+          "closing_change": {
+            "title": "Closing Change",
+            "type": "string"
+          },
+          "dry_run": {
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "gain": {
+            "title": "Gain",
+            "type": "string"
+          },
+          "money_put_in": {
+            "title": "Money Put In",
+            "type": "string"
+          },
+          "value_before": {
+            "title": "Value Before",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "as_of",
+          "value_before",
+          "closing_change",
+          "gain",
+          "money_put_in",
+          "dry_run"
+        ],
+        "title": "DisposalOut",
+        "type": "object"
+      },
+      "DisposeRequest": {
+        "properties": {
+          "as_of": {
+            "description": "The sale (or disposal) date: today or earlier, and on or after the asset's latest entry.",
+            "format": "date",
+            "title": "As Of",
+            "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "description": "Answer the same, writing nothing.",
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What happened (sold, traded in, written off); kept on the closing entry.",
+            "title": "Note"
+          }
+        },
+        "required": [
+          "as_of"
+        ],
+        "title": "DisposeRequest",
         "type": "object"
       },
       "DispositionOut": {
@@ -5460,6 +5867,42 @@
         "title": "HoldingOut",
         "type": "object"
       },
+      "IgnoreOut": {
+        "properties": {
+          "external_id": {
+            "title": "External Id",
+            "type": "string"
+          },
+          "ignored": {
+            "title": "Ignored",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "external_id",
+          "ignored"
+        ],
+        "title": "IgnoreOut",
+        "type": "object"
+      },
+      "IgnoreRequest": {
+        "properties": {
+          "external_id": {
+            "title": "External Id",
+            "type": "string"
+          },
+          "ignored": {
+            "default": true,
+            "title": "Ignored",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "external_id"
+        ],
+        "title": "IgnoreRequest",
+        "type": "object"
+      },
       "ImportCounts": {
         "description": "Per-file-account disposition of rows (DESIGN \u00a77.2). The preview counts for\na request equal the commit's per-account results for the same request.\n``in_file`` is the sum of the other buckets, ``uncleared`` excepted;\n``skipped_scheduled`` counts Quicken reminder rows (not history, never\nimported); ``skipped_investment`` counts QIF ``!Type:Invst`` records\n(investment actions, never bank rows; decision 84); ``promoted`` counts\nrows that posted an ``expected`` row an earlier import left, because the\nfile now marks them cleared (per leg for a transfer); ``uncleared`` is the\nsubset of the created rows that land ``expected`` because the file marks\nthem uncleared (decision 60). ``split_transfers`` (QIF ``S[Account]``\nlines carved out of split rows as transfers) and ``split_remainders``\n(split rows whose lines left part of the amount unexplained, booked to\nthe uncategorized placeholder) are sub-counts too (decision 87).",
         "properties": {
@@ -5955,6 +6398,11 @@
           "holdings": {
             "title": "Holdings",
             "type": "integer"
+          },
+          "ignored": {
+            "default": false,
+            "title": "Ignored",
+            "type": "boolean"
           },
           "issue": {
             "anyOf": [
@@ -8943,6 +9391,19 @@
             "title": "Dry Run",
             "type": "boolean"
           },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the figure came from (a statement, an appraisal, an estimate). Kept on the adjustment row (encrypted) and the audit entry.",
+            "title": "Note"
+          },
           "statement_balance": {
             "anyOf": [
               {
@@ -8952,7 +9413,7 @@
                 "type": "string"
               }
             ],
-            "description": "The balance AS THE STATEMENT SHOWS IT. Checking, savings and cash: positive = money in the account. Credit card: positive = the amount owed (a credit balance is negative). Purser converts it to ledger sign, where a card is negative when owed.",
+            "description": "The balance AS THE STATEMENT SHOWS IT. Checking, savings and cash: positive = money in the account. Credit card: positive = the amount owed (a credit balance is negative). Purser converts it to ledger sign, where a card is negative when owed. A hand-valued asset (property): its value on as_of.",
             "title": "Statement Balance"
           }
         },
@@ -10272,9 +10733,30 @@
             ],
             "title": "Estimate Basis"
           },
+          "memo": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "free-text note",
+            "title": "Memo"
+          },
           "name": {
-            "title": "Name",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "deprecated (#534): send payee and memo. Without a memo it is split: a transfer's memo, a flat schedule's payee when none is sent, else its memo",
+            "title": "Name"
           },
           "note": {
             "anyOf": [
@@ -10298,6 +10780,7 @@
                 "type": "null"
               }
             ],
+            "description": "who is paid or pays; required for a flat schedule without a memo",
             "title": "Payee"
           },
           "propose": {
@@ -10313,7 +10796,6 @@
           }
         },
         "required": [
-          "name",
           "account",
           "rrule"
         ],
@@ -10432,7 +10914,20 @@
             "title": "Matched Instances",
             "type": "array"
           },
+          "memo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "free-text note (#534)",
+            "title": "Memo"
+          },
           "name": {
+            "description": "the label, derived: the memo, else the payee, else the transfer counterparty account's name; written as each instance's description",
             "title": "Name",
             "type": "string"
           },
@@ -10447,6 +10942,18 @@
               }
             ],
             "title": "Next Due"
+          },
+          "payee": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "who is paid or pays (#534)",
+            "title": "Payee"
           },
           "rrule": {
             "title": "Rrule",
@@ -10578,7 +11085,20 @@
             "title": "Id",
             "type": "string"
           },
+          "memo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "free-text note (#534)",
+            "title": "Memo"
+          },
           "name": {
+            "description": "the label, derived: the memo, else the payee, else the transfer counterparty account's name; written as each instance's description",
             "title": "Name",
             "type": "string"
           },
@@ -10593,6 +11113,18 @@
               }
             ],
             "title": "Next Due"
+          },
+          "payee": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "who is paid or pays (#534)",
+            "title": "Payee"
           },
           "rrule": {
             "title": "Rrule",
@@ -10740,6 +11272,19 @@
             ],
             "title": "Estimate Basis"
           },
+          "memo": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "\"\" clears it",
+            "title": "Memo"
+          },
           "name": {
             "anyOf": [
               {
@@ -10749,6 +11294,7 @@
                 "type": "null"
               }
             ],
+            "description": "deprecated (#534): send payee and memo",
             "title": "Name"
           },
           "payee": {
@@ -10760,6 +11306,7 @@
                 "type": "null"
               }
             ],
+            "description": "\"\" clears it (a memo must remain)",
             "title": "Payee"
           },
           "rrule": {
@@ -11873,7 +12420,7 @@
       },
       "SyncSchedule": {
         "additionalProperties": false,
-        "description": "User-facing SimpleFIN sync schedule (UTC).\n\nPresets rather than raw cron. ``hour``/``minute`` apply to ``daily`` only;\nthe interval presets are anchored so every choice lands a fresh sync just\nbefore the 06:45 UTC matching job, and ``hourly`` (24 runs/day) sits\nexactly at the SimpleFIN Bridge budget \u2014 the per-connection fetch guard\nfails soft beyond it.",
+        "description": "User-facing SimpleFIN sync schedule.\n\nPresets rather than raw cron. ``hour``/``minute`` apply to ``daily`` only\nand are a wall-clock time in the household time zone (``timezone``,\ndecision 111): the scheduler reads the daily trigger in that zone, so the\nsync keeps its time on the clock across daylight-saving changes. The\ninterval presets stay anchored in UTC so every one lands a fresh sync just\nbefore the 06:45 UTC matching job, and ``hourly`` (24 runs/day) sits\nexactly at the SimpleFIN Bridge budget \u2014 the per-connection fetch guard\nfails soft beyond it.",
         "properties": {
           "hour": {
             "anyOf": [
@@ -11886,6 +12433,7 @@
                 "type": "null"
               }
             ],
+            "description": "Daily only: the hour in the household time zone.",
             "title": "Hour"
           },
           "minute": {
@@ -11899,6 +12447,7 @@
                 "type": "null"
               }
             ],
+            "description": "Daily only: the minute in the household time zone.",
             "title": "Minute"
           },
           "preset": {
@@ -12374,6 +12923,11 @@
             "title": "Is Transfer",
             "type": "boolean"
           },
+          "money_put_in": {
+            "default": false,
+            "title": "Money Put In",
+            "type": "boolean"
+          },
           "needs_review": {
             "description": "true when the row is in the unreviewed set (#175): the same test as GET /transactions?reviewed=false and the review count",
             "title": "Needs Review",
@@ -12502,6 +13056,11 @@
               }
             ],
             "title": "Transfer Account Path"
+          },
+          "value_change": {
+            "default": false,
+            "title": "Value Change",
+            "type": "boolean"
           }
         },
         "required": [
@@ -12633,6 +13192,11 @@
             "title": "Is Transfer",
             "type": "boolean"
           },
+          "money_put_in": {
+            "default": false,
+            "title": "Money Put In",
+            "type": "boolean"
+          },
           "needs_review": {
             "description": "true when the row is in the unreviewed set (#175): the same test as GET /transactions?reviewed=false and the review count",
             "title": "Needs Review",
@@ -12718,6 +13282,11 @@
               }
             ],
             "title": "Transfer Account Path"
+          },
+          "value_change": {
+            "default": false,
+            "title": "Value Change",
+            "type": "boolean"
           }
         },
         "required": [
@@ -13417,7 +13986,7 @@
           },
           "convention": {
             "default": "ledger",
-            "description": "How `value`'s sign reads. `ledger` (default): as Purser stores it, a loan negative when owed. `statement`: as the statement prints it, a loan POSITIVE when owed (a credit balance is negative); Purser negates it into ledger sign, the same conversion reconciliation applies. A property reads the same either way.",
+            "description": "How `value`'s sign reads. `ledger` (default): as Purser stores it, a loan negative when owed. `statement`: as the statement prints it, a loan POSITIVE when owed (a credit balance is negative); Purser negates it into ledger sign, the same conversion reconciliation applies.",
             "enum": [
               "ledger",
               "statement"
@@ -13439,7 +14008,7 @@
                 "type": "string"
               }
             ],
-            "description": "The account's value on as_of, in ledger sign unless `convention` says otherwise: a property is positive, a loan is NEGATIVE while money is owed. A positive value on a loan is rejected (422) rather than recorded as an asset.",
+            "description": "The account's value on as_of, in ledger sign unless `convention` says otherwise: a loan is NEGATIVE while money is owed. A positive value on a loan is rejected (422) rather than recorded as an asset.",
             "title": "Value"
           }
         },
@@ -13484,6 +14053,125 @@
           "source"
         ],
         "title": "ValuationOut",
+        "type": "object"
+      },
+      "ValueChangeCreate": {
+        "properties": {
+          "amount": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "description": "The change, signed: positive when the asset gained value, negative when it lost value. Nonzero.",
+            "title": "Amount"
+          },
+          "as_of": {
+            "description": "The day the value changed: today (household time zone) or earlier. A backdated change moves every balance after it, like any transaction.",
+            "format": "date",
+            "title": "As Of",
+            "type": "string"
+          },
+          "kind": {
+            "default": "revaluation",
+            "description": "`revaluation` (default): a change in the asset's market value, against the system account `equity.revaluation`. `capital`: money put into the asset that no tracked account paid \u2014 its purchase before your history, an improvement paid in cash \u2014 against `equity.capital`, so it never counts as a gain. (Money paid from a tracked account is a transfer to the asset instead.)",
+            "enum": [
+              "revaluation",
+              "capital"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the figure came from (an appraisal, an estimate). Stored encrypted as the entry's description.",
+            "title": "Note"
+          },
+          "reference": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional identifier that makes a retry safe: a repeated reference on the account posts nothing and answers with the first change (200, `created: false`). Letters, digits, '.', '_', ':' and '-' only (stored in plaintext).",
+            "title": "Reference"
+          }
+        },
+        "required": [
+          "as_of",
+          "amount"
+        ],
+        "title": "ValueChangeCreate",
+        "type": "object"
+      },
+      "ValueChangeOut": {
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "amount": {
+            "title": "Amount",
+            "type": "string"
+          },
+          "as_of": {
+            "format": "date",
+            "title": "As Of",
+            "type": "string"
+          },
+          "balance": {
+            "title": "Balance",
+            "type": "string"
+          },
+          "created": {
+            "title": "Created",
+            "type": "boolean"
+          },
+          "kind": {
+            "enum": [
+              "revaluation",
+              "capital"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "reversed": {
+            "title": "Reversed",
+            "type": "boolean"
+          },
+          "transaction_id": {
+            "format": "uuid",
+            "title": "Transaction Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transaction_id",
+          "account_id",
+          "as_of",
+          "amount",
+          "kind",
+          "created",
+          "reversed",
+          "balance"
+        ],
+        "title": "ValueChangeOut",
         "type": "object"
       },
       "VarianceOut": {
@@ -13907,7 +14595,7 @@
     },
     "summary": "The privately hosted finance back-end, designed for use by your personal AI Agent.",
     "title": "Purser",
-    "version": "2026.11.2"
+    "version": "2026.11.3"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -14254,7 +14942,7 @@
     },
     "/accounts/{account_id}/balance": {
       "get": {
-        "description": "Balance at end of ``as_of``. Open loan/property accounts answer with\ntheir latest valuation at or before that date (decision 42); open\nbrokerage accounts add their latest holdings market value on top of the\npostings basis (decision 50); everything else answers from the stored\nrunning balances (decision 37), never recomputed. 0 before first\nactivity; closed accounts answer for their whole history. ``bank_snapshot``\nis the latest archived bank report, not a historical snapshot at ``as_of``;\nits comparison uses live postings over all recorded dates.",
+        "description": "Balance at end of ``as_of``. Open loan accounts answer with\ntheir latest valuation at or before that date (decision 42); open\nbrokerage accounts add their latest holdings market value on top of the\npostings basis (decision 50); everything else answers from the stored\nrunning balances (decision 37), never recomputed. 0 before first\nactivity; closed accounts answer for their whole history. ``bank_snapshot``\nis the latest archived bank report, not a historical snapshot at ``as_of``;\nits comparison uses live postings over all recorded dates.",
         "operationId": "balance_as_of_accounts__account_id__balance_get",
         "parameters": [
           {
@@ -14531,6 +15219,60 @@
         ]
       }
     },
+    "/accounts/{account_id}/dispose": {
+      "post": {
+        "description": "Sell, trade in or write off a hand-valued asset. Record the sale's money\nfirst, as transfers out of the asset dated on or before `as_of` (the\nproceeds deposit, a loan payoff). What is then left on the asset is the\nrest of its change in value \u2014 a gain or a loss at sale, or its whole value\nfor a write-off \u2014 and is posted against `equity.revaluation` on `as_of`;\nthe account closes at zero. `dry_run` shows the figures first.",
+        "operationId": "dispose_asset_accounts__account_id__dispose_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DisposeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DisposalOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dispose Asset",
+        "tags": [
+          "assets"
+        ]
+      }
+    },
     "/accounts/{account_id}/lot-captures": {
       "post": {
         "description": "Bulk, idempotent lot input: a broker's lot list as of a day. A dry run\n(the default) returns the plan and its `plan_hash`; commit with\n`dry_run: false` and `expect_hash`. A commit whose state changed since\nthe preview is 409 `preview_stale`; one with conflicts is 409\n`capture_conflicts` unless `skip_conflicts` (then a symbol with any\nconflict is left out whole). The exact request again is a no-op\n(`retry`); the same holdings observed later record freshness only\n(`repeat_of`). A lower remaining quantity, an increase, a lot missing\nfrom a complete capture, a differing basis, an ambiguous identity or an\nolder capture is a conflict, never a sale, a deletion or an edit.",
@@ -14771,7 +15513,7 @@
     },
     "/accounts/{account_id}/reconcile": {
       "post": {
-        "description": "Reconcile a checking, savings, cash or credit-card account to a statement\nbalance, or explicitly reconcile only a manual brokerage account's cash\nwith ``component=\"cash\"``. Never pass total brokerage value as cash.\nHoldings, awards and prices are unchanged; readbacks identify the component.\n\nPurser compares the statement figure with its own balance on ``as_of`` in\nthe chosen ``basis`` and posts ONE adjustment for the difference, dated\n``as_of``, to the system category ``expenses.reconciliation_adjustments``.\nThe adjustment lands in the review set so a person sees it. When the ledger\nalready matches, nothing is posted and the clean reconcile is still\nrecorded. Either way ``reconciled_through`` advances and an\n``account.reconciled`` event is emitted.\n\nSafe to retry: the same date, balance and basis returns ``created: false``\nwhile the ledger still matches, and 409 ``reconciliation_moved`` with the\ndifference once a backdated change has moved it. ``GET /accounts/{id}``\nand ``GET /accounts/{id}/reconciliations`` re-check recorded\nreconciliations the same way on every read.",
+        "description": "Reconcile a checking, savings, cash or credit-card account to a statement\nbalance, or explicitly reconcile only a manual brokerage account's cash\nwith ``component=\"cash\"``. Never pass total brokerage value as cash.\nHoldings, awards and prices are unchanged; readbacks identify the component.\n\nA hand-valued asset (type ``property``) reconciles to its value on\n``as_of``: the difference posts against the system account\n``equity.revaluation`` as a change in value (decision 113).\n\nPurser compares the statement figure with its own balance on ``as_of`` in\nthe chosen ``basis`` and posts ONE adjustment for the difference, dated\n``as_of``, to the system category ``expenses.reconciliation_adjustments``.\nThe adjustment lands in the review set so a person sees it. When the ledger\nalready matches, nothing is posted and the clean reconcile is still\nrecorded. Either way ``reconciled_through`` advances and an\n``account.reconciled`` event is emitted.\n\nSafe to retry: the same date, balance and basis returns ``created: false``\nwhile the ledger still matches, and 409 ``reconciliation_moved`` with the\ndifference once a backdated change has moved it. ``GET /accounts/{id}``\nand ``GET /accounts/{id}/reconciliations`` re-check recorded\nreconciliations the same way on every read.",
         "operationId": "reconcile_account_accounts__account_id__reconcile_post",
         "parameters": [
           {
@@ -14977,7 +15719,7 @@
         ]
       },
       "post": {
-        "description": "Record a loan or property account's value on a date: the balance it\nreports (its latest valuation replaces the postings sum). Any other\naccount type is refused (422): its balance comes from its transactions,\nplus holdings for a brokerage account. The answer's `value` is in ledger\nsign whichever `convention` the request used.",
+        "description": "Record a loan account's value on a date: the balance it reports (its\nlatest valuation replaces the postings sum). Any other account type is\nrefused (422): its balance comes from its transactions, plus holdings for\na brokerage account. A hand-valued asset (type property) is a ledger:\n`POST /accounts/{id}/value-changes` or `POST /accounts/{id}/reconcile`.\nThe answer's `value` is in ledger sign whichever `convention` the request\nused.",
         "operationId": "create_valuation_accounts__account_id__valuations_post",
         "parameters": [
           {
@@ -15026,6 +15768,63 @@
         "summary": "Create Valuation",
         "tags": [
           "valuations"
+        ]
+      }
+    },
+    "/accounts/{account_id}/value-changes": {
+      "post": {
+        "description": "Record a change in a hand-valued asset's value (type `property`): one\nposted entry dated `as_of` between the asset and the system account\n`equity.revaluation`, so net worth moves and spending reports do not. To\nset the value on a date instead (\"worth X\"), use `POST\n/accounts/{id}/reconcile`. A wrong change is undone with `POST\n/value-changes/{transaction_id}/reverse`.",
+        "operationId": "record_value_change_accounts__account_id__value_changes_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValueChangeCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A repeated reference: the first change, nothing posted."
+          },
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValueChangeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Record Value Change",
+        "tags": [
+          "assets"
         ]
       }
     },
@@ -16985,6 +17784,60 @@
           }
         },
         "summary": "Discovered Accounts",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/connections/{connection_id}/ignore": {
+      "post": {
+        "description": "Ignore an unmapped feed account (the same account delivered through a\nsecond bank login, or one that does not belong in the ledger), or track\nit again with ``ignored: false``. An ignored account is not reported as\nwaiting to be mapped; nothing is imported or removed.",
+        "operationId": "ignore_account_connections__connection_id__ignore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "connection_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Connection Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IgnoreRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IgnoreOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ignore Account",
         "tags": [
           "connections"
         ]
@@ -19854,7 +20707,7 @@
         ]
       },
       "patch": {
-        "description": "Edit the rule. Live un-pinned instances follow (slots the new rule no\nlonger produces are voided and released, amounts re-estimated, missing\nslots materialized); pinned instances keep their amounts and dates. A new\n`name` or `payee` relabels every live instance \u2014 pinned ones too \u2014 whose\ndescription or payee still equals the old one; labels you changed stay.",
+        "description": "Edit the rule. Live un-pinned instances follow (slots the new rule no\nlonger produces are voided and released, amounts re-estimated, missing\nslots materialized); pinned instances keep their amounts and dates. A new\n`payee` or `memo` relabels every live instance \u2014 pinned ones too \u2014 whose\ndescription or payee still equals the old one; labels you changed stay.",
         "operationId": "update_schedule_schedules__schedule_id__patch",
         "parameters": [
           {
@@ -21464,6 +22317,50 @@
         "summary": "Unlink User Oidc",
         "tags": [
           "users"
+        ]
+      }
+    },
+    "/value-changes/{transaction_id}/reverse": {
+      "post": {
+        "description": "Undo a change in an asset's value \u2014 one recorded here or posted by a\nreconcile \u2014 through the ledger's reversal pair. The answer's\n`transaction_id` is the zero replacement that records the undo; `amount`\nis the change it took back.",
+        "operationId": "reverse_value_change_value_changes__transaction_id__reverse_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transaction_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Transaction Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValueChangeOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reverse Value Change",
+        "tags": [
+          "assets"
         ]
       }
     },

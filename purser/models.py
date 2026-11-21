@@ -169,6 +169,21 @@ class Connection(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
 
 
+class IgnoredFeedAccount(Base):
+    """A feed account an admin chose not to track (#560, decision 112): the
+    same account delivered through a second bank login, or one that does not
+    belong in the ledger. It stays unmapped and is no longer reported as
+    waiting to be mapped. Mapping it removes the row."""
+
+    __tablename__ = "ignored_feed_accounts"
+
+    connection_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("connections.id", ondelete="CASCADE"), primary_key=True
+    )
+    external_id: Mapped[str] = mapped_column(primary_key=True)
+    ignored_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
 class RawFetch(Base):
     """APPEND-ONLY (trigger-enforced). Never UPDATE or DELETE through this
     model — there is deliberately no code path that mutates it.
@@ -228,7 +243,12 @@ class Schedule(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         primary_key=True, server_default=text("gen_random_uuid()")
     )
+    # The schedule's label (#534): derived, never entered — the memo, else the
+    # payee, else (a transfer) the counterparty account's name. It is what the
+    # rule writes as its instances' description.
     name: Mapped[str] = mapped_column("name_enc", EncryptedText)
+    # Free-text note (#534), encrypted like every narrative field.
+    memo: Mapped[str | None] = mapped_column("memo_enc", EncryptedText)
     account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id"))
     payee_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("payees.id"))
     category_path: Mapped[str | None] = mapped_column(LtreeType)
@@ -257,6 +277,8 @@ class Schedule(Base):
     status: Mapped[str] = mapped_column(server_default="active")
     ended_at: Mapped[datetime | None]
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+    payee: Mapped["Payee | None"] = relationship()
 
 
 class Suggestion(Base):
@@ -646,6 +668,9 @@ class Valuation(Base):
     as_of: Mapped[date]
     value: Mapped[Decimal] = mapped_column(Numeric(20, 4))
     source: Mapped[str]
+    # When the row was recorded: clock_timestamp(), not now(), so two rows
+    # written in one transaction keep their order (#565).
+    created_at: Mapped[datetime] = mapped_column(server_default=text("clock_timestamp()"))
 
 
 class NetWorthDaily(Base):
@@ -782,6 +807,10 @@ class Account(Base):
     # account row lock with account_reconciliations. Never shown without the
     # live in-balance check of that reconciliation (purser.reconciliation).
     reconciled_through: Mapped[date | None]
+    # A loan secured by a hand-valued asset (a mortgage on a house, a car
+    # loan; #567): the asset's equity is its value plus the loans pointing at
+    # it (ledger sign). Loans only, pointing at a property account (service).
+    secured_by_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("accounts.id"))
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
 
 
@@ -804,6 +833,44 @@ class AccountReconciliation(Base):
     adjustment: Mapped[Decimal] = mapped_column(Numeric(20, 4))
     adjustment_tx_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("transactions.id"))
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("api_tokens.id"))
+    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
+class AssetDetails(Base):
+    """What a hand-valued asset is (#567): one row per property account.
+    ``kind`` is a label and an icon, nothing more; ``description`` (an
+    address, a VIN, a note) is narrative and encrypted."""
+
+    __tablename__ = "asset_details"
+
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    kind: Mapped[str] = mapped_column(server_default="other")
+    acquired_on: Mapped[date | None]
+    description: Mapped[str | None] = mapped_column("description_enc", EncryptedText)
+    # How old the asset's value may get before the daily check calls it stale
+    # (#568); NULL = never.
+    revalue_after_days: Mapped[int | None]
+    updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
+class AssetValueChange(Base):
+    """A change in a hand-valued asset's value recorded through the value-change
+    path (#566, decision 113), with the caller's optional ``reference``: a
+    repeated reference on the account answers with the first change and posts
+    nothing. The change itself is the transaction (asset vs equity.revaluation);
+    this row only carries the reference. Targets (reconcile) are recorded in
+    account_reconciliations instead."""
+
+    __tablename__ = "asset_value_changes"
+    __table_args__ = (UniqueConstraint("account_id", "reference"),)
+
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("transactions.id", ondelete="CASCADE"), primary_key=True
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id"))
+    reference: Mapped[str | None]
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
 
 

@@ -1,34 +1,14 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, errorDetail } from "../lib/api";
-import { fmtAmount } from "../lib/utils";
+import { formatMoney } from "../lib/money";
+import { formatDate } from "../lib/dates";
+import { useLedgerToday } from "../lib/clock";
 import { Badge, Button, Card, CardTitle, ErrorText, Input, Table, Td, Th } from "../components/ui";
+import { QueryState } from "../components/QueryState";
 import type { components } from "../api/schema";
 
 type PositionOut = components["schemas"]["PositionOut"];
-
-/** Today in the browser's zone: only a stand-in until GET /clock answers. */
-export function localToday(): string {
-  const d = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
-
-/** The server's "today" (issue #471, decision 105): the household time zone
- * decides it, not UTC or the browser, and the server refuses an event or an
- * opening count dated after it. */
-export function useLedgerToday(): string {
-  const clock = useQuery({
-    queryKey: ["clock"],
-    queryFn: async () => {
-      const { data, error } = await api.GET("/clock");
-      if (error) throw new Error(errorDetail(error));
-      return data;
-    },
-    staleTime: 60_000,
-  });
-  return clock.data?.ledger_today ?? localToday();
-}
 
 /** A quantity or price without trailing zeros, as a string (no float). */
 export function fmtQuantity(value: string | null | undefined): string {
@@ -39,7 +19,14 @@ export function fmtQuantity(value: string | null | undefined): string {
 /** The Positions tab of a brokerage account whose holdings are tracked by
  * hand (issue #390, decision 88): each position valued at the newest close,
  * an inline quantity editor (a `set_quantity` event), and "+ position". */
-export default function PositionsPanel({ accountId }: { accountId: string }) {
+export default function PositionsPanel({
+  accountId,
+  currency,
+}: {
+  accountId: string;
+  /** The account's currency, which its positions are valued in. */
+  currency?: string | null;
+}) {
   const qc = useQueryClient();
   const [adding, setAdding] = useState(false);
   const positions = useQuery({
@@ -56,7 +43,6 @@ export default function PositionsPanel({ accountId }: { accountId: string }) {
     qc.invalidateQueries({ queryKey: ["positions", accountId] });
     qc.invalidateQueries({ queryKey: ["account", accountId] });
   };
-  const rows = positions.data ?? [];
 
   return (
     <Card>
@@ -78,32 +64,34 @@ export default function PositionsPanel({ accountId }: { accountId: string }) {
           onCancel={() => setAdding(false)}
         />
       )}
-      <Table>
-        <thead>
-          <tr>
-            <Th>Symbol</Th>
-            <Th className="text-right">Quantity</Th>
-            <Th className="text-right">Price</Th>
-            <Th className="text-right">Value</Th>
-            <Th className="text-right">Gain</Th>
-            <Th>Actions</Th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((p) => (
-            <PositionRow key={p.id} p={p} onChange={refresh} />
-          ))}
-        </tbody>
-      </Table>
-      {positions.error && <ErrorText>{positions.error.message}</ErrorText>}
-      {positions.data && rows.length === 0 && (
-        <p className="mt-2 text-sm text-muted-foreground">
-          No positions yet. Add one with + position.
-        </p>
-      )}
+      <QueryState
+        query={positions}
+        what="positions"
+        empty="No positions yet. Add one with + position."
+      >
+        {(rows) => (
+          <Table>
+            <thead>
+              <tr>
+                <Th>Symbol</Th>
+                <Th className="text-right">Quantity</Th>
+                <Th className="text-right">Price</Th>
+                <Th className="text-right">Value</Th>
+                <Th className="text-right">Gain</Th>
+                <Th>Actions</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((p) => (
+                <PositionRow key={p.id} p={p} currency={currency} onChange={refresh} />
+              ))}
+            </tbody>
+          </Table>
+        )}
+      </QueryState>
       <p className="mt-3 text-xs text-muted-foreground">
         Each position is valued at the newest close for its symbol: a price you record, the
-        daily provider fetch (Config, Prices), or a price implied by a feed snapshot of the
+        daily provider fetch (Settings, Prices), or a price implied by a feed snapshot of the
         same symbol. A position with no price yet adds nothing to the balance, and neither does
         one whose value at its close is too large to store: check its share count.
       </p>
@@ -111,7 +99,15 @@ export default function PositionsPanel({ accountId }: { accountId: string }) {
   );
 }
 
-function PositionRow({ p, onChange }: { p: PositionOut; onChange: () => void }) {
+function PositionRow({
+  p,
+  currency,
+  onChange,
+}: {
+  p: PositionOut;
+  currency?: string | null;
+  onChange: () => void;
+}) {
   const [editing, setEditing] = useState(false);
   const [quantity, setQuantity] = useState(fmtQuantity(p.quantity));
   const today = useLedgerToday();
@@ -202,9 +198,9 @@ function PositionRow({ p, onChange }: { p: PositionOut; onChange: () => void }) 
         </Td>
         <Td className="text-right font-mono">
           {p.price ? (
-            <span title={`${p.price_source ?? ""} close of ${p.price_as_of ?? ""}`}>
+            <span title={`${p.price_source ?? ""} close of ${formatDate(p.price_as_of)}`}>
               {fmtQuantity(p.price)}
-              <span className="ml-1 text-xs text-muted-foreground">{p.price_as_of}</span>
+              <span className="ml-1 text-xs text-muted-foreground">{formatDate(p.price_as_of)}</span>
             </span>
           ) : (
             "—"
@@ -212,7 +208,7 @@ function PositionRow({ p, onChange }: { p: PositionOut; onChange: () => void }) 
         </Td>
         <Td className="text-right font-mono">
           {p.market_value != null ? (
-            fmtAmount(p.market_value)
+            formatMoney(p.market_value, { currency })
           ) : p.value_out_of_range ? (
             <Badge
               variant="amber"
@@ -230,7 +226,7 @@ function PositionRow({ p, onChange }: { p: PositionOut; onChange: () => void }) 
           )}
         </Td>
         <Td className="text-right font-mono text-muted-foreground">
-          {p.unrealized_gain != null ? fmtAmount(p.unrealized_gain) : "—"}
+          {p.unrealized_gain != null ? formatMoney(p.unrealized_gain, { currency }) : "—"}
         </Td>
         <Td>
           {editing ? (

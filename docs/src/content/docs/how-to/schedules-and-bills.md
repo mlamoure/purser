@@ -1,9 +1,9 @@
 ---
-title: Schedules and recurring bills
+title: Scheduled transactions and recurring bills
 description: Create schedules, let Purser materialize and match expected instances, and surface late bills and price changes.
 ---
 
-A schedule is a recurring expectation — the $60.00 gym membership on the 1st,
+A scheduled transaction (a *schedule* in the API and MCP tools) is a recurring expectation — the $60.00 gym membership on the 1st,
 the paycheck every other Friday. Purser materializes each schedule into
 `expected` transactions, matches them against what actually clears, and tells
 you when a bill is late or its price changed.
@@ -11,7 +11,7 @@ you when a bill is late or its price changed.
 ## Create a schedule
 
 Recurrence is an RFC 5545 `RRULE` (the same syntax calendars use). Create a
-schedule on the admin UI's **Schedules** page (its cadence picker writes the
+schedule on the admin UI's **Scheduled transactions** page (its cadence picker writes the
 rule for you), over REST (`POST /schedules`) or MCP with `create_schedule` — an
 agent that parses a statement email calls this tool directly (Purser never
 parses email server-side). The schedule is created active. An agent acting on
@@ -22,11 +22,21 @@ line the agent read) for whoever decides it, and is refused when the account
 already has a schedule for that payee or counterparty.
 
 ```json
-{ "name": "Acme Gym", "account": "assets.checking",
+{ "payee": "Acme Gym", "memo": "Family membership",
+  "account": "assets.checking",
   "rrule": "FREQ=MONTHLY;BYMONTHDAY=1", "dtstart": "2026-09-01",
-  "amount": "-60.00", "payee": "Acme Gym",
-  "category": "expenses.personal.fitness" }
+  "amount": "-60.00", "category": "expenses.personal.fitness" }
 ```
+
+A schedule has a **payee** (who you pay or who pays you) and an optional
+**memo**. A flat schedule needs a payee unless it has a memo; a transfer needs
+neither, since the other account says who it is with. The schedule's `name`
+is derived, not entered: the memo, else the payee, else the transfer's other
+account. It is the description its expected transactions carry. Editing the
+payee or memo relabels the live instances whose label you have not changed
+yourself; send `""` to clear either one. Clients written before payee and memo
+existed may still send `name`: without a memo it becomes a transfer's memo, a
+flat schedule's payee when no payee is sent, and otherwise its memo.
 
 Amounts are decimal strings; negative is money out. `amount_type` defaults to
 `fixed` for a bill that is the same every period; `estimated` schedules take
@@ -77,7 +87,7 @@ A card payment estimated from the card's current balance usually runs high:
 you pay the **statement balance** from the last close, and the card has new
 charges since. Purser cannot read statements (SimpleFIN carries no statement
 figure), so you or your agent record it against the payment it is due on —
-on the Schedules page (**Statement** on a card payment's instance), over
+on the Scheduled transactions page (**Statement** on a card payment's instance), over
 REST, or with MCP `record_statement_balance`. An agent reading a statement
 email ("statement balance 8,347.00, payment due October 19") makes one call:
 
@@ -127,7 +137,7 @@ Instances are yours to edit; the rule never overrides what you touched:
   an override: the instance stays un-pinned and keeps following the estimate.
 - **Reset** an overridden occurrence (`POST /transactions/{id}/reset-instance`,
   MCP `reset_instance`, write scope; the **Reset** button on a pinned row in
-  the Schedules page). The pin is cleared and the instance takes the rule's
+  the Scheduled transactions page). The pin is cleared and the instance takes the rule's
   date (its slot), name, payee and current estimate again, and a recorded
   card statement is removed. If the rule no longer has that slot, or
   estimates nothing, the instance is dropped instead.
@@ -155,7 +165,7 @@ terminal and keeps history (`POST /schedules/{id}/pause`, `/resume`, `/end`;
 MCP `end_schedule` with `action` set to `pause`, `resume` or `end`). `GET /schedules/{id}` lists the live instances with
 their slot, pinned and overdue flags; `next_due` is always the earliest live
 instance — an overdue one counts, because it is still due. In the admin UI the
-same actions live on the Schedules page (expand a schedule for its instances;
+same actions live on the Scheduled transactions page (expand a schedule for its instances;
 pinned rows carry Reset) and on the account register, where a materialized row carries a `scheduled`
 badge with Override, Mark paid and Skip.
 
@@ -261,7 +271,7 @@ the history, whether the correction was made by a person, an agent or a rule.
 ## Estimate certainty on one occurrence
 
 An **Estimate** badge identifies an uncertain amount, date, or both. Open its
-accessible details in Schedules or the forecast to see the basis, evidence and
+accessible details in Scheduled transactions or the forecast to see the basis, evidence and
 original estimate. **Confirmed upcoming** is still scheduled; it is not posted
 cash. **Match awaiting review** is a proposal, while **Matched actual** identifies
 a linked posted transaction. A link to a pending bank entry is labelled separately.

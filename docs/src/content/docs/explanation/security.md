@@ -54,8 +54,8 @@ default. The few that answer without a token are deliberate: first-run setup
 ## What an agent sees
 
 You choose the agent, its access scopes and your disclosure defaults. Data
-returned to an agent may enter its model's context. Two MCP settings (Config,
-Settings, off by default) omit purchase details and individual amounts. An
+returned to an agent may enter its model's context. Two MCP settings (Settings,
+Agents & API, off by default) omit purchase details and individual amounts. An
 agent can request those fields per call; the audit log records those requests.
 These defaults do not restrict which fields a readable tool can disclose.
 External account identifiers are omitted by default from MCP responses.
@@ -72,7 +72,7 @@ trusted administration; it does not distinguish a human caller from automation.
 ## Who can revoke a token
 
 Any token can revoke itself. A person signed in to the web UI sees and revokes
-every token of their own account on the **Tokens** page: their other sessions,
+every token of their own account under **Settings -> Agents & API**: their other sessions,
 and, for the admin, every agent token, since agent tokens are created under the
 admin's account. An `admin`-scoped token can revoke any token. Any other agent
 token sees only itself in `GET /tokens` and can revoke only itself. A request
@@ -82,7 +82,7 @@ other agents, nor confirm that another token exists.
 
 ## Reads are audited too
 
-Audit Log opens on **Data shared**: what Purser returned to an authorized
+The audit log (**Settings -> Audit log**) opens on **Data shared**: what Purser returned to an authorized
 integration, the accounts and dates identified in the response, fields withheld,
 and the outcome. **Changes made**, **Access & permissions**, and **Technical
 activity** keep mutations, grants and browser/system activity available separately.
@@ -171,17 +171,15 @@ server hold more.
 
 ## Encryption at rest
 
-Encryption is required, not optional — Purser refuses to start without
-`PURSER_ENCRYPTION_KEY`, and a canary row binds the key to the database so a
-wrong key fails closed at startup. The model splits data into two layers. The
-**narrative** layer — the identifying words: payee names, descriptions, memos,
-schedule names, audit detail, event payloads — is encrypted. The **numeric
-skeleton** — amounts, dates, statuses, category paths, ids — stays plaintext,
-because every aggregate and invariant computes on it. Equality and dedup survive
-encryption through blind indexes and a keyed content hash, so a database dump
-cannot confirm a guessed transaction. The two hash keys are wrapped keys, which
-is what lets [key rotation](../../how-to/backup-restore/) re-wrap ciphertext while
-leaving every index byte-identical.
+Encryption is required: Purser refuses to start without
+`PURSER_ENCRYPTION_KEY`, and a canary row makes a wrong key fail closed at
+startup. Descriptive text (payees, descriptions, memos, notes, audit detail),
+the archived bank data, bank credentials and secrets are encrypted; amounts,
+dates, statuses, category paths and ids stay plaintext so the database can
+compute on them. Keyed hashes keep search and deduplication working without
+letting a database dump confirm a guessed transaction. See
+[Encryption at rest](../encryption-at-rest/) for the full model, what a dump
+reveals, and key rotation.
 
 ## The raw archive underneath
 

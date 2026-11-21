@@ -122,7 +122,7 @@ def main() -> None:
         try:
             page.route(ORIGIN + "/**", route)
             page.set_viewport_size({"width": 1440, "height": 1080})
-            page.goto(ORIGIN + "/#/audit")
+            page.goto(ORIGIN + "/#/settings/audit")
             expect(
                 page.get_by_text("24 transactions · Dates, Categories, Individual amounts").first
             ).to_be_visible()

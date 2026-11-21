@@ -33,7 +33,7 @@ describe("SuggestionCard — transfer_link (#271)", () => {
     expect(screen.getByText(/Link transfers between assets\.checking/)).toBeInTheDocument();
     expect(screen.getByText("your confirm")).toBeInTheDocument();
     expect(screen.getByText(/or an alias · legs within 3 days \(standard\) · any amount/)).toBeInTheDocument();
-    expect(screen.getByText(/1 confirmed pair\(s\) on 2026-05-04/)).toBeInTheDocument();
+    expect(screen.getByText(/1 confirmed pair\(s\) on May 4, 2026/)).toBeInTheDocument();
     expect(screen.queryByText(/% sure/)).not.toBeInTheDocument();
   });
 
@@ -166,9 +166,9 @@ describe("SuggestionCard — schedule", () => {
     });
     const { user } = renderWithProviders(<SuggestionCard suggestion={schedule} />);
     expect(screen.getByText("Pattern strength 75/100")).toBeInTheDocument();
-    expect(screen.getByText(/3 occurrences from 2026-03-15 to 2026-05-15/)).toBeInTheDocument();
+    expect(screen.getByText(/3 occurrences from Mar 15, 2026 to May 15, 2026/)).toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Create schedule" }));
+    await user.click(screen.getByRole("button", { name: "Create scheduled transaction" }));
     expect(apiMock.POST).toHaveBeenCalledWith("/suggestions/{suggestion_id}/decide", {
       params: { path: { suggestion_id: "s-2" } },
       body: { decision: "accept", reject_scope: "exact" },
@@ -191,7 +191,7 @@ describe("SuggestionCard — match (#246)", () => {
     renderWithProviders(<SuggestionCard suggestion={matchSuggestion()} />);
     expect(screen.getByText("Expected · City Utilities")).toBeInTheDocument();
     expect(screen.getByText("Bank row")).toBeInTheDocument();
-    expect(screen.getByText("2026-07-18")).toBeInTheDocument();
+    expect(screen.getByText("Jul 18, 2026")).toBeInTheDocument();
     expect(
       screen.getByText(
         (_, el) => el?.tagName === "P" && /on assets\.checking · variance/.test(el.textContent ?? ""),

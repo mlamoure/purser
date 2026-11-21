@@ -311,11 +311,25 @@ def seeded(admin_client: TestClient) -> dict[str, Any]:
             },
         )
         assert r.status_code in ok, r.text
+    # A hand-valued asset (#566): its purchase and one later change, which
+    # the canary's reverse_value_change undoes.
+    r = c.post("/accounts", json={"name": "House", "type": "property", "path": "assets.house"})
+    assert r.status_code in ok, r.text
+    house = r.json()["id"]
+    value_changes = []
+    for amount, days in (("350000.00", 90), ("7000.00", 10)):
+        r = c.post(
+            f"/accounts/{house}/value-changes",
+            json={"as_of": (TODAY - timedelta(days=days)).isoformat(), "amount": amount},
+        )
+        assert r.status_code in ok, r.text
+        value_changes.append(r.json()["transaction_id"])
     r = c.put("/config", json={"privacy_purchase": True, "privacy_amount": True})
     assert r.status_code == 200, r.text
     agent = c.post("/tokens", json={"name": "agent", "scopes": ["read", "write"]}).json()
     return {
         "token": agent["token"],
+        "value_change": value_changes[-1],
         "tx_ids": tx_ids,
         "late_bill": late_bill,
         "schedules": schedules,
@@ -362,6 +376,20 @@ def _read_calls(seeded: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
 
 def _write_calls(seeded: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
     return [
+        (
+            "record_value_change",
+            {
+                "account": "assets.house",
+                "as_of": TODAY.isoformat(),
+                "amount": "2500.00",
+                "note": f"{DESCRIPTIONS[0]} {PAYEES[0]}",
+            },
+        ),
+        ("reverse_value_change", {"transaction_id": seeded["value_change"]}),
+        (
+            "dispose_asset",
+            {"account": "assets.house", "as_of": TODAY.isoformat(), "dry_run": True},
+        ),
         (
             "update_occurrence_certainty",
             {

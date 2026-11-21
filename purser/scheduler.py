@@ -6,10 +6,13 @@ Adding a job means adding a `register_job` line there (and updating the
 contract test in tests/test_scheduler.py). `purser serve` runs this
 scheduler in-process; `purser worker` runs it alone.
 
-The SimpleFIN sync job (`feed.sync_daily` — the id is a stable contract even
-when the configured cadence is sub-daily) takes its cron from the persisted
-config (`appsettings.sync_schedule()`) at build time, and `reschedule_sync()`
-applies a config change to the running scheduler. In the split serve/worker
+Every job runs on UTC times except one. The SimpleFIN sync job
+(`feed.sync_daily` — the id is a stable contract even when the configured
+cadence is sub-daily) takes its cron from the persisted config
+(`appsettings.sync_schedule()`) at build time, and its daily preset reads in
+the household time zone so it keeps its time on the clock across
+daylight-saving changes (decision 111). `reschedule_sync()` applies a change
+to the schedule or to the household time zone to the running scheduler. In the split serve/worker
 topology the API process runs no scheduler, so changes there apply at worker
 restart — the /config API reports which via `sync_reschedule_live`.
 """
@@ -87,6 +90,10 @@ def _register_builtin_jobs() -> None:
     register_job("schedules.detect_daily", {"hour": 7, "minute": 5}, detect_job)
     register_job("forecast.shortfall_scan", {"hour": 7, "minute": 15}, shortfall_scan_job)
 
+    from purser.assets import stale_check_job
+
+    # An asset whose value is older than its revalue_after_days (#568).
+    register_job("assets.stale_check", {"hour": 7, "minute": 20}, stale_check_job)
     from purser.networth import materialize_job
 
     # Nightly net_worth_daily materialization (Grafana's flagship source).
@@ -117,16 +124,36 @@ def _register_builtin_jobs() -> None:
     register_job("review.aged_sweep", {"hour": 8, "minute": 30}, aged_sweep_job)
 
 
-def _sync_cron() -> dict[str, str | int]:
-    """The configured sync cron; falls back to the default when config is
-    unreachable (no database in DB-less contexts, unmigrated schema)."""
-    try:
-        from purser import appsettings
+def _sync_trigger() -> tuple[dict[str, str | int], str]:
+    """The configured sync cron and the zone it reads in. Falls back to the
+    default schedule when config is unreachable (no database in DB-less
+    contexts, unmigrated schema)."""
+    from purser import appsettings
 
-        return appsettings.sync_schedule().to_cron()
+    try:
+        schedule = appsettings.sync_schedule()
     except Exception:
         log.warning("sync schedule unavailable; using default", cron=DEFAULT_SYNC_CRON)
-        return dict(DEFAULT_SYNC_CRON)
+        schedule = appsettings.DEFAULT_SYNC_SCHEDULE
+    return schedule.to_cron(), _sync_zone(schedule.follows_household_zone)
+
+
+def _sync_zone(household: bool) -> str:
+    """The household time zone for the daily preset, UTC otherwise. Without
+    the database the env default (PURSER_TIMEZONE) stands in for it."""
+    if not household:
+        return "UTC"
+    from purser import clock
+    from purser.config import get_settings
+
+    try:
+        return clock.timezone_name()
+    except Exception:
+        try:
+            return get_settings().timezone
+        except Exception:
+            log.warning("household time zone unavailable; sync time read in UTC")
+            return "UTC"
 
 
 def build_scheduler() -> BackgroundScheduler:
@@ -134,12 +161,12 @@ def build_scheduler() -> BackgroundScheduler:
     _register_builtin_jobs()
     scheduler = BackgroundScheduler(timezone="UTC", job_defaults=JOB_DEFAULTS)
     for job_id, cron, fn in _JOBS:
-        extra: dict[str, int] = {}
+        extra: dict[str, int | str] = {}
         if job_id == "feed.sync_daily":
-            cron = _sync_cron()
+            cron, extra["timezone"] = _sync_trigger()
             extra["jitter"] = SYNC_JITTER_SECONDS
         scheduler.add_job(fn, "cron", id=job_id, **cron, **extra)
-        log.info("scheduled job", job_id=job_id, cron=cron)
+        log.info("scheduled job", job_id=job_id, cron=cron, timezone=extra.get("timezone", "UTC"))
     _active = scheduler
     return scheduler
 
@@ -150,7 +177,8 @@ def is_live() -> bool:
 
 
 def reschedule_sync() -> bool:
-    """Apply the configured sync schedule to the running scheduler.
+    """Apply the configured sync schedule, read in the current household time
+    zone, to the running scheduler (after a schedule or time zone change).
 
     Returns False when this process runs no scheduler (split serve/worker
     topology) — the new schedule then applies at worker restart.
@@ -160,10 +188,10 @@ def reschedule_sync() -> bool:
     from apscheduler.triggers.cron import CronTrigger
 
     assert _active is not None
-    cron = _sync_cron()
+    cron, zone = _sync_trigger()
     _active.reschedule_job(
         "feed.sync_daily",
-        trigger=CronTrigger(timezone="UTC", jitter=SYNC_JITTER_SECONDS, **cron),
+        trigger=CronTrigger(timezone=zone, jitter=SYNC_JITTER_SECONDS, **cron),
     )
-    log.info("rescheduled job", job_id="feed.sync_daily", cron=cron)
+    log.info("rescheduled job", job_id="feed.sync_daily", cron=cron, timezone=zone)
     return True

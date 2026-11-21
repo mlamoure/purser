@@ -102,7 +102,7 @@ class ValuationCreate(BaseModel):
         decimal_places=4,
         max_digits=20,
         description="The account's value on as_of, in ledger sign unless `convention` says "
-        "otherwise: a property is positive, a loan is NEGATIVE while money is owed. A "
+        "otherwise: a loan is NEGATIVE while money is owed. A "
         "positive value on a loan is rejected (422) rather than recorded as an asset.",
     )
     source: str = "manual"
@@ -111,7 +111,7 @@ class ValuationCreate(BaseModel):
         description="How `value`'s sign reads. `ledger` (default): as Purser stores it, a "
         "loan negative when owed. `statement`: as the statement prints it, a loan POSITIVE "
         "when owed (a credit balance is negative); Purser negates it into ledger sign, the "
-        "same conversion reconciliation applies. A property reads the same either way.",
+        "same conversion reconciliation applies.",
     )
 
 
@@ -260,11 +260,13 @@ def create_valuation(
     session: DbSession,
     background_tasks: BackgroundTasks,
 ) -> ValuationOut:
-    """Record a loan or property account's value on a date: the balance it
-    reports (its latest valuation replaces the postings sum). Any other
-    account type is refused (422): its balance comes from its transactions,
-    plus holdings for a brokerage account. The answer's `value` is in ledger
-    sign whichever `convention` the request used."""
+    """Record a loan account's value on a date: the balance it reports (its
+    latest valuation replaces the postings sum). Any other account type is
+    refused (422): its balance comes from its transactions, plus holdings for
+    a brokerage account. A hand-valued asset (type property) is a ledger:
+    `POST /accounts/{id}/value-changes` or `POST /accounts/{id}/reconcile`.
+    The answer's `value` is in ledger sign whichever `convention` the request
+    used."""
     try:
         valuation = service.record_valuation(
             session,

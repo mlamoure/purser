@@ -67,17 +67,17 @@ into it:
 
 ```bash
 mkdir purser && cd purser
-curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.2/docker-compose.yml
-grep -c 'image: ghcr.io/mlamoure/purser:v2026.11.2' docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.3/docker-compose.yml
+grep -c 'image: ghcr.io/mlamoure/purser:v2026.11.3' docker-compose.yml
 ```
 
 If `mkdir` reports that `purser` already exists, stop and ask the human: it may
 hold an earlier installation and its key. The last command must print `1`.
 Every later command runs in this `purser` directory.
 
-This page installs the latest release, 2026.11.2. Each release has its own
+This page installs the latest release, 2026.11.3. Each release has its own
 compose file at the same address under its own tag (`vYYYY.M.PATCH`), and that
-file names the matching image, here `ghcr.io/mlamoure/purser:v2026.11.2`,
+file names the matching image, here `ghcr.io/mlamoure/purser:v2026.11.3`,
 published for linux/amd64 and linux/arm64.
 
 ## 3. Pull the images
@@ -147,7 +147,8 @@ Only the human can create the administrator and mint your token. Say:
 >
 > 1. **Create admin**: your email and a password of at least 8 characters.
 > 2. **Record encryption key**: the wizard shows the key Purser is running with,
->    once. Check that it matches the one you just stored, tick the box, and continue.
+>    until you acknowledge it. Check that it matches the one you just stored, tick
+>    the box, and continue.
 > 3. **Connect SimpleFIN** (optional, for live bank data): paste a setup token
 >    from your SimpleFIN Bridge account, then map the accounts it finds. Paste
 >    it only into Purser, never into this chat. You can also skip this.
@@ -157,10 +158,13 @@ Only the human can create the administrator and mint your token. Say:
 >    every write I make is recorded in the audit log and can be reversed, and I
 >    can never grant myself more access.
 >
+> If the page reloads partway through, sign in: the Dashboard's **Finish setting
+> up** card links to each step still open.
+>
 > Tell me when you are done, and paste the token here.
 
 If the human skipped the last step, they can mint the token later on the
-**API & MCP Access** page (`/tokens`): name it, keep the `read` and `write`
+**Settings -> Agents & API** page: name it, keep the `read` and `write`
 boxes ticked (the default), leave `admin` unticked, and click **Create token**.
 The token is shown exactly once.
 
@@ -255,7 +259,7 @@ encryption key and admin password are the two secrets only they hold.
 ## 9. Optional next steps
 
 - **Live bank data**: if SimpleFIN was skipped, the human connects it later
-  under **Config**, then **SimpleFIN**, by pasting a setup token there. Details:
+  under **Settings**, then **Connections**, by pasting a setup token there. Details:
   [Connect banks with SimpleFIN](../../how-to/simplefin/). Call `trigger_sync`
   only when the human wants fresh data; SimpleFIN Bridge allows 24 fetches a day.
 - **Older history**: the human uploads a QIF or CSV export on the **Import** page.
@@ -307,7 +311,7 @@ Read the application log with `docker compose logs purser --tail 50`.
 | `/healthz` gets no answer | The app is still starting or exited. | Wait for the loop in step 5; then check `docker compose ps` and the log. |
 | `/healthz` returns HTTP 503 with `{"status":"error","database":"down"}` | Purser cannot reach PostgreSQL. | Check `docker compose ps postgres` and `docker compose logs postgres`. |
 | `/auth/setup/status` stays `{"setup_needed":true}` | The human has not created the admin yet. | Wait for the handoff in step 6. |
-| `/mcp` returns 401 `{"error":"invalid or missing bearer token"}` | The token is missing, mistyped, revoked or expired, or the header lacks the word `Bearer`. | Check the header format; ask the human for a new token from **API & MCP Access** if needed. |
+| `/mcp` returns 401 `{"error":"invalid or missing bearer token"}` | The token is missing, mistyped, revoked or expired, or the header lacks the word `Bearer`. | Check the header format; ask the human for a new token from **Settings -> Agents & API** if needed. |
 | `/mcp` returns 421 Misdirected Request | The request's host is not `localhost` or the host in `PURSER_PUBLIC_URL`. | Set `PURSER_PUBLIC_URL` to the URL clients use, then run `docker compose up -d` again. |
 | `curl` to `/mcp` returns 307 | The bare path redirects to `/mcp/`. | Use `/mcp/` with `curl`; MCP clients follow the redirect. |
 | A write tool is refused for scope | The token lacks `write`. | Ask the human for a `read + write` token. |

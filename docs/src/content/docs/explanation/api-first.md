@@ -71,7 +71,12 @@ questions about operating Purser from this documentation.
 
 The web UI covers setup, connections, settings, tokens and auditing. It also
 provides account registers, schedules, positions and a forecast chart for
-direct inspection. Your agent is the intended interface for day-to-day work.
+direct inspection. Its navigation is **Dashboard**, **Accounts** (each opens
+its register), **Scheduled transactions**, **Import**, and one **Settings**
+area: General, Connections, Categories, Rules, Agent memory, Prices, Agents &
+API, Security, Users and Audit log. A member sees the sections their own
+access works in; the admin-only ones (General, Security, Users, Audit log)
+are hidden from them. Your agent is the intended interface for day-to-day work.
 [Grafana](../../how-to/grafana/) supplies broader dashboards over the stable read
 schema. Both use the same underlying financial data and public interfaces.
 

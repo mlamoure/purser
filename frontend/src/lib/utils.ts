@@ -5,12 +5,6 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
-export function fmtAmount(value: string | null | undefined): string {
-  if (value == null) return "—";
-  const n = Number(value);
-  return n.toLocaleString("en-US", { style: "currency", currency: "USD" });
-}
-
 /** The body of a schedule-instance override: only the fields the user
  * changed (#350). Amounts stay strings — they are compared as typed, never
  * parsed. Sending the prefilled amount with every date edit made a date-only

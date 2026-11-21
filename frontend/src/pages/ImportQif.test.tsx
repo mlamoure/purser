@@ -75,7 +75,9 @@ async function paste(user: ReturnType<typeof renderPage>["user"], text: string) 
 
 /** The target picker is the first select in a mapping row. */
 const targetSelect = (row: HTMLElement) => within(row).getAllByRole("combobox")[0];
-const mappingRow = () => screen.getByText(FILE_ACCOUNT).closest("tr")!;
+// The file account's own label (a div); the target picker may also offer an
+// account of the same name once one is created for it.
+const mappingRow = () => screen.getByText(FILE_ACCOUNT, { selector: "div" }).closest("tr")!;
 
 describe("ImportQif page (paste → preview → map → import)", () => {
   it("imports a QIF file into an existing account and reports the counts", async () => {

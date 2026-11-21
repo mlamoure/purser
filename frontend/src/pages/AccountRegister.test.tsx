@@ -30,6 +30,8 @@ const instanceRow = (over: Partial<TransactionOut> = {}): TransactionOut => ({
   schedule_pinned: false,
   split_lines: 0,
   securities_trade: false,
+  value_change: false,
+  money_put_in: false,
   created_at: "2026-10-05T12:00:00Z",
   ...over,
 });
@@ -79,10 +81,35 @@ describe("RegisterRow instance override (#350)", () => {
   });
 });
 
+describe("RegisterRow accessible names (#538)", () => {
+  const renderRow = (t: TransactionOut) => {
+    mockApi({ "GET /categories": ok([]), "GET /accounts": ok([]) });
+    renderWithProviders(
+      <table>
+        <tbody>
+          <RegisterRow t={t} accountPath="assets.checking" candidates={[]} proposed={[]} />
+        </tbody>
+      </table>,
+    );
+  };
+
+  it("names the category select after the payee", () => {
+    renderRow(instanceRow({ payee: "Acme Gym" }));
+    expect(screen.getByRole("combobox", { name: "Category for Acme Gym" })).toBeInTheDocument();
+  });
+
+  it("falls back to the description when there is no payee", () => {
+    renderRow(instanceRow({ payee: null }));
+    expect(screen.getByRole("combobox", { name: "Category for Card payment" })).toBeInTheDocument();
+  });
+});
+
 describe("RegisterRow split rows (#274)", () => {
   it("shows a read-only Split (n) that lists the category legs", async () => {
     mockApi({
-      "GET /categories": ok([]),
+      "GET /categories": ok([
+        accountOut({ id: "c-1", name: "Groceries", path: "expenses.groceries", type: "category_expense", is_virtual: true }),
+      ]),
       "GET /accounts": ok([]),
       "GET /transactions/{tx_id}": ok({
         postings: [
@@ -114,9 +141,11 @@ describe("RegisterRow split rows (#274)", () => {
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Split (2)" }));
 
-    expect(await screen.findByText("expenses.groceries")).toBeInTheDocument();
-    expect(screen.getByText("expenses.household")).toBeInTheDocument();
-    expect(screen.queryByText("assets.checking")).not.toBeInTheDocument();
+    // Legs read by name (#541); a path no list knows reads as its last label.
+    expect(await screen.findByText("Groceries")).toBeInTheDocument();
+    expect(screen.getByText("Household")).toBeInTheDocument();
+    expect(screen.queryByText("expenses.groceries")).not.toBeInTheDocument();
+    expect(screen.queryByText("Checking")).not.toBeInTheDocument();
     expect(apiMock.GET).toHaveBeenCalledWith("/transactions/{tx_id}", {
       params: { path: { tx_id: "tx-split" } },
     });
@@ -183,6 +212,13 @@ describe("AccountRegister manual holdings (#390)", () => {
     await user.click(tab);
     expect(await screen.findByText(/No positions yet/)).toBeInTheDocument();
     expect(screen.queryByPlaceholderText("Search description…")).not.toBeInTheDocument();
+  });
+
+  it("names the rename button and the browser tab after the account", async () => {
+    registerRoutes(accountOut({ id: "acct-b", name: "Brokerage", type: "brokerage", path: "assets.broker" }));
+    render(false);
+    expect(await screen.findByRole("button", { name: "Rename account" })).toBeInTheDocument();
+    await waitFor(() => expect(document.title).toBe("Brokerage · Purser"));
   });
 
   it("has no Positions tab on a feed-sourced account", async () => {
@@ -383,6 +419,67 @@ describe("AccountRegister securities trades (#390 phase 1b)", () => {
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
   });
 
+  it("shows an asset's value change as a read-only Value change", async () => {
+    mockApi({ "GET /categories": ok([]), "GET /accounts": ok([]) });
+    const change = instanceRow({
+      id: "tx-change",
+      status: "posted",
+      origin: "human",
+      schedule_id: null,
+      amount: "25000.0000",
+      category_path: "equity.revaluation",
+      transfer_account_path: null,
+      is_transfer: false,
+      value_change: true,
+    });
+    renderWithProviders(
+      <table>
+        <tbody>
+          <RegisterRow t={change} accountPath="assets.house" candidates={[]} proposed={[]} />
+        </tbody>
+      </table>,
+    );
+    expect(screen.getByText("Value change")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
+  });
+
+  it("undoes a value change through its reversal, and labels money put in", async () => {
+    mockApi({
+      "GET /categories": ok([]),
+      "GET /accounts": ok([]),
+      "POST /value-changes/{transaction_id}/reverse": ok({ reversed: true }),
+    });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const putIn = instanceRow({
+      id: "tx-put-in",
+      status: "posted",
+      origin: "human",
+      schedule_id: null,
+      amount: "450000.0000",
+      category_path: "equity.capital",
+      transfer_account_path: null,
+      is_transfer: false,
+      value_change: true,
+      money_put_in: true,
+    });
+    const { user } = renderWithProviders(
+      <table>
+        <tbody>
+          <RegisterRow t={putIn} accountPath="assets.house" candidates={[]} proposed={[]} />
+        </tbody>
+      </table>,
+    );
+    expect(screen.getByText("Money put in")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Undo the .* money put in/ }));
+    expect(confirm).toHaveBeenCalled();
+    await waitFor(() =>
+      expect(apiMock.POST).toHaveBeenCalledWith("/value-changes/{transaction_id}/reverse", {
+        params: { path: { transaction_id: "tx-put-in" } },
+      }),
+    );
+    confirm.mockRestore();
+  });
+
   it("never offers a trade's cash as the row that paid a bill", async () => {
     const bankRow = instanceRow({
       id: "tx-bank",
@@ -477,5 +574,133 @@ describe("Account register guided review", () => {
     expect(apiMock.POST).not.toHaveBeenCalled();
     await user.click(within(preview).getByRole("button", { name: "Confirm review" }));
     await waitFor(() => expect(apiMock.POST).toHaveBeenCalledWith("/transactions/mark-reviewed", { body: { transaction_ids: ["posted"], escalate: false } }));
+  });
+});
+
+describe("Account register: correcting a posted row (#541)", () => {
+  const CATEGORIES = [
+    accountOut({ id: "c-1", name: "Groceries", path: "expenses.groceries", type: "category_expense", is_virtual: true }),
+    accountOut({ id: "c-2", name: "Dining out", path: "expenses.dining", type: "category_expense", is_virtual: true }),
+  ];
+  const posted = (over: Partial<TransactionOut> = {}) =>
+    instanceRow({
+      id: "tx-orig",
+      status: "posted",
+      origin: "import",
+      schedule_id: null,
+      payee: "Example Market",
+      amount: "-42.1000",
+      category_path: "expenses.groceries",
+      transfer_account_path: null,
+      is_transfer: false,
+      ...over,
+    });
+
+  it("recategorizes without a confirm, then offers Undo on the corrected row", async () => {
+    // The register lists the original until the correction lands, then its
+    // replacement (a new id); after the undo, a second replacement.
+    let rows = [posted()];
+    const confirm = vi.spyOn(window, "confirm");
+    mockApi({
+      "GET /categories": ok(CATEGORIES),
+      "GET /accounts": ok([]),
+      "GET /accounts/{account_id}": ok(accountOut()),
+      "GET /transactions": () => ok({ items: rows, total: rows.length, limit: 50, offset: 0 }),
+      "GET /matching/transfer-candidates": ok([]),
+      "GET /matching/proposed": ok([]),
+      "PATCH /transactions/{tx_id}": (init) => {
+        const id = init.params?.path?.tx_id;
+        const category = (init.body as { category: string }).category;
+        const next = posted({ id: id === "tx-orig" ? "tx-fix" : "tx-undo", category_path: category });
+        rows = [next];
+        return ok(next);
+      },
+    });
+    const { user } = renderWithProviders(
+      <Routes>
+        <Route path="/accounts/:accountId" element={<AccountRegister />} />
+      </Routes>,
+      { route: "/accounts/a-1" },
+    );
+
+    const picker = await screen.findByRole("combobox", { name: "Category for Example Market" });
+    await within(picker).findByRole("option", { name: "Dining out" });
+    await user.selectOptions(picker, "Dining out");
+
+    expect(confirm).not.toHaveBeenCalled();
+    expect(apiMock.PATCH).toHaveBeenCalledWith("/transactions/{tx_id}", {
+      params: { path: { tx_id: "tx-orig" } },
+      body: { category: "expenses.dining", account: "assets.checking" },
+    });
+    const undo = await screen.findByRole("button", { name: "Undo: back to Groceries" });
+    expect(screen.getByText("Corrected")).toBeInTheDocument();
+
+    await user.click(undo);
+    expect(apiMock.PATCH).toHaveBeenLastCalledWith("/transactions/{tx_id}", {
+      params: { path: { tx_id: "tx-fix" } },
+      body: { category: "expenses.groceries", account: "assets.checking" },
+    });
+    await waitFor(() => expect(screen.queryByText("Corrected")).not.toBeInTheDocument());
+    expect(
+      await screen.findByRole("combobox", { name: "Category for Example Market" }),
+    ).toHaveValue("expenses.groceries");
+    expect(apiMock.PATCH).toHaveBeenCalledTimes(2);
+    confirm.mockRestore();
+  });
+
+  it("offers no Undo after recategorizing a pending row, which is edited in place", async () => {
+    let rows = [posted({ id: "tx-p", status: "pending" })];
+    mockApi({
+      "GET /categories": ok(CATEGORIES),
+      "GET /accounts": ok([]),
+      "GET /accounts/{account_id}": ok(accountOut()),
+      "GET /transactions": () => ok({ items: rows, total: rows.length, limit: 50, offset: 0 }),
+      "GET /matching/transfer-candidates": ok([]),
+      "GET /matching/proposed": ok([]),
+      "PATCH /transactions/{tx_id}": (init) => {
+        rows = [posted({ id: "tx-p", status: "pending", category_path: (init.body as { category: string }).category })];
+        return ok(rows[0]);
+      },
+    });
+    const { user } = renderWithProviders(
+      <Routes>
+        <Route path="/accounts/:accountId" element={<AccountRegister />} />
+      </Routes>,
+      { route: "/accounts/a-1" },
+    );
+    const picker = await screen.findByRole("combobox", { name: "Category for Example Market" });
+    await within(picker).findByRole("option", { name: "Dining out" });
+    await user.selectOptions(picker, "Dining out");
+    await waitFor(() => expect(picker).toHaveValue("expenses.dining"));
+    expect(screen.queryByRole("button", { name: /Undo/ })).not.toBeInTheDocument();
+  });
+
+  it("shows the server's refusal of an undo on the row", async () => {
+    let rows = [posted()];
+    mockApi({
+      "GET /categories": ok(CATEGORIES),
+      "GET /accounts": ok([]),
+      "GET /accounts/{account_id}": ok(accountOut()),
+      "GET /transactions": () => ok({ items: rows, total: rows.length, limit: 50, offset: 0 }),
+      "GET /matching/transfer-candidates": ok([]),
+      "GET /matching/proposed": ok([]),
+      "PATCH /transactions/{tx_id}": (init) => {
+        if (init.params?.path?.tx_id === "tx-fix") return fail(422, "transaction is already corrected");
+        rows = [posted({ id: "tx-fix", category_path: "expenses.dining" })];
+        return ok(rows[0]);
+      },
+    });
+    const { user } = renderWithProviders(
+      <Routes>
+        <Route path="/accounts/:accountId" element={<AccountRegister />} />
+      </Routes>,
+      { route: "/accounts/a-1" },
+    );
+    const picker = await screen.findByRole("combobox", { name: "Category for Example Market" });
+    await within(picker).findByRole("option", { name: "Dining out" });
+    await user.selectOptions(picker, "Dining out");
+    await user.click(await screen.findByRole("button", { name: "Undo: back to Groceries" }));
+    expect(await screen.findByText("transaction is already corrected")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Undo: back to Groceries" })).toBeInTheDocument();
   });
 });

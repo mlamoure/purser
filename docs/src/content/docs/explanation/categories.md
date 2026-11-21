@@ -47,7 +47,7 @@ Personal Finance Categories taxonomy, with the transfer and loan-payment groups
 deliberately removed — those are structural transfers here, not spending. The
 set is seeded once and merges additively on upgrade, so your deletions stick.
 Every category carries a one-line **description**, in Purser's own words,
-written for the AI classifier and surfaced in the **Config -> Categories** tab.
+written for the AI classifier and surfaced in **Settings -> Categories**.
 
 The set is **finite by design**. You may rename, re-describe, and add categories,
 and delete any that are unused, but re-parenting and path renames are not

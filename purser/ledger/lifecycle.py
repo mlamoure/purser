@@ -3,6 +3,7 @@ close posts its balancing adjustment through tx_create."""
 
 import uuid
 from datetime import UTC, datetime
+from datetime import date as date_type
 from decimal import Decimal
 from typing import Any
 
@@ -55,10 +56,18 @@ def close_account(
     account_id: uuid.UUID,
     adjustment_category: str | None,
     token: ApiToken,
+    on: date_type | None = None,
+    note: str | None = None,
 ) -> dict[str, Any]:
     """Close a REAL account (DESIGN §3.4): void its expected instances, post a
     guided balancing adjustment as an ordinary transaction, verify exact-zero,
     unmap any SimpleFIN link, then stamp ``closed_at`` (read-only thereafter).
+
+    A hand-valued asset (decision 116) takes no category: what is left on it
+    is the rest of its change in value — a gain or loss at sale, or the whole
+    value when written off — posted as a value change against
+    equity.revaluation, dated ``on`` (the sale date; default the ledger day)
+    with ``note``, so no leftover reads as spending.
 
     Preconditions refuse the close (LedgerError -> 422) rather than papering
     over live state: no active schedules target the account, and no live
@@ -129,7 +138,21 @@ def close_account(
     # (d) Guided balance adjustment, posted BEFORE the account goes read-only.
     balance = account_balances(session, [account.id]).get(account.id, Decimal(0))
     adjustment_tx_id: uuid.UUID | None = None
-    if balance != 0:
+    from purser import assets as assets_service
+
+    if balance != 0 and account.type in assets_service.ASSET_TYPES:
+        change = assets_service.record_value_change(
+            session,
+            account_ref=str(account.id),
+            as_of=on or clock.ledger_today(),
+            amount=-balance,
+            token=token,
+            note=note or "Closed: the rest of its change in value",
+            origin=core.Origin.SYSTEM,
+            lock=False,
+        )
+        adjustment_tx_id = change.transaction.id
+    elif balance != 0:
         if adjustment_category is None:
             raise LedgerError(
                 f"{account.path} has a live balance of {balance}; provide "

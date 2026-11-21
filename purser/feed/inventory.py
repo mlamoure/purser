@@ -66,8 +66,17 @@ def _connection_entry(
             )
         ).scalars()
     }
+    from purser.feed.service import ignored_external_ids
+
+    ignored = ignored_external_ids(session, connection.id)
     issues = envelope.issues(payload)
-    login_issue = {i.conn_id: i for i in issues if i.prefix == "con" and i.conn_id}
+    # Keyed by the login's own id where the issue names one of the listed
+    # logins (the ids can differ by a provider prefix), else by the issue's.
+    login_issue: dict[str, envelope.Issue] = {}
+    for i in issues:
+        if i.prefix == "con" and i.conn_id:
+            named = envelope.login_of_issue(payload, i)
+            login_issue[(named.conn_id if named else None) or i.conn_id] = i
     account_issue = {i.account_id: i for i in issues if i.prefix == "act" and i.account_id}
     ambiguous = envelope.duplicate_account_ids(payload)
 
@@ -115,6 +124,7 @@ def _connection_entry(
                 "transactions": len(sf_account.get("transactions") or []),
                 "issue": {"code": issue.code, "message": issue.msg} if issue else None,
                 "ambiguous": external_id in ambiguous,
+                "ignored": account is None and external_id in ignored,
             }
         )
 
@@ -157,7 +167,7 @@ def feed_status(session: Session) -> dict[str, Any]:
             )
             for account in accounts:
                 reasons = []
-                if not account["connected"] and not account["closed"]:
+                if not account["connected"] and not account["closed"] and not account["ignored"]:
                     reasons.append("not_connected")
                 if account["connected"] and account["stale"]:
                     reasons.append(f"stale {account['days_since_balance']}d")

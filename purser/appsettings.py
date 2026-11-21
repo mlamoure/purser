@@ -83,10 +83,13 @@ _cache: tuple[float, dict[str, Any]] | None = None
 
 
 class SyncSchedule(BaseModel):
-    """User-facing SimpleFIN sync schedule (UTC).
+    """User-facing SimpleFIN sync schedule.
 
-    Presets rather than raw cron. ``hour``/``minute`` apply to ``daily`` only;
-    the interval presets are anchored so every choice lands a fresh sync just
+    Presets rather than raw cron. ``hour``/``minute`` apply to ``daily`` only
+    and are a wall-clock time in the household time zone (``timezone``,
+    decision 111): the scheduler reads the daily trigger in that zone, so the
+    sync keeps its time on the clock across daylight-saving changes. The
+    interval presets stay anchored in UTC so every one lands a fresh sync just
     before the 06:45 UTC matching job, and ``hourly`` (24 runs/day) sits
     exactly at the SimpleFIN Bridge budget — the per-connection fetch guard
     fails soft beyond it.
@@ -95,8 +98,12 @@ class SyncSchedule(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     preset: Literal["daily", "every_12h", "every_6h", "hourly"] = "daily"
-    hour: int | None = Field(None, ge=0, le=23)
-    minute: int | None = Field(None, ge=0, le=59)
+    hour: int | None = Field(
+        None, ge=0, le=23, description="Daily only: the hour in the household time zone."
+    )
+    minute: int | None = Field(
+        None, ge=0, le=59, description="Daily only: the minute in the household time zone."
+    )
 
     @model_validator(mode="after")
     def _shape(self) -> "SyncSchedule":
@@ -108,6 +115,12 @@ class SyncSchedule(BaseModel):
         elif self.hour is not None or self.minute is not None:
             raise ValueError("hour/minute apply only to the daily preset")
         return self
+
+    @property
+    def follows_household_zone(self) -> bool:
+        """True when the trigger reads in the household time zone (daily);
+        the interval presets read in UTC."""
+        return self.preset == "daily"
 
     def to_cron(self) -> dict[str, int | str]:
         if self.preset == "daily":

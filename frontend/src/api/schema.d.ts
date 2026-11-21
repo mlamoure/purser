@@ -103,7 +103,7 @@ export interface paths {
         };
         /**
          * Balance As Of
-         * @description Balance at end of ``as_of``. Open loan/property accounts answer with
+         * @description Balance at end of ``as_of``. Open loan accounts answer with
          *     their latest valuation at or before that date (decision 42); open
          *     brokerage accounts add their latest holdings market value on top of the
          *     postings basis (decision 50); everything else answers from the stored
@@ -184,6 +184,31 @@ export interface paths {
          *     adjustment (when nonzero), unmap any feed link, then make it read-only.
          */
         post: operations["close_account_accounts__account_id__close_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/accounts/{account_id}/dispose": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Dispose Asset
+         * @description Sell, trade in or write off a hand-valued asset. Record the sale's money
+         *     first, as transfers out of the asset dated on or before `as_of` (the
+         *     proceeds deposit, a loan payoff). What is then left on the asset is the
+         *     rest of its change in value — a gain or a loss at sale, or its whole value
+         *     for a write-off — and is posted against `equity.revaluation` on `as_of`;
+         *     the account closes at zero. `dry_run` shows the figures first.
+         */
+        post: operations["dispose_asset_accounts__account_id__dispose_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -287,6 +312,10 @@ export interface paths {
          *     with ``component="cash"``. Never pass total brokerage value as cash.
          *     Holdings, awards and prices are unchanged; readbacks identify the component.
          *
+         *     A hand-valued asset (type ``property``) reconciles to its value on
+         *     ``as_of``: the difference posts against the system account
+         *     ``equity.revaluation`` as a change in value (decision 113).
+         *
          *     Purser compares the statement figure with its own balance on ``as_of`` in
          *     the chosen ``basis`` and posts ONE adjustment for the difference, dated
          *     ``as_of``, to the system category ``expenses.reconciliation_adjustments``.
@@ -362,13 +391,40 @@ export interface paths {
         put?: never;
         /**
          * Create Valuation
-         * @description Record a loan or property account's value on a date: the balance it
-         *     reports (its latest valuation replaces the postings sum). Any other
-         *     account type is refused (422): its balance comes from its transactions,
-         *     plus holdings for a brokerage account. The answer's `value` is in ledger
-         *     sign whichever `convention` the request used.
+         * @description Record a loan account's value on a date: the balance it reports (its
+         *     latest valuation replaces the postings sum). Any other account type is
+         *     refused (422): its balance comes from its transactions, plus holdings for
+         *     a brokerage account. A hand-valued asset (type property) is a ledger:
+         *     `POST /accounts/{id}/value-changes` or `POST /accounts/{id}/reconcile`.
+         *     The answer's `value` is in ledger sign whichever `convention` the request
+         *     used.
          */
         post: operations["create_valuation_accounts__account_id__valuations_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/accounts/{account_id}/value-changes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Record Value Change
+         * @description Record a change in a hand-valued asset's value (type `property`): one
+         *     posted entry dated `as_of` between the asset and the system account
+         *     `equity.revaluation`, so net worth moves and spending reports do not. To
+         *     set the value on a date instead ("worth X"), use `POST
+         *     /accounts/{id}/reconcile`. A wrong change is undone with `POST
+         *     /value-changes/{transaction_id}/reverse`.
+         */
+        post: operations["record_value_change_accounts__account_id__value_changes_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -982,6 +1038,29 @@ export interface paths {
         get: operations["discovered_accounts_connections__connection_id__discovered_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/connections/{connection_id}/ignore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ignore Account
+         * @description Ignore an unmapped feed account (the same account delivered through a
+         *     second bank login, or one that does not belong in the ledger), or track
+         *     it again with ``ignored: false``. An ignored account is not reported as
+         *     waiting to be mapped; nothing is imported or removed.
+         */
+        post: operations["ignore_account_connections__connection_id__ignore_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2107,7 +2186,7 @@ export interface paths {
          * @description Edit the rule. Live un-pinned instances follow (slots the new rule no
          *     longer produces are voided and released, amounts re-estimated, missing
          *     slots materialized); pinned instances keep their amounts and dates. A new
-         *     `name` or `payee` relabels every live instance — pinned ones too — whose
+         *     `payee` or `memo` relabels every live instance — pinned ones too — whose
          *     description or payee still equals the old one; labels you changed stay.
          */
         patch: operations["update_schedule_schedules__schedule_id__patch"];
@@ -2667,6 +2746,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/value-changes/{transaction_id}/reverse": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reverse Value Change
+         * @description Undo a change in an asset's value — one recorded here or posted by a
+         *     reconcile — through the ledger's reversal pair. The answer's
+         *     `transaction_id` is the zero replacement that records the undo; `amount`
+         *     is the change it took back.
+         */
+        post: operations["reverse_value_change_value_changes__transaction_id__reverse_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/webhooks": {
         parameters: {
             query?: never;
@@ -2746,6 +2848,21 @@ export interface components {
         /** AccountCreate */
         AccountCreate: {
             /**
+             * Acquired On
+             * @description A hand-valued asset only: when it was acquired.
+             */
+            acquired_on?: string | null;
+            /**
+             * Asset Description
+             * @description A hand-valued asset only: an address, a VIN, a note (stored encrypted).
+             */
+            asset_description?: string | null;
+            /**
+             * Asset Kind
+             * @description A hand-valued asset (type property) only: what it is, a label and an icon (default `other`).
+             */
+            asset_kind?: ("house" | "land" | "car" | "boat" | "rv" | "jewelry" | "art" | "equipment" | "other") | null;
+            /**
              * Currency
              * @default USD
              */
@@ -2765,11 +2882,17 @@ export interface components {
             parent_id?: string | null;
             /** Path */
             path?: string | null;
+            /**
+             * Revalue After Days
+             * @description A hand-valued asset only: how many days its value may go without an update before Purser calls it stale (`asset.stale`, `whats_new`).
+             */
+            revalue_after_days?: number | null;
             /** Type */
             type: string;
         };
         /** AccountDetailOut */
         AccountDetailOut: {
+            asset?: components["schemas"]["AssetOut"] | null;
             /** Balance */
             balance?: string | null;
             /** Balance As Of */
@@ -2792,6 +2915,8 @@ export interface components {
             description: string | null;
             /** Drift Basis Override */
             drift_basis_override?: ("pending_inclusive" | "posted_only") | null;
+            /** Equity */
+            equity?: string | null;
             /** External Id */
             external_id: string | null;
             /**
@@ -2834,6 +2959,13 @@ export interface components {
             /** Reconciled Through */
             reconciled_through?: string | null;
             reconciliation?: components["schemas"]["ReconciliationOut"] | null;
+            /** Secured By Id */
+            secured_by_id?: string | null;
+            /**
+             * Secured Loan Ids
+             * @default []
+             */
+            secured_loan_ids: string[];
             /** Type */
             type: string;
         };
@@ -2853,6 +2985,7 @@ export interface components {
         };
         /** AccountOut */
         AccountOut: {
+            asset?: components["schemas"]["AssetOut"] | null;
             /** Balance */
             balance?: string | null;
             /** Balance As Of */
@@ -2874,6 +3007,8 @@ export interface components {
             description: string | null;
             /** Drift Basis Override */
             drift_basis_override?: ("pending_inclusive" | "posted_only") | null;
+            /** Equity */
+            equity?: string | null;
             /** External Id */
             external_id: string | null;
             /**
@@ -2916,6 +3051,13 @@ export interface components {
             /** Reconciled Through */
             reconciled_through?: string | null;
             reconciliation?: components["schemas"]["ReconciliationOut"] | null;
+            /** Secured By Id */
+            secured_by_id?: string | null;
+            /**
+             * Secured Loan Ids
+             * @default []
+             */
+            secured_loan_ids: string[];
             /** Type */
             type: string;
         };
@@ -2936,6 +3078,21 @@ export interface components {
          *     #466) is write scope, with the explicit-null-clears rule.
          */
         AccountUpdate: {
+            /**
+             * Acquired On
+             * @description A hand-valued asset only: when it was acquired. An explicit null clears it; absent leaves it unchanged.
+             */
+            acquired_on?: string | null;
+            /**
+             * Asset Description
+             * @description A hand-valued asset only: an address, a VIN, a note (stored encrypted). An explicit null clears it; absent leaves it unchanged.
+             */
+            asset_description?: string | null;
+            /**
+             * Asset Kind
+             * @description A hand-valued asset (type property) only: what it is, a label and an icon. Absent leaves it unchanged. Write scope.
+             */
+            asset_kind?: ("house" | "land" | "car" | "boat" | "rv" | "jewelry" | "art" | "equipment" | "other") | null;
             /** Description */
             description?: string | null;
             /**
@@ -2971,6 +3128,16 @@ export interface components {
              * @description Move the account to this ltree path, e.g. `liabilities.citicard`. Accounts beneath it move along and keep their relative paths. Refused with 409 when an account already sits at or under the new path, and with 422 for a malformed path or a destination under a category root such as `expenses`. Categories keep their paths.
              */
             path?: string | null;
+            /**
+             * Revalue After Days
+             * @description A hand-valued asset only: how many days its value may go without an update before Purser calls it stale (`asset.stale`, `whats_new`). An explicit null turns the reminder off; absent leaves it unchanged.
+             */
+            revalue_after_days?: number | null;
+            /**
+             * Secured By Id
+             * @description A loan only: the hand-valued asset that secures it (a mortgage's house, a car loan's car); the asset then reports its equity. An explicit null clears it; absent leaves it unchanged. Write scope.
+             */
+            secured_by_id?: string | null;
         };
         /** ActivityOut */
         ActivityOut: {
@@ -3084,6 +3251,34 @@ export interface components {
              * @enum {string}
              */
             posted: "skip" | "correct";
+        };
+        /**
+         * AssetOut
+         * @description What a hand-valued asset (type property) is (#567).
+         */
+        AssetOut: {
+            /** Acquired On */
+            acquired_on: string | null;
+            /** Description */
+            description: string | null;
+            /** Gain */
+            gain?: string | null;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "house" | "land" | "car" | "boat" | "rv" | "jewelry" | "art" | "equipment" | "other";
+            /** Last Valued */
+            last_valued?: string | null;
+            /** Money Put In */
+            money_put_in?: string | null;
+            /** Revalue After Days */
+            revalue_after_days?: number | null;
+            /**
+             * Stale
+             * @default false
+             */
+            stale: boolean;
         };
         /** AuditIdentity */
         AuditIdentity: {
@@ -3432,7 +3627,7 @@ export interface components {
          * BalanceAsOf
          * @description Point-in-time balance from the stored running-balance table
          *     (decision 37: chain-head pending+posted register semantics), or the
-         *     latest valuation for open loan/property accounts (decision 42).
+         *     latest valuation for open loan accounts (decision 42).
          */
         BalanceAsOf: {
             /**
@@ -4208,6 +4403,11 @@ export interface components {
             drift_basis_pinned: boolean;
             /** External Id */
             external_id: string;
+            /**
+             * Ignored
+             * @default false
+             */
+            ignored: boolean;
             /** Ledger Balance */
             ledger_balance?: string | null;
             /** Mapped Account Id */
@@ -4218,6 +4418,49 @@ export interface components {
             name: string | null;
             /** Org */
             org: string | null;
+        };
+        /** DisposalOut */
+        DisposalOut: {
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            /**
+             * As Of
+             * Format: date
+             */
+            as_of: string;
+            /** Closing Change */
+            closing_change: string;
+            /** Dry Run */
+            dry_run: boolean;
+            /** Gain */
+            gain: string;
+            /** Money Put In */
+            money_put_in: string;
+            /** Value Before */
+            value_before: string;
+        };
+        /** DisposeRequest */
+        DisposeRequest: {
+            /**
+             * As Of
+             * Format: date
+             * @description The sale (or disposal) date: today or earlier, and on or after the asset's latest entry.
+             */
+            as_of: string;
+            /**
+             * Dry Run
+             * @description Answer the same, writing nothing.
+             * @default false
+             */
+            dry_run: boolean;
+            /**
+             * Note
+             * @description What happened (sold, traded in, written off); kept on the closing entry.
+             */
+            note?: string | null;
         };
         /** DispositionOut */
         DispositionOut: {
@@ -4635,6 +4878,23 @@ export interface components {
              */
             value_out_of_range: boolean;
         };
+        /** IgnoreOut */
+        IgnoreOut: {
+            /** External Id */
+            external_id: string;
+            /** Ignored */
+            ignored: boolean;
+        };
+        /** IgnoreRequest */
+        IgnoreRequest: {
+            /** External Id */
+            external_id: string;
+            /**
+             * Ignored
+             * @default true
+             */
+            ignored: boolean;
+        };
         /**
          * ImportCounts
          * @description Per-file-account disposition of rows (DESIGN §7.2). The preview counts for
@@ -4831,6 +5091,11 @@ export interface components {
             external_id?: string | null;
             /** Holdings */
             holdings: number;
+            /**
+             * Ignored
+             * @default false
+             */
+            ignored: boolean;
             issue?: components["schemas"]["InventoryIssueOut"] | null;
             /** Name */
             name: string | null;
@@ -5859,8 +6124,13 @@ export interface components {
              */
             dry_run: boolean;
             /**
+             * Note
+             * @description Where the figure came from (a statement, an appraisal, an estimate). Kept on the adjustment row (encrypted) and the audit entry.
+             */
+            note?: string | null;
+            /**
              * Statement Balance
-             * @description The balance AS THE STATEMENT SHOWS IT. Checking, savings and cash: positive = money in the account. Credit card: positive = the amount owed (a credit balance is negative). Purser converts it to ledger sign, where a card is negative when owed.
+             * @description The balance AS THE STATEMENT SHOWS IT. Checking, savings and cash: positive = money in the account. Credit card: positive = the amount owed (a credit balance is negative). Purser converts it to ledger sign, where a card is negative when owed. A hand-valued asset (property): its value on as_of.
              */
             statement_balance: number | string;
         };
@@ -6300,14 +6570,25 @@ export interface components {
             dtstart?: string | null;
             /** Estimate Basis */
             estimate_basis?: ("last" | "rolling_avg_3" | "rolling_avg_12" | "counterparty_balance") | null;
-            /** Name */
-            name: string;
+            /**
+             * Memo
+             * @description free-text note
+             */
+            memo?: string | null;
+            /**
+             * Name
+             * @description deprecated (#534): send payee and memo. Without a memo it is split: a transfer's memo, a flat schedule's payee when none is sent, else its memo
+             */
+            name?: string | null;
             /**
              * Note
              * @description with propose=true: evidence for the person deciding the proposal, such as the statement line it came from; kept encrypted with the suggestion and shown on its card. A direct create has no suggestion and keeps no note.
              */
             note?: string | null;
-            /** Payee */
+            /**
+             * Payee
+             * @description who is paid or pays; required for a flat schedule without a memo
+             */
             payee?: string | null;
             /**
              * Propose
@@ -6373,10 +6654,23 @@ export interface components {
              * @description Most recent 50 matched occurrences
              */
             matched_instances?: components["schemas"]["InstanceOut"][];
-            /** Name */
+            /**
+             * Memo
+             * @description free-text note (#534)
+             */
+            memo?: string | null;
+            /**
+             * Name
+             * @description the label, derived: the memo, else the payee, else the transfer counterparty account's name; written as each instance's description
+             */
             name: string;
             /** Next Due */
             next_due: string | null;
+            /**
+             * Payee
+             * @description who is paid or pays (#534)
+             */
+            payee?: string | null;
             /** Rrule */
             rrule: string;
             /** Source */
@@ -6429,10 +6723,23 @@ export interface components {
              * Format: uuid
              */
             id: string;
-            /** Name */
+            /**
+             * Memo
+             * @description free-text note (#534)
+             */
+            memo?: string | null;
+            /**
+             * Name
+             * @description the label, derived: the memo, else the payee, else the transfer counterparty account's name; written as each instance's description
+             */
             name: string;
             /** Next Due */
             next_due: string | null;
+            /**
+             * Payee
+             * @description who is paid or pays (#534)
+             */
+            payee?: string | null;
             /** Rrule */
             rrule: string;
             /** Source */
@@ -6463,9 +6770,20 @@ export interface components {
             dtstart?: string | null;
             /** Estimate Basis */
             estimate_basis?: ("last" | "rolling_avg_3" | "rolling_avg_12" | "counterparty_balance") | null;
-            /** Name */
+            /**
+             * Memo
+             * @description "" clears it
+             */
+            memo?: string | null;
+            /**
+             * Name
+             * @description deprecated (#534): send payee and memo
+             */
             name?: string | null;
-            /** Payee */
+            /**
+             * Payee
+             * @description "" clears it (a memo must remain)
+             */
             payee?: string | null;
             /** Rrule */
             rrule?: string | null;
@@ -6957,18 +7275,27 @@ export interface components {
         };
         /**
          * SyncSchedule
-         * @description User-facing SimpleFIN sync schedule (UTC).
+         * @description User-facing SimpleFIN sync schedule.
          *
-         *     Presets rather than raw cron. ``hour``/``minute`` apply to ``daily`` only;
-         *     the interval presets are anchored so every choice lands a fresh sync just
+         *     Presets rather than raw cron. ``hour``/``minute`` apply to ``daily`` only
+         *     and are a wall-clock time in the household time zone (``timezone``,
+         *     decision 111): the scheduler reads the daily trigger in that zone, so the
+         *     sync keeps its time on the clock across daylight-saving changes. The
+         *     interval presets stay anchored in UTC so every one lands a fresh sync just
          *     before the 06:45 UTC matching job, and ``hourly`` (24 runs/day) sits
          *     exactly at the SimpleFIN Bridge budget — the per-connection fetch guard
          *     fails soft beyond it.
          */
         SyncSchedule: {
-            /** Hour */
+            /**
+             * Hour
+             * @description Daily only: the hour in the household time zone.
+             */
             hour?: number | null;
-            /** Minute */
+            /**
+             * Minute
+             * @description Daily only: the minute in the household time zone.
+             */
             minute?: number | null;
             /**
              * Preset
@@ -7155,6 +7482,11 @@ export interface components {
             /** Is Transfer */
             is_transfer: boolean;
             /**
+             * Money Put In
+             * @default false
+             */
+            money_put_in: boolean;
+            /**
              * Needs Review
              * @description true when the row is in the unreviewed set (#175): the same test as GET /transactions?reviewed=false and the review count
              */
@@ -7197,6 +7529,11 @@ export interface components {
             superseded_by: string | null;
             /** Transfer Account Path */
             transfer_account_path: string | null;
+            /**
+             * Value Change
+             * @default false
+             */
+            value_change: boolean;
         };
         /**
          * TransactionOut
@@ -7254,6 +7591,11 @@ export interface components {
             /** Is Transfer */
             is_transfer: boolean;
             /**
+             * Money Put In
+             * @default false
+             */
+            money_put_in: boolean;
+            /**
              * Needs Review
              * @description true when the row is in the unreviewed set (#175): the same test as GET /transactions?reviewed=false and the review count
              */
@@ -7288,6 +7630,11 @@ export interface components {
             status: string;
             /** Transfer Account Path */
             transfer_account_path: string | null;
+            /**
+             * Value Change
+             * @default false
+             */
+            value_change: boolean;
         };
         /** TransactionUpdate */
         TransactionUpdate: {
@@ -7522,7 +7869,7 @@ export interface components {
             as_of: string;
             /**
              * Convention
-             * @description How `value`'s sign reads. `ledger` (default): as Purser stores it, a loan negative when owed. `statement`: as the statement prints it, a loan POSITIVE when owed (a credit balance is negative); Purser negates it into ledger sign, the same conversion reconciliation applies. A property reads the same either way.
+             * @description How `value`'s sign reads. `ledger` (default): as Purser stores it, a loan negative when owed. `statement`: as the statement prints it, a loan POSITIVE when owed (a credit balance is negative); Purser negates it into ledger sign, the same conversion reconciliation applies.
              * @default ledger
              * @enum {string}
              */
@@ -7534,7 +7881,7 @@ export interface components {
             source: string;
             /**
              * Value
-             * @description The account's value on as_of, in ledger sign unless `convention` says otherwise: a property is positive, a loan is NEGATIVE while money is owed. A positive value on a loan is rejected (422) rather than recorded as an asset.
+             * @description The account's value on as_of, in ledger sign unless `convention` says otherwise: a loan is NEGATIVE while money is owed. A positive value on a loan is rejected (422) rather than recorded as an asset.
              */
             value: number | string;
         };
@@ -7559,6 +7906,68 @@ export interface components {
             source: string;
             /** Value */
             value: string;
+        };
+        /** ValueChangeCreate */
+        ValueChangeCreate: {
+            /**
+             * Amount
+             * @description The change, signed: positive when the asset gained value, negative when it lost value. Nonzero.
+             */
+            amount: number | string;
+            /**
+             * As Of
+             * Format: date
+             * @description The day the value changed: today (household time zone) or earlier. A backdated change moves every balance after it, like any transaction.
+             */
+            as_of: string;
+            /**
+             * Kind
+             * @description `revaluation` (default): a change in the asset's market value, against the system account `equity.revaluation`. `capital`: money put into the asset that no tracked account paid — its purchase before your history, an improvement paid in cash — against `equity.capital`, so it never counts as a gain. (Money paid from a tracked account is a transfer to the asset instead.)
+             * @default revaluation
+             * @enum {string}
+             */
+            kind: "revaluation" | "capital";
+            /**
+             * Note
+             * @description Where the figure came from (an appraisal, an estimate). Stored encrypted as the entry's description.
+             */
+            note?: string | null;
+            /**
+             * Reference
+             * @description Optional identifier that makes a retry safe: a repeated reference on the account posts nothing and answers with the first change (200, `created: false`). Letters, digits, '.', '_', ':' and '-' only (stored in plaintext).
+             */
+            reference?: string | null;
+        };
+        /** ValueChangeOut */
+        ValueChangeOut: {
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            /** Amount */
+            amount: string;
+            /**
+             * As Of
+             * Format: date
+             */
+            as_of: string;
+            /** Balance */
+            balance: string;
+            /** Created */
+            created: boolean;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "revaluation" | "capital";
+            /** Reversed */
+            reversed: boolean;
+            /**
+             * Transaction Id
+             * Format: uuid
+             */
+            transaction_id: string;
         };
         /** VarianceOut */
         VarianceOut: {
@@ -8052,6 +8461,41 @@ export interface operations {
             };
         };
     };
+    dispose_asset_accounts__account_id__dispose_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DisposeRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DisposalOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     capture_lots_accounts__account_id__lot_captures_post: {
         parameters: {
             query?: never;
@@ -8355,6 +8799,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ValuationOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    record_value_change_accounts__account_id__value_changes_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ValueChangeCreate"];
+            };
+        };
+        responses: {
+            /** @description A repeated reference: the first change, nothing posted. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ValueChangeOut"];
                 };
             };
             /** @description Validation Error */
@@ -9376,6 +9862,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DiscoveredOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    ignore_account_connections__connection_id__ignore_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                connection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["IgnoreRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IgnoreOut"];
                 };
             };
             /** @description Validation Error */
@@ -12216,6 +12737,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UserOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    reverse_value_change_value_changes__transaction_id__reverse_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                transaction_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ValueChangeOut"];
                 };
             };
             /** @description Validation Error */

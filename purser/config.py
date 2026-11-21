@@ -94,7 +94,7 @@ class Settings(BaseSettings):
     # (`none` or `tiingo`) and how many days old a close may be before a
     # position is reported as priced on a stale close. The provider's API key
     # is NOT an env setting: it lives only in the encrypted app settings
-    # (Config, Prices), because Purser is the party that sends it.
+    # (Settings, Prices), because Purser is the party that sends it.
     price_provider: str = "none"
     price_stale_days: int = 7
     # Feed freshness (#480): a mapped account whose bank balance date is more

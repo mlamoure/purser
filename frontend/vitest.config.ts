@@ -16,6 +16,9 @@ export default mergeConfig(
       environment: "jsdom",
       include: ["src/**/*.test.{ts,tsx}", "widgets/**/*.test.ts"],
       setupFiles: ["./src/test/setup.ts"],
+      // Vitest stubs CSS to "" unless a file is listed here; the theme test
+      // (#543) reads the token source as text (`index.css?raw`).
+      css: { include: [/src\/index\.css/] },
     },
   }),
 );

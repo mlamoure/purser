@@ -2,6 +2,14 @@
 # Re-review reachability on code/image changes; never extend dates automatically.
 # Raw scan artifacts retain all findings. New versions and new IDs fail closed.
 vulnerabilities:
+  - id: CVE-2026-124709
+    expired_at: 2026-12-01
+    statement: >-
+      Reviewed 2026-11-21. OpenSSL's QUIC stack is reachable only through its QUIC API. Purser serves HTTP/1.1 over TCP (uvicorn), its clients use TLS over TCP (httpx), the image has no web server binary and no QUIC or HTTP/3 library, and Python's ssl module exposes no QUIC.
+    purls:
+      - pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3
+      - pkg:deb/debian/openssl@3.5.7-1~deb13u3
+      - pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3
   - id: CVE-2025-69720
     expired_at: 2026-12-01
     statement: >-

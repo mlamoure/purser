@@ -134,10 +134,51 @@ def _resolve_counterparty(
     return counterparty
 
 
+def _clean(value: str | None) -> str | None:
+    """Blank text is no text: ``""`` clears a field on update."""
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def resolve_labels(
+    *,
+    name: str | None,
+    payee_name: str | None,
+    memo: str | None,
+    counterparty_name: str | None,
+) -> tuple[str, str | None, str | None]:
+    """A scheduled transaction's payee and memo, and the label they derive
+    (#534): ``(label, payee, memo)``.
+
+    ``name`` is the pre-#534 single field, still accepted from agents. Sent
+    without a memo it is split the way migration 0050 split stored rows: a
+    transfer's name is its memo; a flat schedule without a payee names its
+    payee; one with a different payee keeps the name as its memo. The label
+    is the memo, else the payee, else a transfer's counterparty account name
+    — a flat schedule needs a payee or a memo."""
+    payee_name = _clean(payee_name)
+    memo = _clean(memo)
+    name = _clean(name)
+    is_transfer = counterparty_name is not None
+    if name is not None and memo is None:
+        if is_transfer:
+            memo = name
+        elif payee_name is None:
+            payee_name = name
+        elif core.normalize_payee(name) != core.normalize_payee(payee_name):
+            memo = name
+    label = memo or payee_name or counterparty_name
+    if label is None:
+        raise LedgerError("a scheduled transaction needs a payee (or a memo)")
+    return label, payee_name, memo
+
+
 def create_schedule(
     session: Session,
     *,
-    name: str,
+    name: str | None = None,
     account_ref: str,
     rrule: str,
     amount_type: str,
@@ -153,6 +194,7 @@ def create_schedule(
     note: str | None = None,
     propose: bool = False,
     date_mode: str = "fixed",
+    memo: str | None = None,
 ) -> Schedule | Suggestion:
     """Create an ACTIVE schedule and materialize it. With ``propose`` the
     caller asks instead (#436): a **suggestion** carrying the validated draft
@@ -180,6 +222,12 @@ def create_schedule(
     if counterparty_account_ref is not None and category_path is not None:
         raise LedgerError("a schedule is either a transfer (counterparty) or flat (category)")
     counterparty = _resolve_counterparty(session, account, counterparty_account_ref)
+    name, payee_name, memo = resolve_labels(
+        name=name,
+        payee_name=payee_name,
+        memo=memo,
+        counterparty_name=counterparty.name if counterparty is not None else None,
+    )
     estimate_basis = _validate_amount_fields(
         amount_type=amount_type,
         amount=amount,
@@ -223,6 +271,7 @@ def create_schedule(
             amount=amount,
             estimate_basis=estimate_basis,
             payee_name=payee_name,
+            memo=memo,
             category_path=category_path,
             autopost_policy=autopost_policy,
             counterparty_account_ref=counterparty_account_ref,
@@ -253,6 +302,7 @@ def create_schedule(
     status = "active"
     schedule = Schedule(
         name=name,
+        memo=memo,
         account_id=account.id,
         payee_id=ledger_service.resolve_payee(session, payee_name).id if payee_name else None,
         category_path=category_path,
@@ -279,6 +329,8 @@ def create_schedule(
         entity_id=schedule.id,
         after={
             "name": name,
+            "payee": payee_name,
+            "memo": memo,
             "rrule": rrule,
             "dtstart": anchor.isoformat(),
             "counterparty_account_id": str(counterparty.id) if counterparty else None,
@@ -299,6 +351,7 @@ def _require_write(token: ApiToken, what: str) -> None:
 def _schedule_audit_shape(schedule: Schedule) -> dict[str, Any]:
     return {
         "name": schedule.name,
+        "memo": schedule.memo,
         "rrule": schedule.rrule,
         "dtstart": schedule.dtstart.isoformat(),
         "date_type": schedule.date_type,
@@ -406,6 +459,7 @@ def update_schedule(
     autopost_policy: str | None = None,
     counterparty_account_ref: str | None = None,
     date_mode: str | None = None,
+    memo: str | None = None,
 ) -> UpdatedSchedule:
     """Edit the rule (write scope). Live, un-pinned instances are resynced:
     slots the new rule no longer produces are voided-and-released, amounts
@@ -464,10 +518,30 @@ def update_schedule(
         if autopost_policy not in AUTOPOST_POLICIES:
             raise LedgerError("autopost_policy must be auto_post | wait_for_match | reminder_only")
         schedule.autopost_policy = autopost_policy
-    if payee_name is not None:
-        schedule.payee_id = ledger_service.resolve_payee(session, payee_name).id
-    if name is not None:
-        schedule.name = name
+    name = _clean(name)
+    if name is not None or payee_name is not None or memo is not None or shape_changed:
+        # Fields not sent keep their value; "" clears the payee or the memo.
+        current_payee = session.get(Payee, schedule.payee_id) if schedule.payee_id else None
+        counterparty_row = (
+            session.get(Account, schedule.counterparty_account_id)
+            if schedule.counterparty_account_id
+            else None
+        )
+        label, new_payee, new_memo = resolve_labels(
+            name=name,
+            payee_name=(
+                payee_name
+                if payee_name is not None
+                else (current_payee.name if current_payee is not None else None)
+            ),
+            memo=memo if memo is not None else (None if name is not None else schedule.memo),
+            counterparty_name=counterparty_row.name if counterparty_row is not None else None,
+        )
+        schedule.payee_id = (
+            ledger_service.resolve_payee(session, new_payee).id if new_payee is not None else None
+        )
+        schedule.memo = new_memo
+        schedule.name = label
     if rrule is not None or dtstart is not None:
         new_rrule = rrule or schedule.rrule
         new_anchor = dtstart or schedule.dtstart

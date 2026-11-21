@@ -80,6 +80,16 @@ class TestLoginEpisodes:
         assert events[-1]["institution"] == CONN["name"]
         assert events[-1]["code"] == "con.auth"
 
+    def test_unprefixed_login_id_still_names_the_bank(self, harness: FeedHarness) -> None:
+        """#559: an issue naming the login without its id prefix carries the
+        bank's name, and its episode is keyed by the id the issue sent."""
+        short = [{"code": "con.auth", "msg": "Log in again", "conn_id": "DEMO-1"}]
+        connection_id = _connected(harness, _payload(errlist=short))
+        (event,) = _events("feed.auth_required")
+        assert (event["institution"], event["conn_id"]) == (CONN["name"], "DEMO-1")
+        _sync(harness, connection_id, _payload(errlist=short))
+        assert len(_events("feed.auth_required")) == 1
+
     def test_digest_names_the_login_until_it_is_fixed(self, harness: FeedHarness) -> None:
         connection_id = _connected(harness, _payload(errlist=AUTH))
         feed = _feed_digest()

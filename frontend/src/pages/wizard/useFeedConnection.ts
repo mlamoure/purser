@@ -1,17 +1,8 @@
 import { useRef, useState } from "react";
-import type { components } from "../../api/schema";
 import { api, errorDetail } from "../../lib/api";
+import { mapFeedAccount, type Discovered, type MapTarget } from "./MapFeedAccountForm";
 
-export type Discovered = components["schemas"]["DiscoveredOut"];
-
-/** Ledger label the wizard gives a bank account it maps: the account's name
- * (or external id) lower-cased, other characters collapsed to `_`. */
-export function accountLabel(d: Pick<Discovered, "name" | "external_id">): string {
-  return (d.name ?? d.external_id)
-    .toLowerCase()
-    .replace(/[^a-z0-9_]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-}
+export type { Discovered } from "./MapFeedAccountForm";
 
 /** The wizard's SimpleFIN connection and the bank accounts it discovered —
  * the state steps 3 (connect) and 4 (map) share. `connect` and `mapAccount`
@@ -50,22 +41,12 @@ export function useFeedConnection() {
     await refreshDiscovered(cid);
   };
 
-  /** Create a checking account under `assets.` for a discovered bank account
-   * and map it; its archived transactions import on the spot. */
-  const mapAccount = async (d: Discovered) => {
+  /** Map a discovered bank account onto `target` (a new or existing Purser
+   * account, from MapFeedAccountForm); its archived transactions import on
+   * the spot. */
+  const mapAccount = async (d: Discovered, target: MapTarget) => {
     if (!connectionId) throw new Error("connect a SimpleFIN feed first");
-    const { error } = await api.POST("/connections/{connection_id}/map", {
-      params: { path: { connection_id: connectionId } },
-      body: {
-        external_id: d.external_id,
-        create: {
-          name: d.name ?? d.external_id,
-          type: "checking",
-          path: `assets.${accountLabel(d)}`,
-        },
-      },
-    });
-    if (error) throw new Error(errorDetail(error));
+    await mapFeedAccount(connectionId, d.external_id, target);
     await refreshDiscovered(connectionId);
   };
 

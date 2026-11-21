@@ -30,7 +30,7 @@ are present**:
 | `PURSER_OIDC_CLIENT_ID` | The client id from the provider. |
 | `PURSER_OIDC_CLIENT_SECRET` | The client secret (write-only: encrypted at rest, never echoed back, masked to set/unset in audit rows). |
 
-These are **runtime-editable** in **Config -> Settings** (or the admin-scoped
+These are **runtime-editable** in **Settings -> Security** (or the admin-scoped
 `/config` API); the environment values are just the bootstrap default, and a
 database override wins. Every change is audited.
 
@@ -80,7 +80,7 @@ and records the provider, and any other subject is refused until you unlink it.
 
 1. Make sure the new provider asserts verified emails that match your Purser
    accounts (letter case does not matter).
-2. Change the issuer, client id and client secret in **Config -> Settings**.
+2. Change the issuer, client id and client secret in **Settings -> Security**.
 3. Each person signs in through the new provider once. Their account relinks
    to the new identity, audited with the previous issuer. Accounts nobody signs
    in with stay linked to the old provider until they do, or until an admin
@@ -150,7 +150,7 @@ kill switch: it disables SSO even when the environment configures it.
 
 With all three set, the login page offers an SSO button that redirects to your
 provider and back through the callback URI above. If the round trip fails, log in
-with a password, open **Config -> Settings**, and re-check the issuer URL and the
+with a password, open **Settings -> Security**, and re-check the issuer URL and the
 redirect URI registered at the provider — those two are the usual culprits.
 
 The authoritative spec is

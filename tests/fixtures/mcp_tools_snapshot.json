@@ -1,7 +1,7 @@
 [
   {
     "name": "account_balance",
-    "description": "Point-in-time balance of one real account (UUID or path). Open\nloan/property accounts answer with their latest valuation at or before\nas_of (method 'valuation'); open brokerage accounts add their latest\nholdings market value on top of the postings basis (method\n'postings+holdings'); everything else answers from the STORED running\nbalances alone (method 'postings'; register semantics: chain-head\npending+posted rows). as_of is an ISO date, default today; 0 before the\naccount's first activity; closed accounts answer their whole history.\nbank_snapshot carries the latest bank-reported and available balances,\ntheir currency, source timestamp/precision, ingestion time and freshness,\nunder the same read scope. Available balance is separate (e.g. remaining\ncredit on a card). Its comparison reports live posted and pending-inclusive\ntotals over ALL recorded dates, the effective/learned/pinned basis and exact\nbank-minus-ledger difference; matches_either_basis is the separate alert\npolicy. Null means unknown/unavailable, never zero. Even with as_of, this\nsnapshot is LATEST, not historical bank truth. For a balance over TIME,\ncall balance_history instead of looping this.",
+    "description": "Point-in-time balance of one real account (UUID or path). Open\nloan accounts answer with their latest valuation at or before\nas_of (method 'valuation'); open brokerage accounts add their latest\nholdings market value on top of the postings basis (method\n'postings+holdings'); everything else answers from the STORED running\nbalances alone (method 'postings'; register semantics: chain-head\npending+posted rows). as_of is an ISO date, default today; 0 before the\naccount's first activity; closed accounts answer their whole history.\nbank_snapshot carries the latest bank-reported and available balances,\ntheir currency, source timestamp/precision, ingestion time and freshness,\nunder the same read scope. Available balance is separate (e.g. remaining\ncredit on a card). Its comparison reports live posted and pending-inclusive\ntotals over ALL recorded dates, the effective/learned/pinned basis and exact\nbank-minus-ledger difference; matches_either_basis is the separate alert\npolicy. Null means unknown/unavailable, never zero. Even with as_of, this\nsnapshot is LATEST, not historical bank truth. For a balance over TIME,\ncall balance_history instead of looping this.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -180,18 +180,37 @@
   },
   {
     "name": "create_schedule",
-    "description": "Create a bill/income schedule (e.g. from a parsed statement email).\nIt is created active. When you are acting on your own initiative rather\nthan on the user's request (a pattern you noticed), pass propose=true:\nit lands as a suggestion for the user to decide, and is refused when the\naccount already has a schedule for that payee or counterparty (the error\nnames it). note (200 characters or fewer) is a proposal's evidence for\nthe person deciding it, such as the statement line you read; it shows on\nthe suggestion's card. A direct create keeps no note.\n\nrrule is RFC 5545 (FREQ=MONTHLY;BYMONTHDAY=6,20 is semi-monthly); dtstart\n(YYYY-MM-DD) anchors it \u2014 pass the last real occurrence so anchor-sensitive\nrules count from it. amount is the schedule account's leg (negative =\nmoney out); required for amount_type=fixed, the fallback for\namount_type=estimated (estimate_basis last | rolling_avg_3 |\nrolling_avg_12 from confirmed matches, or counterparty_balance = pay the\ncounterparty's full reported balance, for card payments).\n\nA recurring TRANSFER \u2014 card payment, loan payment, 529/IRA contribution \u2014\nnames the other real account as counterparty_account instead of a\ncategory; its instances are two-leg expected transfers. The schedule is\nitself the signal that links its bank rows (the same two accounts, exactly\nthe instance amount, both sides within 3 days of the instance \u2014 also when\nthe sides post on different days), and the merged transfer settles the\ninstance once.",
+    "description": "Create a bill/income schedule (e.g. from a parsed statement email).\nIt is created active. When you are acting on your own initiative rather\nthan on the user's request (a pattern you noticed), pass propose=true:\nit lands as a suggestion for the user to decide, and is refused when the\naccount already has a schedule for that payee or counterparty (the error\nnames it). note (200 characters or fewer) is a proposal's evidence for\nthe person deciding it, such as the statement line you read; it shows on\nthe suggestion's card. A direct create keeps no note.\n\npayee is who is paid or pays (required for a flat schedule unless memo is\nsent); memo is an optional free-text note. The schedule's label (its\ninstances' description) is the memo, else the payee, else a transfer's\ncounterparty account. name is the older single field: sent without memo\nit becomes a transfer's memo, a flat schedule's payee when payee is\nomitted, or otherwise its memo \u2014 prefer payee and memo.\n\nrrule is RFC 5545 (FREQ=MONTHLY;BYMONTHDAY=6,20 is semi-monthly); dtstart\n(YYYY-MM-DD) anchors it \u2014 pass the last real occurrence so anchor-sensitive\nrules count from it. amount is the schedule account's leg (negative =\nmoney out); required for amount_type=fixed, the fallback for\namount_type=estimated (estimate_basis last | rolling_avg_3 |\nrolling_avg_12 from confirmed matches, or counterparty_balance = pay the\ncounterparty's full reported balance, for card payments).\n\nA recurring TRANSFER \u2014 card payment, loan payment, 529/IRA contribution \u2014\nnames the other real account as counterparty_account instead of a\ncategory; its instances are two-leg expected transfers. The schedule is\nitself the signal that links its bank rows (the same two accounts, exactly\nthe instance amount, both sides within 3 days of the instance \u2014 also when\nthe sides post on different days), and the merged transfer settles the\ninstance once.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "name": {
-          "type": "string"
-        },
         "account": {
           "type": "string"
         },
         "rrule": {
           "type": "string"
+        },
+        "payee": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "memo": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "amount": {
           "anyOf": [
@@ -212,7 +231,7 @@
           "default": "fixed",
           "type": "string"
         },
-        "payee": {
+        "name": {
           "anyOf": [
             {
               "type": "string"
@@ -288,7 +307,6 @@
         }
       },
       "required": [
-        "name",
         "account",
         "rrule"
       ],
@@ -481,6 +499,55 @@
     }
   },
   {
+    "name": "dispose_asset",
+    "description": "Sell, trade in or write off a hand-valued asset (write scope). First\nrecord the sale's money as transfers out of the asset dated on or before\nas_of: the bank's deposit of the proceeds (update_transaction on that\nrow with category=\"[asset path]\") and any loan payoff. Then call this:\nwhat is left on the asset is the rest of its change in value \u2014 a gain or\nloss at sale, or its whole value for a write-off \u2014 posted against\nequity.revaluation on as_of, and the account closes at zero. Refused when\nan entry on the asset is dated after as_of. dry_run=true answers the\nsame without writing; read value_before back to the user first: a value\nequal to the whole asset means no proceeds were recorded (a write-off).\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "as_of": {
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "dry_run": {
+          "default": false,
+          "type": "boolean"
+        },
+        "include": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "account",
+        "as_of"
+      ],
+      "type": "object"
+    }
+  },
+  {
     "name": "end_schedule",
     "description": "Pause, resume or end a schedule (write scope). action=pause stops\nexpecting it (live unedited instances are dropped); action=resume makes a\npaused schedule active again and brings its instances back; action=end is\nterminal \u2014 history and matched instances stay, and an ended schedule\ncannot be resumed. A schedule waiting to be confirmed is a suggestion,\nnot a schedule: decide it with decide_suggestion.",
     "inputSchema": {
@@ -502,7 +569,7 @@
   },
   {
     "name": "feed_status",
-    "description": "Bank feed health in one look: one line per bank login (status ok,\nneeds_login \u2014 log in again at the bank through SimpleFIN Bridge \u2014 or\nerror, with how many accounts it delivers and how many feed a ledger\naccount), then only the accounts that need attention: not_connected (a\nfeed account no ledger account takes, e.g. a newly opened one), stale Nd\n(the bank balance has not updated for N days), an act.* code (the bank\nfailed to deliver it), ambiguous_id. Account numbers are never shown.\nUse it for \"did a new account show up?\" or \"which bank needs me?\".",
+    "description": "Bank feed health in one look: one line per bank login (status ok,\nneeds_login \u2014 log in again at the bank through SimpleFIN Bridge \u2014 or\nerror, with how many accounts it delivers and how many feed a ledger\naccount), then only the accounts that need attention: not_connected (a\nfeed account no ledger account takes, e.g. a newly opened one; one the\nuser chose to ignore is not listed), stale Nd\n(the bank balance has not updated for N days), an act.* code (the bank\nfailed to deliver it), ambiguous_id. Account numbers are never shown.\nUse it for \"did a new account show up?\" or \"which bank needs me?\".",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {},
@@ -643,7 +710,7 @@
   },
   {
     "name": "list_accounts",
-    "description": "Real accounts with current balances (pending+posted). Loan/property\naccounts report their latest valuation instead of the postings sum\n(marked balance_method='valuation'); brokerage accounts add their latest\nholdings market value on top of it (balance_method='postings+holdings').\nBoth carry the overlay's balance_as_of date. A reconciled account carries\n`reconciliation`: its latest reconciled date, basis and component (cash\nonly for brokerage, balance for other accounts), and whether the\nledger still matches the statement on that date (difference = ledger\nminus statement target, ledger sign; nonzero means a later write moved\nit).\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
+    "description": "Real accounts with current balances (pending+posted). Loan accounts\nreport their latest valuation instead of the postings sum\n(marked balance_method='valuation'); brokerage accounts add their latest\nholdings market value on top of it (balance_method='postings+holdings').\nBoth carry the overlay's balance_as_of date. A reconciled account carries\n`reconciliation`: its latest reconciled date, basis and component (cash\nonly for brokerage, balance for other accounts), and whether the\nledger still matches the statement on that date (difference = ledger\nminus statement target, ledger sign; nonzero means a later write moved\nit). A hand-valued asset (type property) carries asset_kind (house, car,\n...) and, when it secures loans, equity (its value plus those loans,\nledger sign) with secured_loans (their paths); a secured loan carries\nsecured_by (the asset's path). An asset whose value is older than its\nrevalue_after_days carries value_stale=true and last_valued. Every asset\ncarries gain (the sum of its changes in value) and money_put_in (its\npurchase and transfers); together they are its value.\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -953,7 +1020,7 @@
   },
   {
     "name": "list_schedules",
-    "description": "Bill/income schedules with next due dates.\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
+    "description": "Bill/income schedules with next due dates. name is the label (memo,\nelse payee, else the transfer counterparty); payee and memo are the\nfields create_schedule and update_schedule take.\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1678,7 +1745,7 @@
   },
   {
     "name": "reconcile_account",
-    "description": "Reconcile a checking, savings, cash or credit-card account to a\nstatement (write scope). statement_balance is the figure AS THE STATEMENT\nSHOWS IT: positive = money in the account, or for a credit card the amount\nowed. Purser converts it to ledger sign (cards are negative when owed), and\nevery other amount in the answer is ledger sign. basis is posted (default)\nor pending_inclusive (posted plus pending); as_of is YYYY-MM-DD, today or\nearlier. Purser posts ONE adjustment for the difference to a system\ncategory, and it lands in the review set; when the ledger already matches\nnothing is posted and the clean reconcile is still recorded. dry_run=true\nanswers the same without writing. Retrying the same date and balance\nreturns created=false while it still holds; once a backdated change has\nmoved the balance on that date it fails with the difference.\nFor a manual brokerage account, component=\"cash\" is REQUIRED and\nstatement_balance must be cash only, excluding securities and unvested\nawards. Holdings and prices never change. Other accounts use the default\ncomponent=\"balance\". Results and list_accounts identify which component\nwas reconciled; list_accounts checks whether it still holds.",
+    "description": "Reconcile a checking, savings, cash or credit-card account to a\nstatement, or set a hand-valued asset's value on a date (write scope).\nstatement_balance is the figure AS THE STATEMENT SHOWS IT: positive =\nmoney in the account, or for a credit card the amount owed. Purser\nconverts it to ledger sign (cards are negative when owed), and\nevery other amount in the answer is ledger sign. basis is posted (default)\nor pending_inclusive (posted plus pending); as_of is YYYY-MM-DD, today or\nearlier. Purser posts ONE adjustment for the difference to a system\ncategory, and it lands in the review set; when the ledger already matches\nnothing is posted and the clean reconcile is still recorded. dry_run=true\nanswers the same without writing. Retrying the same date and balance\nreturns created=false while it still holds; once a backdated change has\nmoved the balance on that date it fails with the difference.\nFor a manual brokerage account, component=\"cash\" is REQUIRED and\nstatement_balance must be cash only, excluding securities and unvested\nawards. Holdings and prices never change. Other accounts use the default\ncomponent=\"balance\". Results and list_accounts identify which component\nwas reconciled; list_accounts checks whether it still holds.\nA hand-valued asset (type property: a house, a car) reconciles to its\nvalue: statement_balance is what it is worth on as_of, and the difference\nposts against the system account equity.revaluation as a change in value\n(category in the answer), so net worth moves and spending does not. One\nvalue per date; a date before the latest one is refused (record a\nbackdated change with record_value_change instead). note says where the\nfigure came from (an appraisal, an estimate) and is kept on the entry.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1706,6 +1773,17 @@
             "cash"
           ],
           "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -2080,7 +2158,7 @@
   },
   {
     "name": "record_valuation",
-    "description": "Record a loan or property account's value on a date (write scope).\nSuch an account's balance IS its latest valuation, in net worth and on\nevery account surface, so this is how it is kept current: it cannot be\nreconciled (reconcile_account is for checking, savings, cash and credit\ncards). as_of is YYYY-MM-DD. value is a decimal string in ledger sign by\ndefault (convention='ledger'): a property positive, a loan NEGATIVE while\nmoney is owed. To enter the figure as the statement prints it, a loan's\namount owed positive, pass convention='statement' and Purser negates it,\nexactly as reconcile_account converts a statement balance. Never flip the\nsign yourself: a positive loan value in ledger convention is refused,\nnever recorded as an asset. The answer's value is the stored figure, in\nledger sign.",
+    "description": "Record a loan account's value on a date (write scope). A loan's\nbalance IS its latest valuation, in net worth and on every account\nsurface, so this is how it is kept current: it cannot be reconciled\n(reconcile_account is for checking, savings, cash, credit cards and\nhand-valued assets). A hand-valued asset (type property) is refused here:\nits value is a ledger, changed with record_value_change or set on a date\nwith reconcile_account. as_of is YYYY-MM-DD. value is a decimal string in\nledger sign by default (convention='ledger'): a loan NEGATIVE while money\nis owed. To enter the figure as the statement prints it, a loan's\namount owed positive, pass convention='statement' and Purser negates it,\nexactly as reconcile_account converts a statement balance. Never flip the\nsign yourself: a positive loan value in ledger convention is refused,\nnever recorded as an asset. The answer's value is the stored figure, in\nledger sign.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2102,6 +2180,70 @@
         "account",
         "as_of",
         "value"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "record_value_change",
+    "description": "Record a change in a hand-valued asset's value (a house, a car: an\naccount of type property; write scope). amount is a signed decimal\nstring: \"25000.00\" when it gained value, \"-4000.00\" when it lost value.\nas_of is YYYY-MM-DD, today or earlier; a backdated change moves every\nbalance after it, like any transaction. Purser posts one entry against\nthe system account equity.revaluation, so net worth moves and spending\ndoes not. note says where the figure came from. reference (letters,\ndigits, . _ : - only) makes a retry safe: a reference already used on the\naccount posts nothing and answers with the first change (created=false).\nTo set the value on a date (\"worth X\"), use reconcile_account with the\nvalue as statement_balance; it posts the difference the same way. A wrong\nchange is undone with reverse_value_change. The answer's balance is the\nasset's value now. kind=\"capital\" records money put in instead of a\nchange in market value: the purchase price before the user's records, or\nan improvement paid in cash (never a gain). An improvement paid from a\ntracked account is a transfer to the asset (update_transaction with\ncategory=\"[asset path]\"), not a value change.\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "account": {
+          "type": "string"
+        },
+        "as_of": {
+          "type": "string"
+        },
+        "amount": {
+          "type": "string"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "reference": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "kind": {
+          "default": "revaluation",
+          "type": "string"
+        },
+        "include": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "account",
+        "as_of",
+        "amount"
       ],
       "type": "object"
     }
@@ -2322,6 +2464,36 @@
       },
       "required": [
         "event_id"
+      ],
+      "type": "object"
+    }
+  },
+  {
+    "name": "reverse_value_change",
+    "description": "Undo a change in a hand-valued asset's value (write scope): one made\nwith record_value_change or posted by reconcile_account on a property\naccount. transaction_id is the change's id (search_transactions on the\naccount shows it; a row flagged value_change in review_batch is one).\nPurser corrects it through a reversal pair, so the history keeps both;\namount in the answer is what was taken back and balance the asset's value\nnow. Record the right figure afterwards if there is one.\n\ninclude: fields to return although the user's privacy defaults withhold them \u2014 any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "transaction_id": {
+          "type": "string"
+        },
+        "include": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "transaction_id"
       ],
       "type": "object"
     }
@@ -2623,7 +2795,7 @@
   },
   {
     "name": "update_account",
-    "description": "Rename, re-describe or hide a real account, or set its floor (write\nscope); only the fields sent change. name is the display name only: the\naccount's path, which tools, rules and outside integrations use to find\nit, never changes, so a rename breaks nothing that refers to the account. The name is also\nwhat transfer auto-link looks for in bank text (a row that mentions the\ncounterparty account's name is a transfer signal), so a rename changes\nwhich bank descriptions link to the account. description=\"\" clears it.\nhidden=true hides the account in the app's account list only: it still\nsyncs, counts in net worth, and is listed by list_accounts with\nhidden=true. min_balance is the account's floor, a decimal string in\nledger sign: use it when the user says \"warn me if checking goes under\n$500\" (min_balance=\"500.00\"). Each night Purser projects the next 30 days\nand emits a forecast.shortfall event when the projection drops below the\nfloor; forecast_balance shows it as min_balance. A credit card is\nnegative when owed, so \"warn me past $4,500 owed\" is \"-4500.00\".\nmin_balance=\"\" clears the floor and stops the warnings. Checking,\nsavings, cash and credit-card accounts only. Categories are renamed in\nthe app, not here, and moving an account to another path is done in the\napp too.",
+    "description": "Rename, re-describe or hide a real account, or set its floor (write\nscope); only the fields sent change. asset_kind sets what a hand-valued\nasset (type property) is: house, land, car, boat, rv, jewelry, art,\nequipment or other (a label and an icon only). secured_by, on a loan,\nnames the hand-valued asset that secures it (its path or id; \"\" clears\nit), so the asset reports its equity. revalue_after_days, on an asset,\nis how many days its value may go without an update before Purser calls\nit stale (asset.stale, whats_new.stale_assets); 0 turns that off.\nname is the display name only: the account's path, which tools, rules\nand outside integrations use to find it, never changes, so a rename breaks\nnothing that refers to the account. The name is also\nwhat transfer auto-link looks for in bank text (a row that mentions the\ncounterparty account's name is a transfer signal), so a rename changes\nwhich bank descriptions link to the account. description=\"\" clears it.\nhidden=true hides the account in the app's account list only: it still\nsyncs, counts in net worth, and is listed by list_accounts with\nhidden=true. min_balance is the account's floor, a decimal string in\nledger sign: use it when the user says \"warn me if checking goes under\n$500\" (min_balance=\"500.00\"). Each night Purser projects the next 30 days\nand emits a forecast.shortfall event when the projection drops below the\nfloor; forecast_balance shows it as min_balance. A credit card is\nnegative when owed, so \"warn me past $4,500 owed\" is \"-4500.00\".\nmin_balance=\"\" clears the floor and stops the warnings. Checking,\nsavings, cash and credit-card accounts only. Categories are renamed in\nthe app, not here, and moving an account to another path is done in the\napp too.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2667,6 +2839,39 @@
           "anyOf": [
             {
               "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "asset_kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "secured_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "revalue_after_days": {
+          "anyOf": [
+            {
+              "type": "integer"
             },
             {
               "type": "null"
@@ -2913,7 +3118,7 @@
   },
   {
     "name": "update_schedule",
-    "description": "Edit a schedule's rule (write scope); only the fields sent change.\nLive instances the user has not overridden follow the new rule (slots the\nrule no longer produces are dropped, amounts re-estimated, missing slots\nadded); overridden (\"pinned\") instances keep their amounts and dates.\nA new name or payee relabels every live instance, pinned ones too, whose\ndescription or payee still equals the old one (`relabeled` counts them);\nlabels set by hand stay. category and counterparty_account are mutually\nexclusive: sending one switches the schedule's shape between flat and\ntransfer.",
+    "description": "Edit a schedule's rule (write scope); only the fields sent change\n(\"\" clears payee or memo; a flat schedule keeps at least one).\nLive instances the user has not overridden follow the new rule (slots the\nrule no longer produces are dropped, amounts re-estimated, missing slots\nadded); overridden (\"pinned\") instances keep their amounts and dates.\nA new payee or memo relabels every live instance, pinned ones too, whose\ndescription or payee still equals the old one (`relabeled` counts them);\nlabels set by hand stay. category and counterparty_account are mutually\nexclusive: sending one switches the schedule's shape between flat and\ntransfer.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2998,6 +3203,17 @@
           "default": null
         },
         "payee": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "memo": {
           "anyOf": [
             {
               "type": "string"

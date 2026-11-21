@@ -1,7 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { apiMock, fail, mockApi, ok } from "../../test/api";
-import { accountLabel, useFeedConnection, type Discovered } from "./useFeedConnection";
+import { useFeedConnection, type Discovered } from "./useFeedConnection";
 
 const CONNECTION = {
   id: "c-1",
@@ -20,6 +20,7 @@ const row = (mappedPath: string | null = null): Discovered => ({
   mapped_account_path: mappedPath,
   drift_basis_pinned: false,
   ambiguous: false,
+    ignored: false,
 });
 
 /** Run `fn` inside act and return what it threw. The error is caught inside
@@ -36,13 +37,6 @@ async function actCatching(fn: () => Promise<void>): Promise<unknown> {
   });
   return thrown;
 }
-
-describe("accountLabel", () => {
-  it("turns the bank's account name into a ledger label", () => {
-    expect(accountLabel({ name: "Joint Checking (x1234)", external_id: "ext-1" })).toBe("joint_checking_x1234");
-    expect(accountLabel({ name: null, external_id: "ACT-99" })).toBe("act_99");
-  });
-});
 
 describe("useFeedConnection", () => {
   it("connects, runs the first fetch and lists the discovered accounts", async () => {
@@ -87,7 +81,7 @@ describe("useFeedConnection", () => {
     expect(result.current.discovered).toEqual([]);
   });
 
-  it("maps an account to a new checking account under assets. and refreshes", async () => {
+  it("maps an account onto the chosen target and refreshes", async () => {
     let mapped = false;
     mockApi({
       "POST /connections": ok(CONNECTION, 201),
@@ -102,14 +96,17 @@ describe("useFeedConnection", () => {
     const { result } = renderHook(() => useFeedConnection());
     await act(() => result.current.connect("synthetic-setup-token"));
 
-    await act(() => result.current.mapAccount(row()));
+    const create = {
+      name: "Everyday Checking",
+      type: "checking",
+      path: "assets.everyday_checking",
+      currency: "USD",
+    };
+    await act(() => result.current.mapAccount(row(), { create }));
 
     expect(apiMock.POST).toHaveBeenCalledWith("/connections/{connection_id}/map", {
       params: { path: { connection_id: "c-1" } },
-      body: {
-        external_id: "ext-1",
-        create: { name: "Everyday Checking", type: "checking", path: "assets.everyday_checking" },
-      },
+      body: { external_id: "ext-1", create },
     });
     expect(result.current.discovered[0].mapped_account_path).toBe("assets.everyday_checking");
   });
@@ -117,7 +114,7 @@ describe("useFeedConnection", () => {
   it("refuses to map before a feed is connected", async () => {
     const { result } = renderHook(() => useFeedConnection());
 
-    await expect(result.current.mapAccount(row())).rejects.toThrow("connect a SimpleFIN feed first");
+    await expect(result.current.mapAccount(row(), { account_id: "a-1" })).rejects.toThrow("connect a SimpleFIN feed first");
     expect(apiMock.POST).not.toHaveBeenCalled();
   });
 });

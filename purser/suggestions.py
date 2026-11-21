@@ -138,6 +138,9 @@ class ScheduleDraft(BaseModel):
         Literal["last", "rolling_avg_3", "rolling_avg_12", "counterparty_balance"] | None
     ) = None
     payee: str | None = None
+    # #534: drafts stored before it carry none; the label rules (name split)
+    # then apply when the draft is accepted.
+    memo: str | None = Field(default=None, max_length=200)
     category: str | None = None
     autopost_policy: Literal["auto_post", "wait_for_match", "reminder_only"] = "wait_for_match"
 
@@ -871,6 +874,7 @@ def draft_from_create_args(
     autopost_policy: str,
     counterparty_account_ref: str | None,
     date_mode: str = "fixed",
+    memo: str | None = None,
 ) -> tuple[ScheduleDraft, Account, Account | None]:
     """The ``propose=True`` path of ``create_schedule``: the same validation
     the direct path runs, captured as a draft instead of a row."""
@@ -893,6 +897,7 @@ def draft_from_create_args(
             amount=amount,
             estimate_basis=estimate_basis,
             payee=payee_name,
+            memo=memo,
             category=category.path if category else None,
             autopost_policy=autopost_policy,
         )
@@ -1788,6 +1793,7 @@ def _apply_draft(
         amount=draft.amount,
         token=token,
         payee_name=draft.payee,
+        memo=draft.memo,
         category_path=draft.category,
         estimate_basis=draft.estimate_basis,
         autopost_policy=draft.autopost_policy,

@@ -50,6 +50,19 @@ class TestSpaServing:
         assert resp.status_code == 200
         assert "text/html" in resp.headers["content-type"]
 
+    def test_agent_links_reach_the_spa(self, clean_db: None, client: TestClient) -> None:
+        # MCP `present` returns {public URL}/selection?id=…, a path, not a hash
+        # route: the server must answer it with the app shell, which moves it
+        # into the hash (frontend/src/lib/hashRoute.ts, #542). The same holds
+        # for a pasted Settings path. No API route may shadow either.
+        for path in (
+            "/selection?id=00000000-0000-0000-0000-000000000001&note=two+largest",
+            "/settings/connections",
+        ):
+            resp = client.get(path)
+            assert resp.status_code == 200, path
+            assert "text/html" in resp.headers["content-type"], path
+
     def test_api_routes_still_win(self, clean_db: None, client: TestClient) -> None:
         assert client.get("/healthz").json()["status"] == "ok"
         assert client.get("/auth/me").status_code == 401

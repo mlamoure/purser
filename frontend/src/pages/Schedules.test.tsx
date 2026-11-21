@@ -2,9 +2,9 @@ import { screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type { components } from "../api/schema";
 import { overrideBody } from "../lib/utils";
-import { apiMock, mockApi, ok } from "../test/api";
+import { apiMock, fail, mockApi, ok } from "../test/api";
 import { renderWithProviders } from "../test/render";
-import Schedules, { ForecastChart, InstancesPanel } from "./Schedules";
+import Schedules, { cadenceLabel, ForecastChart, InstancesPanel, negateAmount } from "./Schedules";
 
 type ScheduleDetail = components["schemas"]["ScheduleDetail"];
 type InstanceOut = components["schemas"]["InstanceOut"];
@@ -45,7 +45,7 @@ const schedule = (instances: InstanceOut[]): ScheduleDetail => ({
 
 async function openOverride() {
   const view = renderWithProviders(<InstancesPanel scheduleId="s-1" />);
-  const row = (await screen.findAllByText("2026-11-05"))[0].closest("tr")!;
+  const row = (await screen.findAllByText("Nov 5, 2026"))[0].closest("tr")!;
   await view.user.click(within(row).getByRole("button", { name: "Override" }));
   return { ...view, row };
 }
@@ -120,8 +120,8 @@ describe("InstancesPanel reset (#353)", () => {
       "POST /transactions/{tx_id}/reset-instance": ok({}),
     });
     const { user } = renderWithProviders(<InstancesPanel scheduleId="s-1" />);
-    const pinnedRow = (await screen.findByText("2026-11-03")).closest("tr")!;
-    const freeRow = screen.getAllByText("2026-12-05")[0].closest("tr")!;
+    const pinnedRow = (await screen.findByText("Nov 3, 2026")).closest("tr")!;
+    const freeRow = screen.getAllByText("Dec 5, 2026")[0].closest("tr")!;
     expect(within(freeRow).queryByRole("button", { name: "Reset" })).not.toBeInTheDocument();
 
     await user.click(within(pinnedRow).getByRole("button", { name: "Reset" }));
@@ -153,10 +153,10 @@ describe("InstancesPanel card statement (#351)", () => {
       "POST /schedules/statement-balance": ok({}),
     });
     const { user } = renderWithProviders(<InstancesPanel scheduleId="s-1" cardPayment />);
-    const row = (await screen.findAllByText("2026-11-05"))[0].closest("tr")!;
-    const stated = screen.getAllByText("2026-12-05")[0].closest("tr")!;
+    const row = (await screen.findAllByText("Nov 5, 2026"))[0].closest("tr")!;
+    const stated = screen.getAllByText("Dec 5, 2026")[0].closest("tr")!;
     expect(within(row).getByText("current balance")).toBeInTheDocument();
-    expect(within(stated).getByText("statement · closed 2026-11-22")).toBeInTheDocument();
+    expect(within(stated).getByText("statement · closed Nov 22, 2026")).toBeInTheDocument();
     expect(within(stated).queryByText("pinned")).not.toBeInTheDocument();
 
     await user.click(within(row).getByRole("button", { name: "Statement" }));
@@ -172,7 +172,7 @@ describe("InstancesPanel card statement (#351)", () => {
   it("offers Statement only on a card payment", async () => {
     mockApi({ "GET /schedules/{schedule_id}": ok(schedule([instance()])) });
     renderWithProviders(<InstancesPanel scheduleId="s-1" />);
-    const row = (await screen.findAllByText("2026-11-05"))[0].closest("tr")!;
+    const row = (await screen.findAllByText("Nov 5, 2026"))[0].closest("tr")!;
     expect(within(row).getByRole("button", { name: "Override" })).toBeInTheDocument();
     expect(within(row).queryByRole("button", { name: "Statement" })).not.toBeInTheDocument();
   });
@@ -225,6 +225,19 @@ describe("ForecastChart range band (#247)", () => {
     expect(container.querySelector("circle title")?.textContent).toContain("3-payment average");
   });
 
+  it("labels the axis and the low with the forecast's own decimals (#540)", async () => {
+    mockApi({ "GET /forecast": ok(forecast(true)) });
+    const { container } = renderWithProviders(
+      <ForecastChart accountPath="assets.checking" currency="USD" />,
+    );
+    expect(await screen.findByText(/Low \$100\.00 on Nov 2, 2026\./)).toBeInTheDocument();
+    expect(screen.getByText(/Could dip to -\$200\.00 on Nov 2, 2026/)).toBeInTheDocument();
+    // The extremes are picked from the strings (band high 1300, band low
+    // -200) and shown as they are, never as a float turned back into money.
+    const labels = [...container.querySelectorAll("svg text")].map((t) => t.textContent);
+    expect(labels).toEqual(["$1,300.00", "-$200.00", "Nov 1, 2026", "Nov 3, 2026"]);
+  });
+
   it("draws no band without one", async () => {
     mockApi({ "GET /forecast": ok(forecast(false)) });
     const { container } = renderWithProviders(<ForecastChart accountPath="assets.checking" />);
@@ -238,6 +251,7 @@ describe("Schedules page — suggestions awaiting a decision (#386)", () => {
   it("counts every open suggestion, not one capped inbox page", async () => {
     mockApi({
       "GET /accounts": ok([]),
+      "GET /categories": ok([]),
       "GET /schedules": ok([]),
       "GET /suggestions/counts": ok({
         total: 31,
@@ -253,5 +267,178 @@ describe("Schedules page — suggestions awaiting a decision (#386)", () => {
     expect(await screen.findByText(/31 suggestions await a decision/)).toBeInTheDocument();
     const paths = apiMock.GET.mock.calls.map(([path]) => path);
     expect(paths).not.toContain("/suggestions");
+  });
+});
+
+/* -------------------------------------------------------------------------
+ * The page (#535): forecast first, grouped by account, payee + memo (#534)
+ * ----------------------------------------------------------------------- */
+
+const acct = (id: string, name: string, path: string, type = "checking") => ({
+  id,
+  name,
+  path,
+  type,
+  is_virtual: false,
+  closed_at: null,
+});
+
+const listed = (over: Partial<ScheduleDetail>): ScheduleDetail => ({ ...schedule([]), ...over });
+
+const pageRoutes = (schedules: ScheduleDetail[]) => ({
+  "GET /accounts": ok([
+    acct("a-1", "Checking", "assets.checking"),
+    acct("a-2", "Citi Card", "liabilities.citi", "credit_card"),
+  ]),
+  "GET /schedules": ok(schedules),
+  "GET /suggestions/counts": ok({ total: 0, match: 0, schedule: 0, transfer_link: 0, transfer_pair: 0 }),
+  "GET /forecast": ok(forecast(false)),
+  "GET /categories": ok([{ path: "expenses.fitness", name: "Fitness" }]),
+});
+
+describe("Scheduled transactions page (#535)", () => {
+  it("lists a transfer under both accounts, in each account's sign", async () => {
+    mockApi(
+      pageRoutes([
+        listed({ amount_type: "fixed", amount: "-250.0000", estimate_basis: null, memo: "Autopay" }),
+        listed({
+          id: "s-2",
+          name: "Acme Gym",
+          payee: "Acme Gym",
+          memo: null,
+          counterparty_account_id: null,
+          category_path: "expenses.fitness",
+          amount_type: "fixed",
+          amount: "-60.0000",
+          estimate_basis: null,
+        }),
+      ]),
+    );
+    renderWithProviders(<Schedules />);
+
+    expect(await screen.findByRole("heading", { name: "Scheduled transactions" })).toBeInTheDocument();
+    // Scoped to the desktop table: the phone list renders the same rows.
+    const checking = within(await screen.findByRole("region", { name: "Checking" })).getByRole("table");
+    const card = within(screen.getByRole("region", { name: "Citi Card" })).getByRole("table");
+    expect(within(checking).getByText("Transfer to Citi Card")).toBeInTheDocument();
+    expect(within(checking).getByText("Acme Gym")).toBeInTheDocument();
+    // The category by name, never its path (#541).
+    expect(within(checking).getByText("Fitness")).toBeInTheDocument();
+    expect(within(checking).queryByText("expenses.fitness")).not.toBeInTheDocument();
+    expect(within(checking).getByText("-$250.00")).toBeInTheDocument();
+    expect(within(card).getByText("Transfer from Checking")).toBeInTheDocument();
+    expect(within(card).getByText("$250.00")).toBeInTheDocument();
+    expect(within(card).queryByText("Acme Gym")).not.toBeInTheDocument();
+    expect(within(card).getByText("Autopay")).toBeInTheDocument();
+  });
+
+  it("renders a stacked list for phones beside the table", async () => {
+    mockApi(pageRoutes([listed({ amount_type: "fixed", amount: "-250.0000", estimate_basis: null, memo: "Autopay" })]));
+    renderWithProviders(<Schedules />);
+    const card = await screen.findByRole("region", { name: "Citi Card" });
+    const item = within(card).getByRole("listitem");
+    expect(within(item).getByText("Transfer from Checking")).toBeInTheDocument();
+    expect(within(item).getByText("$250.00")).toBeInTheDocument();
+    expect(within(item).getByText(/Autopay · monthly on the 5/)).toBeInTheDocument();
+  });
+
+  it("puts the forecast first and follows a group's Show forecast", async () => {
+    mockApi(pageRoutes([listed({ amount_type: "fixed", amount: "-250.0000", estimate_basis: null })]));
+    const { user } = renderWithProviders(<Schedules />);
+
+    const picker = await screen.findByRole("combobox", { name: "Forecast account" });
+    const card = await screen.findByRole("region", { name: "Citi Card" });
+    // The forecast precedes the groups in document order.
+    expect(picker.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(picker).toHaveValue("assets.checking");
+    await user.click(within(card).getByRole("button", { name: "Show forecast" }));
+    expect(picker).toHaveValue("liabilities.citi");
+    expect(within(card).getByText("Shown in the forecast")).toBeInTheDocument();
+  });
+
+  it("creates with payee and memo, never a name", async () => {
+    mockApi({ ...pageRoutes([]), "POST /schedules": ok({}, 201) });
+    const { user } = renderWithProviders(<Schedules />);
+
+    await user.click(await screen.findByRole("button", { name: "New scheduled transaction" }));
+    const create = screen.getByRole("button", { name: "Create" });
+    expect(create).toBeDisabled();
+    expect(screen.getByText("Enter a payee (or a memo) to save.")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Payee"), "Acme Gym");
+    await user.type(screen.getByLabelText("Memo"), "Family plan");
+    await user.type(screen.getByLabelText("Amount (negative = money out)"), "-60.00");
+    await user.click(create);
+
+    const post = apiMock.POST.mock.calls.find(([path]) => path === "/schedules");
+    const body = (post?.[1] as { body: Record<string, unknown> }).body;
+    expect(body).toMatchObject({ payee: "Acme Gym", memo: "Family plan", account: "assets.checking" });
+    expect(body).not.toHaveProperty("name");
+  });
+
+  it("edits a schedule's existing payee and clears its memo", async () => {
+    mockApi({
+      ...pageRoutes([
+        listed({
+          id: "s-2",
+          name: "Family plan",
+          payee: "Acme Gym",
+          memo: "Family plan",
+          counterparty_account_id: null,
+          category_path: "expenses.fitness",
+          amount_type: "fixed",
+          amount: "-60.0000",
+          estimate_basis: null,
+        }),
+      ]),
+      "PATCH /schedules/{schedule_id}": ok(listed({})),
+    });
+    const { user } = renderWithProviders(<Schedules />);
+
+    const checking = within(await screen.findByRole("region", { name: "Checking" })).getByRole("table");
+    await user.click(within(checking).getByRole("button", { name: "Edit" }));
+    expect(screen.getByLabelText("Payee")).toHaveValue("Acme Gym");
+    await user.clear(screen.getByLabelText("Memo"));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    const patch = apiMock.PATCH.mock.calls.find(([path]) => path === "/schedules/{schedule_id}");
+    expect((patch?.[1] as { body: Record<string, unknown> }).body).toMatchObject({
+      payee: "Acme Gym",
+      memo: "",
+    });
+  });
+});
+
+describe("Scheduled transactions page — load failures (#540)", () => {
+  it("shows a failed schedule load as an error, not as no schedules", async () => {
+    mockApi({
+      "GET /accounts": ok([]),
+      "GET /categories": ok([]),
+      "GET /schedules": fail(500, "database unavailable"),
+      "GET /suggestions/counts": ok({ total: 0, match: 0, schedule: 0, transfer_link: 0, transfer_pair: 0 }),
+    });
+    renderWithProviders(<Schedules />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not load scheduled transactions: database unavailable",
+    );
+    expect(screen.queryByText(/scheduled transactions yet/)).not.toBeInTheDocument();
+  });
+});
+
+describe("negateAmount", () => {
+  it("flips the sign of a decimal string without floats", () => {
+    expect(negateAmount("-250.0000")).toBe("250.0000");
+    expect(negateAmount("12.34")).toBe("-12.34");
+    expect(negateAmount("0.00")).toBe("0.00");
+    expect(negateAmount("-0.00")).toBe("0.00");
+    expect(negateAmount(null)).toBeNull();
+  });
+});
+
+describe("cadenceLabel (#541)", () => {
+  it("says a cadence in words and never shows a raw rule", () => {
+    expect(cadenceLabel("FREQ=YEARLY;BYMONTH=3;BYMONTHDAY=15")).toBe("yearly in March on the 15");
+    expect(cadenceLabel("FREQ=MONTHLY;BYMONTHDAY=6,20")).toBe("semi-monthly on the 6 & 20");
+    expect(cadenceLabel("FREQ=HOURLY;INTERVAL=6")).toBe("custom schedule");
   });
 });

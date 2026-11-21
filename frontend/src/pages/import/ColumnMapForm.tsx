@@ -47,7 +47,7 @@ export function ColumnMapForm({
     </div>
   );
   return (
-    <div className="space-y-3 rounded-md border border-amber-500/40 bg-amber-500/5 p-3">
+    <div className="space-y-3 rounded-md border border-warning/40 bg-warning-soft/40 p-3">
       <div className="text-sm">
         <span className="font-medium">Unrecognized CSV layout.</span> Tell Purser which column is
         which; date, amount, and payee are required.

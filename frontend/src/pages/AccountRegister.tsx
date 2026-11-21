@@ -3,11 +3,18 @@ import { Link, useParams, useSearchParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, errorDetail } from "../lib/api";
 import { useDebouncedValue } from "../lib/useDebouncedValue";
+import { useDocumentTitle } from "../lib/useDocumentTitle";
 import { useIsAdmin } from "../lib/useIsAdmin";
-import { cn, fmtAmount, overrideBody } from "../lib/utils";
+import { cn, overrideBody } from "../lib/utils";
+import { formatMoney, moneyEditText, moneySign, negateMoney } from "../lib/money";
+import { addDays, formatDate } from "../lib/dates";
 import { Badge, Button, Card, ErrorText, Input, Table, Td, Th } from "../components/ui";
 import CategorySelect from "../components/CategorySelect";
+import { categoriesQuery, categoryValueLabel, namesFrom, usePathNames } from "../lib/names";
+import { QueryState } from "../components/QueryState";
 import PositionsPanel from "./Positions";
+import { AccountIcon } from "../components/AccountIcon";
+import { AssetPanel } from "../components/AssetPanel";
 import type { components } from "../api/schema";
 
 type TransactionOut = components["schemas"]["TransactionOut"];
@@ -29,6 +36,9 @@ export default function AccountRegister() {
   const [reviewOnly, setReviewOnly] = useState(params.get("reviewed") === "false");
   const [selected, setSelected] = useState<string[]>([]);
   const [preview, setPreview] = useState(false);
+  // Posted rows recategorized here: replacement id -> the category cell
+  // value it replaced, for the row's "Corrected · Undo" (#541).
+  const [corrections, setCorrections] = useState<Record<string, string>>({});
   const qc = useQueryClient();
   const [q, setQ] = useState("");
   const searchQ = useDebouncedValue(q, SEARCH_DEBOUNCE_MS);
@@ -117,6 +127,7 @@ export default function AccountRegister() {
   });
 
   if (!accountId) return null;
+  const currency = account.data?.currency;
   const total = page.data?.total ?? 0;
   const manualHoldings =
     account.data?.type === "brokerage" && account.data?.holdings_source === "manual";
@@ -124,6 +135,7 @@ export default function AccountRegister() {
   return (
     <div className="space-y-6">
       <AccountHeader account={account.data} />
+      {account.data?.type === "property" && <AssetPanel account={account.data} />}
 
       {manualHoldings && (
         <div className="flex gap-1 border-b border-border" role="tablist">
@@ -150,7 +162,7 @@ export default function AccountRegister() {
       )}
 
       {manualHoldings && tab === "positions" ? (
-        <PositionsPanel accountId={accountId} />
+        <PositionsPanel accountId={accountId} currency={account.data?.currency} />
       ) : (
         <>
           <div className="flex flex-wrap items-end gap-3">
@@ -224,7 +236,6 @@ export default function AccountRegister() {
               </Button>
             </div>
             {account.error && <ErrorText>{account.error.message}</ErrorText>}
-            {page.error && <ErrorText>{page.error.message}</ErrorText>}
             {preview && (
               <section
                 role="region"
@@ -238,14 +249,7 @@ export default function AccountRegister() {
                   This records your review. It does not change amounts or categories. Pending
                   transactions and other pages are excluded.
                 </p>
-                <ul className="my-3 space-y-1 text-sm">
-                  {selectedRows.map((t) => (
-                    <li key={t.id}>
-                      {t.date} · {t.payee || t.description || "Transaction"} · {fmtAmount(t.amount)}{" "}
-                      · {t.category_path || "Transfer / split"}
-                    </li>
-                  ))}
-                </ul>
+                <ReviewPreviewList rows={selectedRows} currency={currency} />
                 <div className="flex gap-2">
                   <Button
                     disabled={mark.isPending || !selectedRows.length}
@@ -260,66 +264,80 @@ export default function AccountRegister() {
                 {mark.error && <ErrorText>{mark.error.message}</ErrorText>}
               </section>
             )}
-            <Table>
-              <thead>
-                <tr>
-                  <Th>
-                    <input
-                      type="checkbox"
-                      aria-label="Select all posted transactions awaiting review on this page"
-                      checked={
-                        reviewableRows.length > 0 && selectedRows.length === reviewableRows.length
-                      }
-                      disabled={!reviewableRows.length || mark.isPending}
-                      onChange={(e) =>
-                        setSelected(e.target.checked ? reviewableRows.map((t) => t.id) : [])
-                      }
-                    />
-                  </Th>
-                  <Th>Date</Th>
-                  <Th>Payee</Th>
-                  <Th>Description</Th>
-                  <Th className="text-right">Amount</Th>
-                  <Th className="text-right">Balance</Th>
-                  <Th>Category</Th>
-                  <Th>Status</Th>
-                  <Th>Actions</Th>
-                </tr>
-              </thead>
-              <tbody>
-                {(page.data?.items ?? []).map((t) => (
-                  <RegisterRow
-                    key={t.id}
-                    t={t}
-                    accountPath={account.data?.path ?? ""}
-                    candidates={candidates.data ?? []}
-                    proposed={proposed.data ?? []}
-                    selection={
-                      t.needs_review && t.status === "posted" ? (
+            <QueryState
+              query={page}
+              what="transactions"
+              empty="No transactions match."
+              isEmpty={(data) => data.items.length === 0}
+            >
+              {(data) => (
+                <Table>
+                  <thead>
+                    <tr>
+                      <Th>
                         <input
                           type="checkbox"
-                          disabled={mark.isPending}
-                          aria-label={`Select ${t.payee || t.description || "transaction"} on ${t.date}`}
-                          checked={selected.includes(t.id)}
+                          aria-label="Select all posted transactions awaiting review on this page"
+                          checked={
+                            reviewableRows.length > 0 && selectedRows.length === reviewableRows.length
+                          }
+                          disabled={!reviewableRows.length || mark.isPending}
                           onChange={(e) =>
-                            setSelected(
-                              e.target.checked
-                                ? [...selected, t.id]
-                                : selected.filter((id) => id !== t.id),
-                            )
+                            setSelected(e.target.checked ? reviewableRows.map((t) => t.id) : [])
                           }
                         />
-                      ) : (
-                        <span />
-                      )
-                    }
-                  />
-                ))}
-              </tbody>
-            </Table>
-            {page.data && page.data.items.length === 0 && (
-              <p className="text-sm text-muted-foreground">No transactions match.</p>
-            )}
+                      </Th>
+                      <Th>Date</Th>
+                      <Th>Payee</Th>
+                      <Th>Description</Th>
+                      <Th className="text-right">Amount</Th>
+                      <Th className="text-right">Balance</Th>
+                      <Th>Category</Th>
+                      <Th>Status</Th>
+                      <Th>Actions</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.items.map((t) => (
+                      <RegisterRow
+                        key={t.id}
+                        t={t}
+                        accountPath={account.data?.path ?? ""}
+                        currency={currency}
+                        candidates={candidates.data ?? []}
+                        proposed={proposed.data ?? []}
+                        correctedFrom={corrections[t.id]}
+                        onCorrected={(id, previous) =>
+                          setCorrections((c) => ({ ...c, [id]: previous }))
+                        }
+                        onUndone={(id) =>
+                          setCorrections(({ [id]: _undone, ...rest }) => rest)
+                        }
+                        selection={
+                          t.needs_review && t.status === "posted" ? (
+                            <input
+                              type="checkbox"
+                              disabled={mark.isPending}
+                              aria-label={`Select ${t.payee || t.description || "transaction"} on ${formatDate(t.date)}`}
+                              checked={selected.includes(t.id)}
+                              onChange={(e) =>
+                                setSelected(
+                                  e.target.checked
+                                    ? [...selected, t.id]
+                                    : selected.filter((id) => id !== t.id),
+                                )
+                              }
+                            />
+                          ) : (
+                            <span />
+                          )
+                        }
+                      />
+                    ))}
+                  </tbody>
+                </Table>
+              )}
+            </QueryState>
             <div className="mt-3 flex items-center justify-between text-sm text-muted-foreground">
               <span>
                 {total} transaction{total === 1 ? "" : "s"}
@@ -364,6 +382,7 @@ export function SplitLines({
   realPath: string | null;
 }) {
   const [open, setOpen] = useState(false);
+  const pathName = usePathNames();
   const detail = useQuery({
     queryKey: ["transaction", txId],
     queryFn: async () => {
@@ -392,8 +411,8 @@ export function SplitLines({
         <ul className="space-y-0.5 text-xs text-muted-foreground">
           {legs.map((p) => (
             <li key={p.id} className="flex gap-2">
-              <span className="font-mono">{fmtAmount(p.amount)}</span>
-              <span className="max-w-40 truncate">{p.account_path}</span>
+              <span className="font-mono">{formatMoney(p.amount, { currency: p.currency })}</span>
+              <span className="max-w-40 truncate">{pathName(p.account_path)}</span>
               {p.memo ? <span className="max-w-32 truncate">· {p.memo}</span> : null}
             </li>
           ))}
@@ -403,35 +422,147 @@ export function SplitLines({
   );
 }
 
+/** The rows a bulk review will mark, by category name (#541). Mounted only
+ * while the confirmation is open, so the register loads no names for it. */
+function ReviewPreviewList({ rows, currency }: { rows: TransactionOut[]; currency?: string | null }) {
+  const pathName = usePathNames();
+  return (
+    <ul className="my-3 space-y-1 text-sm">
+      {rows.map((t) => (
+        <li key={t.id}>
+          {formatDate(t.date)} · {t.payee || t.description || "Transaction"} ·{" "}
+          {formatMoney(t.amount, { currency })}{" "}
+          · {t.category_path ? pathName(t.category_path) : "Transfer / split"}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** The category cell of an asset value entry: what it is, and Undo for a
+ * live one (the reversal pair; the original stays in the history). */
+function ValueChangeCell({ t }: { t: TransactionOut }) {
+  const qc = useQueryClient();
+  const [error, setError] = useState<string | null>(null);
+  const undo = useMutation({
+    mutationFn: async () => {
+      const { error: err } = await api.POST("/value-changes/{transaction_id}/reverse", {
+        params: { path: { transaction_id: t.id } },
+      });
+      if (err) throw new Error(errorDetail(err));
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["transactions"] });
+      qc.invalidateQueries({ queryKey: ["accounts"] });
+      qc.invalidateQueries({ queryKey: ["account"] });
+      qc.invalidateQueries({ queryKey: ["networth"] });
+    },
+    onError: (e) => setError(e.message),
+  });
+  const live = t.status === "posted" && moneySign(t.amount) !== 0 && !t.has_linked_originals;
+  return (
+    <span className="flex flex-col">
+      <span className="flex items-center gap-2 text-sm text-muted-foreground">
+        <span
+          title={
+            t.money_put_in
+              ? "Money put into this asset that no tracked account paid. To correct it, undo it and record the right figure."
+              : "A change in this asset's value. To correct it, undo it (an agent's reverse_value_change, or the REST API) and record the right figure."
+          }
+        >
+          {t.money_put_in ? "Money put in" : "Value change"}
+        </span>
+        {live && (
+          <button
+            type="button"
+            className="text-xs font-medium text-primary hover:underline disabled:opacity-50"
+            disabled={undo.isPending}
+            aria-label={`Undo the ${formatDate(t.date)} ${t.money_put_in ? "money put in" : "value change"}`}
+            onClick={() => {
+              if (window.confirm("Undo this entry? Purser records a reversal; the original stays in the history."))
+                undo.mutate();
+            }}
+          >
+            Undo
+          </button>
+        )}
+      </span>
+      {error && <span className="text-xs text-destructive">{error}</span>}
+    </span>
+  );
+}
+
 export function RegisterRow({
   t,
   accountPath,
+  currency,
   candidates,
   proposed,
   selection,
+  correctedFrom,
+  onCorrected,
+  onUndone,
 }: {
   selection?: React.ReactNode;
+  /** This row is the replacement of a posted row recategorized in this
+   * session; the value is the category cell it had before (#541). */
+  correctedFrom?: string;
+  /** A posted row was corrected: `id` is the replacement row the register
+   * now shows, `previous` the category cell value it replaced. */
+  onCorrected?: (id: string, previous: string) => void;
+  /** The correction on this row was undone. */
+  onUndone?: (id: string) => void;
   t: TransactionOut;
   accountPath: string;
+  /** The register account's currency (USD when unknown). */
+  currency?: string | null;
   candidates: TransferCandidateOut[];
   proposed: MatchOut[];
 }) {
   const qc = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const refresh = () => qc.invalidateQueries();
+  const pathName = usePathNames();
 
   const candidate = candidates.find((c) => c.outgoing_id === t.id || c.incoming_id === t.id);
   const match = proposed.find((m) => m.posted_id === t.id);
 
+  // A posted row is immutable (DESIGN §4): recategorizing it records a
+  // reversal and a corrected replacement. That is the normal way to fix a
+  // category, so it asks nothing first (#541); the replacement row then
+  // offers "Corrected · Undo".
   const recategorize = useMutation({
     mutationFn: async (category: string) => {
-      const { error: err } = await api.PATCH("/transactions/{tx_id}", {
+      const { data, error: err } = await api.PATCH("/transactions/{tx_id}", {
         params: { path: { tx_id: t.id } },
         body: { category, account: accountPath },
       });
       if (err) throw new Error(errorDetail(err));
+      return data;
     },
-    onSuccess: refresh,
+    onSuccess: (data) => {
+      setError(null);
+      if (t.status === "posted" && data?.id) onCorrected?.(data.id, categoryValue);
+      refresh();
+    },
+    onError: (e) => setError(e.message),
+  });
+  // Undo puts the previous category back the only way a posted row allows:
+  // one more correction (reversal + replacement), through the same PATCH.
+  // The ledger keeps both corrections; the register shows the row as it was.
+  const undoCorrection = useMutation({
+    mutationFn: async (previous: string) => {
+      const { error: err } = await api.PATCH("/transactions/{tx_id}", {
+        params: { path: { tx_id: t.id } },
+        body: { category: previous, account: accountPath },
+      });
+      if (err) throw new Error(errorDetail(err));
+    },
+    onSuccess: () => {
+      setError(null);
+      onUndone?.(t.id);
+      refresh();
+    },
     onError: (e) => setError(e.message),
   });
 
@@ -554,37 +685,33 @@ export function RegisterRow({
       ? { amount: t.remainder_amount, category: t.category_path }
       : null;
 
-  const onCategoryChange = (next: string) => {
-    if (
-      t.status === "posted" &&
-      !window.confirm(
-        "This row is posted (immutable). Purser will record a reversal and a corrected replacement — the register shows the corrected row. Continue?",
-      )
-    )
-      return;
-    recategorize.mutate(next);
-  };
+  const onCategoryChange = (next: string) => recategorize.mutate(next);
 
   return (
     <>
       <tr id={`transaction-${t.id}`} className={t.status === "void" ? "opacity-50" : undefined}>
         {selection !== undefined && <Td>{selection}</Td>}
-        <Td className="whitespace-nowrap">{t.date}</Td>
+        <Td className="whitespace-nowrap">{formatDate(t.date)}</Td>
         <Td className="max-w-40 truncate">{t.payee}</Td>
         <Td className="max-w-56 truncate text-muted-foreground">{t.description}</Td>
         <Td
           className={`text-right font-mono ${
-            t.amount != null && Number(t.amount) > 0 ? "text-emerald-700" : ""
+            moneySign(t.amount) > 0 ? "text-success" : ""
           }`}
         >
-          {fmtAmount(t.amount)}
+          {formatMoney(t.amount, { currency })}
         </Td>
         <Td className="text-right font-mono text-muted-foreground">
-          {t.balance != null ? fmtAmount(t.balance) : "\u2014"}
+          {formatMoney(t.balance, { currency })}
         </Td>
         <Td>
           <span className="flex items-center gap-1">
-            {t.securities_trade ? (
+            {t.value_change ? (
+              // An entry in a hand-valued asset's value (#566, #567): a change
+              // in value (equity.revaluation) or money put in (equity.capital),
+              // corrected by reversing it, so it has no category to pick.
+              <ValueChangeCell t={t} />
+            ) : t.securities_trade ? (
               // A securities trade's cash (#390, decision 103): booked to the
               // system account equity.securities, it moves only with its
               // trade, so it has no category to pick.
@@ -601,21 +728,39 @@ export function RegisterRow({
                 value={categoryValue}
                 currentAccountPath={accountPath}
                 onChange={onCategoryChange}
-                disabled={recategorize.isPending}
+                disabled={recategorize.isPending || undoCorrection.isPending}
+                aria-label={`Category for ${t.payee || t.description || `the ${formatDate(t.date)} transaction`}`}
               />
             )}
             {t.category_source === "ai" && <Badge variant="amber">AI</Badge>}
             {t.category_source === "deterministic" && <Badge>auto</Badge>}
             {t.category_source === "rule" && <Badge>rule</Badge>}
           </span>
+          {correctedFrom && (
+            <span className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
+              <span title="A posted row is never edited: Purser recorded a reversal and this corrected copy.">
+                Corrected
+              </span>
+              ·
+              <button
+                type="button"
+                className="font-medium text-primary hover:underline disabled:opacity-50"
+                disabled={undoCorrection.isPending}
+                aria-label={`Undo: back to ${categoryValueLabel(correctedFrom, pathName)}`}
+                onClick={() => undoCorrection.mutate(correctedFrom)}
+              >
+                Undo
+              </button>
+            </span>
+          )}
           {splitRemainder && (
             <span
               className="mt-1 flex items-center gap-1 text-xs text-muted-foreground"
               title="Split loan payment: both bank legs stay exact; this interest/fee remainder books to the category"
             >
               <Badge>split</Badge>
-              <span className="font-mono">{fmtAmount(splitRemainder.amount)}</span>
-              <span className="max-w-40 truncate">{splitRemainder.category}</span>
+              <span className="font-mono">{formatMoney(splitRemainder.amount, { currency })}</span>
+              <span className="max-w-40 truncate">{pathName(splitRemainder.category)}</span>
             </span>
           )}
         </Td>
@@ -631,7 +776,7 @@ export function RegisterRow({
             {t.origin === "agent" && <Badge variant="amber">agent</Badge>}
             {autoLinked && <Badge>auto-linked</Badge>}
             {t.schedule_id && (
-              <Link to="/schedules" title="Materialized by a schedule">
+              <Link to="/schedules" title="Expected from a scheduled transaction">
                 <Badge>scheduled</Badge>
               </Link>
             )}
@@ -656,7 +801,7 @@ export function RegisterRow({
                 <Button
                   size="sm"
                   variant="outline"
-                  title={`Looks like a transfer (${fmtAmount(candidate.amount)} pair)`}
+                  title={`Looks like a transfer (${formatMoney(candidate.amount, { currency })} pair)`}
                   onClick={() =>
                     confirmTransfer.mutate({
                       outgoing_id: candidate.outgoing_id,
@@ -683,9 +828,10 @@ export function RegisterRow({
                 <Button
                   size="sm"
                   variant="outline"
-                  title={`Matches expected: ${match.expected_payee ?? ""} ${fmtAmount(
+                  title={`Matches expected: ${match.expected_payee ?? ""} ${formatMoney(
                     match.expected_amount,
-                  )} on ${match.expected_date ?? ""}`}
+                    { currency },
+                  )} on ${formatDate(match.expected_date)}`}
                   onClick={() => confirmMatch.mutate()}
                 >
                   Match ✓
@@ -775,6 +921,7 @@ export function RegisterRow({
           <Td colSpan={selection ? 9 : 8}>
             <PaidPicker
               accountPath={accountPath}
+              currency={currency}
               around={t.date}
               onPick={(id) => markPaid.mutate(id)}
               onCancel={() => setPicking(false)}
@@ -797,60 +944,63 @@ export function RegisterRow({
  * candidates "Mark paid" can settle the expectation against (#236). */
 function PaidPicker({
   accountPath,
+  currency,
   around,
   onPick,
   onCancel,
 }: {
   accountPath: string;
+  currency?: string | null;
   around: string;
   onPick: (postedId: string) => void;
   onCancel: () => void;
 }) {
-  const shift = (days: number) => {
-    const d = new Date(around);
-    d.setDate(d.getDate() + days);
-    return d.toISOString().slice(0, 10);
-  };
   const candidates = useQuery({
     queryKey: ["paid-candidates", accountPath, around],
-    queryFn: async () =>
-      (
-        await api.GET("/transactions", {
-          params: {
-            query: {
-              account: accountPath,
-              status: ["posted", "pending"],
-              start: shift(-10),
-              end: shift(10),
-              limit: 25,
-            },
+    queryFn: async () => {
+      const { data, error } = await api.GET("/transactions", {
+        params: {
+          query: {
+            account: accountPath,
+            status: ["posted", "pending"],
+            start: addDays(around, -10),
+            end: addDays(around, 10),
+            limit: 25,
           },
-        })
-      ).data?.items ?? [],
+        },
+      });
+      if (error) throw new Error(errorDetail(error));
+      // A trade's cash moves only with its trade (#390, decision 103): it
+      // never settles a bill, so it is never offered here.
+      return (data?.items ?? []).filter(
+        (c) => !c.schedule_id && !c.securities_trade && !c.value_change,
+      );
+    },
   });
-  // A trade's cash moves only with its trade (#390, decision 103): it never
-  // settles a bill, so it is never offered here.
-  const rows = (candidates.data ?? []).filter((c) => !c.schedule_id && !c.securities_trade);
   return (
     <div className="rounded-md border border-border p-2 text-sm">
       <p className="mb-1 text-muted-foreground">Which bank row paid this? (±10 days)</p>
-      {candidates.isLoading && <p className="text-muted-foreground">Loading…</p>}
-      {rows.length === 0 && !candidates.isLoading && (
-        <p className="text-muted-foreground">No posted rows near that date.</p>
-      )}
-      <div className="flex flex-col gap-1">
-        {rows.map((c) => (
-          <button
-            key={c.id}
-            className="flex items-center gap-3 rounded px-2 py-1 text-left hover:bg-muted"
-            onClick={() => onPick(c.id)}
-          >
-            <span className="w-24">{c.date}</span>
-            <span className="grow truncate">{c.payee ?? c.description ?? "—"}</span>
-            <span className="font-mono">{fmtAmount(c.amount)}</span>
-          </button>
-        ))}
-      </div>
+      <QueryState
+        query={candidates}
+        what="nearby transactions"
+        empty="No posted rows near that date."
+      >
+        {(rows) => (
+          <div className="flex flex-col gap-1">
+            {rows.map((c) => (
+              <button
+                key={c.id}
+                className="flex items-center gap-3 rounded px-2 py-1 text-left hover:bg-muted"
+                onClick={() => onPick(c.id)}
+              >
+                <span className="w-28 whitespace-nowrap">{formatDate(c.date)}</span>
+                <span className="grow truncate">{c.payee ?? c.description ?? "—"}</span>
+                <span className="font-mono">{formatMoney(c.amount, { currency })}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </QueryState>
       <Button size="sm" variant="ghost" className="mt-2" onClick={onCancel}>
         Cancel
       </Button>
@@ -863,15 +1013,6 @@ function PaidPicker({
 const FLOOR_TYPES = new Set(["checking", "savings", "cash", "credit_card"]);
 // A decimal string with at most 4 places (NUMERIC(20,4)); the server checks too.
 const FLOOR_PATTERN = /^-?\d{1,16}(\.\d{1,4})?$/;
-
-/** A stored floor ("500.0000") as an editable string ("500.00"), by string
- * operations only — money never passes through a float (guardrail 1). */
-function floorText(stored: string): string {
-  const m = /^(-?\d+)(?:\.(\d*))?$/.exec(stored.trim());
-  if (!m) return stored;
-  const places = (m[2] ?? "").replace(/0+$/, "").padEnd(2, "0");
-  return `${m[1]}.${places}`;
-}
 
 /** The account's floor (#466): the minimum balance the nightly forecast scan
  * checks, emitting `forecast.shortfall` when the next 30 days project below
@@ -909,7 +1050,8 @@ function FloorEditor({
       <span className="flex items-center gap-2 text-sm text-muted-foreground">
         {current != null ? (
           <>
-            Floor <span className="font-mono">{fmtAmount(current)}</span>
+            Floor{" "}
+            <span className="font-mono">{formatMoney(current, { currency: account.currency })}</span>
           </>
         ) : (
           "No floor"
@@ -918,7 +1060,7 @@ function FloorEditor({
           size="sm"
           variant="outline"
           onClick={() => {
-            setValue(current != null ? floorText(current) : "");
+            setValue(current != null ? moneyEditText(current) : "");
             setEditing(true);
           }}
         >
@@ -975,6 +1117,7 @@ function FloorEditor({
 function AccountHeader({ account }: { account: AccountOut | undefined }) {
   const qc = useQueryClient();
   const isAdmin = useIsAdmin();
+  useDocumentTitle(account?.name ?? "Account");
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState("");
   const [closing, setClosing] = useState(false);
@@ -1062,8 +1205,8 @@ function AccountHeader({ account }: { account: AccountOut | undefined }) {
     <div className="space-y-2">
       <div className="flex items-baseline justify-between gap-4">
         <div className="min-w-0">
-          <Link to="/" className="text-sm text-muted-foreground hover:underline">
-            ← Dashboard
+          <Link to="/accounts" className="text-sm text-muted-foreground hover:underline">
+            ← Accounts
           </Link>
           {renaming ? (
             <div className="flex items-center gap-2">
@@ -1086,6 +1229,9 @@ function AccountHeader({ account }: { account: AccountOut | undefined }) {
             </div>
           ) : (
             <h1 className="flex items-center gap-2 text-xl font-bold">
+              <span className="text-muted-foreground">
+                <AccountIcon type={account.type} kind={account.asset?.kind} className="h-5 w-5" />
+              </span>
               {account.name}
               <span className="font-mono text-sm text-muted-foreground">{account.path}</span>
               {hidden && <Badge>hidden</Badge>}
@@ -1094,12 +1240,13 @@ function AccountHeader({ account }: { account: AccountOut | undefined }) {
                 <button
                   className="text-sm text-muted-foreground hover:text-foreground"
                   title="Rename account"
+                  aria-label="Rename account"
                   onClick={() => {
                     setName(account.name);
                     setRenaming(true);
                   }}
                 >
-                  ✎
+                  <span aria-hidden="true">✎</span>
                 </button>
               )}
             </h1>
@@ -1107,16 +1254,18 @@ function AccountHeader({ account }: { account: AccountOut | undefined }) {
         </div>
         <div className="shrink-0 text-right">
           <p className="text-sm text-muted-foreground">Balance</p>
-          <p className="font-mono text-2xl font-bold">{fmtAmount(account.balance)}</p>
+          <p className="font-mono text-2xl font-bold">
+            {formatMoney(account.balance, { currency: account.currency })}
+          </p>
           {account.balance_method === "valuation" && (
             <p className="text-xs text-muted-foreground">
-              valuation{account.balance_as_of ? ` as of ${account.balance_as_of}` : ""}
+              valuation{account.balance_as_of ? ` as of ${formatDate(account.balance_as_of)}` : ""}
             </p>
           )}
           {account.balance_method === "postings+holdings" && (
             <p className="text-xs text-muted-foreground">
-              cash {fmtAmount(account.postings_balance)} + holdings
-              {account.balance_as_of ? ` as of ${account.balance_as_of}` : ""}
+              cash {formatMoney(account.postings_balance, { currency: account.currency })} + holdings
+              {account.balance_as_of ? ` as of ${formatDate(account.balance_as_of)}` : ""}
             </p>
           )}
         </div>
@@ -1213,22 +1362,21 @@ function CloseAccountPanel({
   onError: (message: string) => void;
 }) {
   const [category, setCategory] = useState("expenses.adjustments");
-  // The balancing adjustment zeroes POSTINGS — a loan/property headline
-  // balance is a valuation, so use the postings figure when present.
-  const postingsBalance = account.postings_balance ?? account.balance;
-  const balance = Number(postingsBalance ?? 0);
-  const needsAdjustment = balance !== 0;
+  // The balancing adjustment zeroes POSTINGS — a loan headline balance is a
+  // valuation, so use the postings figure when present.
+  const postingsBalance = account.postings_balance ?? account.balance ?? "0";
+  // A hand-valued asset closes with its leftover as a change in value, never
+  // a category (#569); "Sell or dispose…" sets the date.
+  const isAsset = account.type === "property";
+  const needsAdjustment = moneySign(postingsBalance) !== 0 && !isAsset;
 
-  const categories = useQuery({
-    queryKey: ["categories"],
-    queryFn: async () => (await api.GET("/categories")).data ?? [],
-    enabled: needsAdjustment,
-  });
+  const categories = useQuery({ ...categoriesQuery, enabled: needsAdjustment });
   // Only leaf categories can carry postings (a path that is nobody's prefix).
   const leafPaths = useMemo(() => {
     const paths = (categories.data ?? []).map((c) => c.path);
     return paths.filter((p) => !paths.some((o) => o !== p && o.startsWith(`${p}.`)));
   }, [categories.data]);
+  const categoryName = useMemo(() => namesFrom([categories.data]), [categories.data]);
 
   const close = useMutation({
     mutationFn: async () => {
@@ -1246,8 +1394,14 @@ function CloseAccountPanel({
     <Card className="space-y-3">
       <p className="text-sm font-medium">Close {account.name}</p>
       <p className="text-sm text-muted-foreground">
-        Live balance: <span className="font-mono">{fmtAmount(postingsBalance)}</span>
+        Live balance: <span className="font-mono">{formatMoney(postingsBalance, { currency: account.currency })}</span>
       </p>
+      {isAsset && moneySign(postingsBalance) !== 0 && (
+        <p className="text-sm text-muted-foreground">
+          Closing today posts this as a change in value, so the asset closes at zero. To close on
+          a sale date, use Sell or dispose… instead.
+        </p>
+      )}
       {needsAdjustment && (
         <div className="space-y-2">
           <label className="text-sm font-medium">Balancing category</label>
@@ -1257,17 +1411,21 @@ function CloseAccountPanel({
             onChange={(e) => setCategory(e.target.value)}
           >
             {!leafPaths.includes("expenses.adjustments") && (
-              <option value="expenses.adjustments">expenses.adjustments (will be created)</option>
+              <option value="expenses.adjustments">Adjustments (will be created)</option>
             )}
             {leafPaths.map((p) => (
               <option key={p} value={p}>
-                {p}
+                {categoryName(p)}
               </option>
             ))}
           </select>
+          <QueryState query={categories} what="categories" />
           <p className="text-sm text-muted-foreground">
             Purser will post a final balancing transaction of{" "}
-            <span className="font-mono">{fmtAmount(String(-balance))}</span> to this category.
+            <span className="font-mono">
+              {formatMoney(negateMoney(postingsBalance), { currency: account.currency })}
+            </span>{" "}
+            to this category.
           </p>
         </div>
       )}

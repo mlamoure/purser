@@ -9,7 +9,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from purser import occurrences
 from purser import schedules as service
@@ -48,7 +48,12 @@ AutopostLiteral = Literal["auto_post", "wait_for_match", "reminder_only"]
 
 class ScheduleOut(BaseModel):
     id: uuid.UUID
-    name: str
+    name: str = Field(
+        description="the label, derived: the memo, else the payee, else the transfer "
+        "counterparty account's name; written as each instance's description"
+    )
+    payee: str | None = Field(default=None, description="who is paid or pays (#534)")
+    memo: str | None = Field(default=None, description="free-text note (#534)")
     account_id: uuid.UUID
     counterparty_account_id: uuid.UUID | None = Field(
         default=None, description="set = transfer schedule (two-leg instances); null = flat"
@@ -72,6 +77,8 @@ class ScheduleOut(BaseModel):
         return cls(
             id=s.id,
             name=s.name,
+            payee=s.payee.name if s.payee is not None else None,
+            memo=s.memo,
             account_id=s.account_id,
             counterparty_account_id=s.counterparty_account_id,
             category_path=str(s.category_path) if s.category_path else None,
@@ -145,7 +152,11 @@ class ScheduleDetail(ScheduleOut):
 
 
 class ScheduleCreate(BaseModel):
-    name: str
+    name: str | None = Field(
+        default=None,
+        description="deprecated (#534): send payee and memo. Without a memo it is split: "
+        "a transfer's memo, a flat schedule's payee when none is sent, else its memo",
+    )
     account: str = Field(description="account id or path")
     rrule: str = Field(description="RFC 5545 RRULE, e.g. FREQ=MONTHLY;BYMONTHDAY=19")
     dtstart: date_value_type | None = Field(
@@ -155,7 +166,10 @@ class ScheduleCreate(BaseModel):
     date_type: Literal["fixed", "estimated"] = "fixed"
     amount_type: Literal["fixed", "estimated"] = "fixed"
     amount: Decimal | None = Field(default=None, decimal_places=4, max_digits=20)
-    payee: str | None = None
+    payee: str | None = Field(
+        default=None, description="who is paid or pays; required for a flat schedule without a memo"
+    )
+    memo: str | None = Field(default=None, max_length=200, description="free-text note")
     category: str | None = Field(default=None, description="category path for instances")
     counterparty_account: str | None = Field(
         default=None,
@@ -182,13 +196,14 @@ class ScheduleUpdate(BaseModel):
     resyncs live un-pinned instances; a new name or payee relabels live
     instances whose label still equals the old one (see DESIGN §6)."""
 
-    name: str | None = None
+    name: str | None = Field(default=None, description="deprecated (#534): send payee and memo")
     rrule: str | None = None
     dtstart: date_value_type | None = None
     date_type: Literal["fixed", "estimated"] | None = None
     amount_type: Literal["fixed", "estimated"] | None = None
     amount: Decimal | None = Field(default=None, decimal_places=4, max_digits=20)
-    payee: str | None = None
+    payee: str | None = Field(default=None, description='"" clears it (a memo must remain)')
+    memo: str | None = Field(default=None, max_length=200, description='"" clears it')
     category: str | None = None
     counterparty_account: str | None = None
     estimate_basis: EstimateBasisLiteral | None = None
@@ -305,6 +320,7 @@ def create_schedule(
             amount_type=body.amount_type,
             amount=body.amount,
             payee_name=body.payee,
+            memo=body.memo,
             category_path=body.category,
             estimate_basis=body.estimate_basis,
             autopost_policy=body.autopost_policy,
@@ -329,7 +345,7 @@ def list_schedules(
     session: DbSession,
     status_in: Annotated[list[str] | None, Query(alias="status")] = None,
 ) -> list[ScheduleOut]:
-    stmt = select(Schedule).order_by(Schedule.created_at)
+    stmt = select(Schedule).options(selectinload(Schedule.payee)).order_by(Schedule.created_at)
     if status_in:
         stmt = stmt.where(Schedule.status.in_(status_in))
     return [ScheduleOut.from_model(s) for s in session.execute(stmt).scalars()]
@@ -363,7 +379,7 @@ def update_schedule(
     """Edit the rule. Live un-pinned instances follow (slots the new rule no
     longer produces are voided and released, amounts re-estimated, missing
     slots materialized); pinned instances keep their amounts and dates. A new
-    `name` or `payee` relabels every live instance — pinned ones too — whose
+    `payee` or `memo` relabels every live instance — pinned ones too — whose
     description or payee still equals the old one; labels you changed stay."""
     try:
         updated = service.update_schedule(
@@ -379,6 +395,7 @@ def update_schedule(
             estimate_basis=body.estimate_basis,
             category_path=body.category,
             payee_name=body.payee,
+            memo=body.memo,
             autopost_policy=body.autopost_policy,
             counterparty_account_ref=body.counterparty_account,
         )

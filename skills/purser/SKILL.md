@@ -8,7 +8,7 @@ description: >-
   forecasts) or record bills/transactions. Bootstraps agent access with a
   read + write token — the agent acts with the user's authority, and can
   request its own access but can never mint or widen it.
-version: 1.10.1
+version: 1.15.1
 ---
 
 # Purser — agent operations skill
@@ -35,7 +35,7 @@ expected output of every check. In short:
 
    ```bash
    mkdir purser && cd purser
-   curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.2/docker-compose.yml
+   curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.3/docker-compose.yml
    PURSER_ENCRYPTION_KEY=keygen docker compose pull
    ```
 
@@ -72,10 +72,10 @@ Stop at each and say exactly what the human must do; wait for confirmation.
    human creates the admin account; the wizard then shows the key Purser is
    running with, once, for the human to check against the stored copy and
    acknowledge. Optionally the human pastes a **SimpleFIN setup token** (from
-   bridge.simplefin.org) into the wizard or later into Config, SimpleFIN.
+   bridge.simplefin.org) into the wizard or later into Settings, Connections.
    Setup tokens are one-time secrets — never ask for one in chat.
 3. **Token**: the wizard's last step (**Create agent token**) or the
-   **API & MCP Access** page mints a `read + write` API token. The human gives
+   **Settings -> Agents & API** page mints a `read + write` API token. The human gives
    it to you once; keep it only in your MCP client configuration. Never ask
    for `admin` scope.
 
@@ -136,6 +136,8 @@ An admin-scoped API token can mint tokens; do not give routine agents that scope
   "past $4,500 owed" is `"-4500.00"`.
 - Bill emails: parse them client-side and call `create_schedule` /
   `create_transaction` (expected) — Purser never parses email server-side.
+  A schedule takes `payee` (who is paid) and an optional `memo`; its `name`
+  is derived from them, so rename a bill by editing its payee or memo.
 - Card statement emails ("statement balance $8,347.00, payment due Oct 19"):
   call `record_statement_balance(statement_balance, account, due_date)` with
   the figure as printed and the card's account. It sets that card payment to
@@ -248,5 +250,32 @@ An admin-scoped API token can mint tokens; do not give routine agents that scope
   `include=["external_ids"]`; you can always pass them as input. Fix a
   wrongly adopted lot with `void_lot` (after reversing any sale that drew on
   it), a wrong basis with `correct_lot_basis`.
+- Hand-valued assets (a house, a car: accounts of type `property`) are
+  ledgers. Their value is the sum of entries, and a change in value is one
+  entry: `record_value_change(account, as_of, amount, note=...)` with a
+  signed amount ("25000.00" gained, "-4000.00" lost; backdating allowed).
+  When you have a figure instead ("the appraisal says 612,500"), call
+  `reconcile_account(account, as_of, statement_balance=<the value>,
+  note=<where it came from>)`: it posts the difference, one value per
+  date, and a date before the latest value is refused (record a backdated
+  change instead). A scheduled update passes `reference` (for example
+  `valuation-2026-12`) or relies on the same-date reconcile, so a retry
+  posts nothing. A wrong change is undone with
+  `reverse_value_change(transaction_id)`, never `update_transaction`.
+  `record_valuation` is for loans only. What was paid is money put in, not a
+  gain: `record_value_change(..., kind="capital")` for the purchase price or
+  an improvement paid in cash (one paid from a tracked account is a transfer
+  to the asset). `update_account(asset, asset_kind="car")` says what an
+  asset is; `update_account(loan, secured_by=<asset path>)` links a mortgage
+  or car loan, and `list_accounts` then shows the asset's `equity`.
+  `update_account(asset, revalue_after_days=35)` asks Purser to flag an asset
+  whose value goes 35 days without an update: `whats_new.stale_assets` and
+  `value_stale` in `list_accounts` name it until a value is recorded.
+  Selling one: convert the bank's proceeds deposit (and any loan payoff)
+  into transfers from the asset first, then `dispose_asset(account, as_of,
+  note, dry_run=true)`; read `value_before` and `gain` back to the user
+  (a `value_before` equal to the whole value means no proceeds were
+  recorded: a write-off) and call it again without `dry_run` on their OK.
+  `list_accounts` shows each asset's `gain` and `money_put_in`.
 - Sync respects SimpleFIN Bridge limits (24 fetches/day); `trigger_sync`
   when the user asks for fresh data, not on every question.

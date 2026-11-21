@@ -105,6 +105,8 @@ RESET_TABLES = (
     # Global, no foreign key into the set above (#390).
     "security_prices",
     "price_answered",
+    # References connections, which reset_db keeps (#560).
+    "ignored_feed_accounts",
 )
 
 

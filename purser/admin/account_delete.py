@@ -396,6 +396,13 @@ def execute_delete(
     valuations_deleted = _rowcount(
         session.execute(delete(Valuation).where(Valuation.account_id == account.id))
     )
+    # A loan this asset secured keeps its own history; only the link goes
+    # (#567). asset_details and asset_value_changes cascade with their rows.
+    loans_unsecured = _rowcount(
+        session.execute(
+            update(Account).where(Account.secured_by_id == account.id).values(secured_by_id=None)
+        )
+    )
     # Inbox rows naming the account, open or decided: derived state, like its
     # schedules, and their FKs would otherwise refuse the account row (#399).
     suggestions_deleted = _rowcount(
@@ -411,6 +418,7 @@ def execute_delete(
         **deleted,
         "schedules_deleted": schedules_deleted,
         "valuations_deleted": valuations_deleted,
+        "loans_unsecured": loans_unsecured,
         "holdings_deleted": holdings_deleted,
         "reconciliations_deleted": reconciliations_deleted,
         "positions_deleted": positions_deleted,

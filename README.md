@@ -39,6 +39,23 @@ information you should share.
   although a requested write may already have completed. Posted transactions
   are corrected through linked reversal and replacement entries.
 
+```mermaid
+flowchart LR
+  subgraph local["Your server (local)"]
+    P[Purser] <--> DB[(Purser database<br/>PostgreSQL)]
+  end
+  subgraph either["Local or hosted: your choice"]
+    A[Personal agent] --> M[AI model]
+  end
+  S["SimpleFIN Bridge<br/>(hosted, optional)"] -- "bank data, fetched by Purser over HTTPS" --> P
+  A -- "MCP / REST, scoped token" --> P
+  P -. "optional categorization and review<br/>(off by default)" .-> M
+```
+
+Purser and its database run on your server. Your agent reaches Purser with a
+scoped token and uses whichever model you choose; Purser itself calls a model
+only if you configure one.
+
 ## What you can ask your agent
 
 - *"How much did we spend on groceries last month, compared with the month before?"*
@@ -85,15 +102,22 @@ administrative controls for setup, connections, settings, tokens and auditing.
 It also lets you inspect accounts and records directly. These screenshots use
 synthetic demonstration data.
 
-![Needs attention with grouped suggestions, account filters and review links](docs/public/screenshots/dashboard.png)
+![Dashboard with net worth, Needs attention (a detected scheduled transaction and the transaction review summary) and accounts](docs/public/screenshots/dashboard.png)
 
 **Needs attention:** review missing expected payments first, expand suggestions
 by type, and open the exact account register for posted or pending review.
 
 | | |
 |---|---|
-| ![API and MCP access settings](docs/public/screenshots/tokens.png) **Access:** create scoped agent tokens | ![Privacy with agents settings](docs/public/screenshots/privacy.png) **Disclosure:** set defaults for MCP responses |
-| ![Audit log](docs/public/screenshots/audit.png) **Audit log:** review sharing and changes | ![Account register with categories and transfer links](docs/public/screenshots/register.png) **Record inspection:** view transactions, balances and transfer links |
+| ![Settings, Agents & API: create a token and the token list](docs/public/screenshots/tokens.png) **Access:** create scoped agent tokens under Settings, Agents & API | ![Privacy with agents card](docs/public/screenshots/privacy.png) **Disclosure:** set defaults for MCP responses, on the same page |
+| ![Audit log with an agent's read expanded](docs/public/screenshots/audit.png) **Audit log:** review sharing and changes under Settings, Audit log | ![Account register with categories and transfer links](docs/public/screenshots/register.png) **Record inspection:** view transactions, balances and transfer links |
+
+![Scheduled transactions: the account forecast above each account's schedules by payee and memo](docs/public/screenshots/schedules.png)
+
+**Scheduled transactions:** the bills, paychecks and transfers behind the
+forecast, by payee and memo, with the projected balance for each account.
+
+The interface follows your system's light or dark appearance.
 
 ## Get started
 
@@ -118,6 +142,9 @@ Agents that load skills can also use [`skills/purser/SKILL.md`](skills/purser/SK
 - [Privacy and agents](https://mlamoure.github.io/purser/explanation/privacy-and-agents/)
 - [Ledger](https://mlamoure.github.io/purser/explanation/ledger/)
 - [Security model](https://mlamoure.github.io/purser/explanation/security/)
+- [Encryption at rest](https://mlamoure.github.io/purser/explanation/encryption-at-rest/)
+- [Run with Docker Compose](https://mlamoure.github.io/purser/how-to/docker-compose/)
+- [Put Purser behind a reverse proxy](https://mlamoure.github.io/purser/how-to/reverse-proxy/)
 - [Backup and restore](https://mlamoure.github.io/purser/how-to/backup-restore/)
 
 ## Bugs, ideas and security

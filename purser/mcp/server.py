@@ -22,6 +22,7 @@ Adding a tool group means one import below and one line in
 from purser.mcp import (
     resources,
     tools_analytics,
+    tools_assets,
     tools_holdings,
     tools_lots,
     tools_memories,
@@ -59,6 +60,7 @@ __all__ = [
     "mcp",
     "resources",
     "tools_analytics",
+    "tools_assets",
     "tools_holdings",
     "tools_lots",
     "tools_memories",

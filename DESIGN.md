@@ -106,7 +106,8 @@ This document is ground truth for v1.0. Implementation tracking: issue #14.
   day through `clock.ledger_date()`): the calendar date in the `timezone`
   setting, an IANA name, env `PURSER_TIMEZONE` + runtime override, default
   `UTC` so an existing install keeps its day. Nothing derives a day from the
-  host's local zone. The scheduler's job times stay in UTC. Two things keep the
+  host's local zone. The scheduler's job times stay in UTC, except the daily
+  SimpleFIN sync time, a household clock time (decision 111). Two things keep the
   UTC frame on purpose: dates of imported rows (a SimpleFIN epoch's UTC date,
   and a fetch's UTC day for its snapshots; existing rows are never re-dated),
   and the SimpleFIN fetch window, whose bounds are epoch seconds at UTC
@@ -203,6 +204,17 @@ CREATE TABLE connections (
   backfill_cursor   DATE,
   backfill_complete BOOLEAN NOT NULL DEFAULT false,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Feed accounts an admin chose not to track (issue #560, migration 0052,
+-- decision 112): the same account delivered through a second bank login, or
+-- one that does not belong in the ledger. Reporting only; mapping the
+-- account removes its row.
+CREATE TABLE ignored_feed_accounts (
+  connection_id UUID NOT NULL REFERENCES connections(id) ON DELETE CASCADE,
+  external_id   TEXT NOT NULL,
+  ignored_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (connection_id, external_id)
 );
 
 CREATE TABLE raw_fetches (          -- APPEND-ONLY. Never UPDATE, never DELETE.
@@ -311,6 +323,13 @@ CREATE TABLE accounts (
 );
 -- Seeded by 0043: equity.securities (type equity, virtual), the other side of
 -- every securities trade's cash; the service recreates it if it is missing.
+-- Seeded by 0054: equity.revaluation (type equity, virtual), the other side of
+-- every change in a hand-valued asset's value (decision 113); likewise.
+-- Seeded by 0055: equity.capital, the other side of money put into an asset
+-- that no tracked account paid (decision 114); likewise.
+-- accounts.secured_by_id UUID REFERENCES accounts(id) (0055, decision 114): on
+-- a loan, the property account that secures it (service-checked: loan ->
+-- property); the delete-account CLI clears links to a deleted asset.
 CREATE INDEX accounts_path_gist ON accounts USING GIST (path);
 -- One ledger account per (connection, external id) — feed idempotency backstop.
 CREATE UNIQUE INDEX accounts_connection_external_uniq
@@ -606,9 +625,13 @@ CREATE INDEX memory_links_payee   ON memory_links (payee_id)   WHERE payee_id IS
 
 CREATE TABLE schedules (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  name_enc        BYTEA NOT NULL,       -- Fernet over the schedule name (ORM attr: name; #137)
+  name_enc        BYTEA NOT NULL,       -- Fernet over the schedule's LABEL (ORM attr: name; #137),
+                                         --   derived since #534: memo, else payee, else the
+                                         --   transfer counterparty account's name (decision 110)
+  memo_enc        BYTEA,                 -- Fernet over the free-text memo (#534, migration 0050)
   account_id      UUID NOT NULL REFERENCES accounts(id),
-  payee_id        UUID REFERENCES payees(id),
+  payee_id        UUID REFERENCES payees(id), -- who is paid or pays; a flat schedule has one
+                                         --   unless it carries a memo (#534)
   category_path   LTREE,                 -- posting template (flat schedules)
   counterparty_account_id UUID REFERENCES accounts(id),
                                          -- the other REAL account of a recurring transfer
@@ -970,7 +993,14 @@ CREATE TABLE valuations (
   account_id UUID NOT NULL REFERENCES accounts(id),
   as_of      DATE NOT NULL,
   value      NUMERIC(20,4) NOT NULL,  -- ledger sign: a liability is negative while owed (decision 71)
-  source     TEXT NOT NULL      -- manual | statement | api
+  source     TEXT NOT NULL,     -- manual | statement | api
+  created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+    -- when recorded (0053, #565): of two rows on one date the later recorded
+    -- wins; every reader orders (as_of, created_at, id) newest first
+    -- (networth.VALUATION_NEWEST_FIRST). clock_timestamp(), not now(), so rows
+    -- written in one transaction keep their order. Backfilled from the
+    -- valuation.create audit row, else midnight UTC of as_of (feed rows were
+    -- never audited).
 );
 
 CREATE TABLE events (              -- durable; subscribers can replay
@@ -1050,6 +1080,33 @@ CREATE TABLE balance_watermark (    -- singleton dirty-watermark (§3.5, decisio
   networth_dirty_from DATE,        -- consumed async (networth.consume_watermark)
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE asset_details (  -- what a hand-valued asset is (§8, decision 114)
+  account_id      UUID PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,
+  kind            TEXT NOT NULL DEFAULT 'other'
+                  CHECK (kind IN ('house', 'land', 'car', 'boat', 'rv', 'jewelry', 'art',
+                                  'equipment', 'other')),  -- label + icon, no behaviour
+  acquired_on     DATE,
+  description_enc BYTEA,         -- narrative (an address, a VIN): EncryptedText
+  revalue_after_days INT CHECK (revalue_after_days BETWEEN 1 AND 3650),
+                                 -- 0056, decision 115: stale after this; NULL = never
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- One row per property account: ledger.create_account adds it; 0055 backfilled
+-- existing ones as 'other'.
+
+CREATE TABLE asset_value_changes (  -- retry references of value changes (§8, decision 113)
+  transaction_id UUID PRIMARY KEY REFERENCES transactions(id) ON DELETE CASCADE,
+  account_id     UUID NOT NULL REFERENCES accounts(id),   -- the property account
+  reference      TEXT,          -- caller's retry key: [A-Za-z0-9][A-Za-z0-9._:-]{0,99},
+                                -- plaintext by shape (words go in the encrypted note)
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (account_id, reference)  -- a repeated reference posts nothing
+);
+-- The change itself is the transaction (asset vs equity.revaluation, origin =
+-- the actor's, note = its encrypted description); this row exists for every
+-- change recorded through the value-change path. Migration 0054's converted
+-- valuations reference migration-0054:<valuation id>.
 
 CREATE TABLE account_reconciliations (  -- statement-balance claims (§3.7, decision 61)
   id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -1614,8 +1671,15 @@ that can go stale silently.
   `component=balance` (default). Manual brokerage requires explicit
   `component=cash`: the statement target is only cash, excluding owned
   securities and unvested awards (#514). Feed brokerage is refused. Holdings,
-  awards, prices and feed flags never change. Loan/property accounts use
-  valuations instead; categories never reconcile (CHECK).
+  awards, prices and feed flags never change. A hand-valued asset
+  (`property`, decision 113) reconciles to its value on `as_of`: the
+  difference posts against the system account `equity.revaluation`, not the
+  adjustments category, payee "Asset value", the optional `note` as its
+  description (`adjustment_path`); the claim, marker, retry, out-of-order and
+  staleness rules are unchanged. Loan accounts use valuations instead;
+  categories never reconcile (CHECK). Every reconcile takes an optional
+  `note` (where the figure came from), kept on the adjustment and the audit
+  and event facts.
   `component` is returned by write, history and account read surfaces and
   included in audit/event facts. It derives from immutable account type
   (brokerage=cash, others=balance); existing claim storage needs no migration.
@@ -2274,9 +2338,12 @@ Expected transactions reconcile against imported posted/pending reality.
   and renaming a schedule or changing its payee relabels every live
   instance, pinned ones too, whose description still equals the old name or
   whose payee still equals the old rule payee (normalized) — a label the user
-  set differs and is kept; audited as one `schedule.relabel` row. A
-  payee-less flat schedule's name *is* its instances' payee, so it feeds
-  match scoring (§5) and `whats_new`'s bills-due list. The rule side: **estimated**
+  set differs and is kept; audited as one `schedule.relabel` row. Since
+  decision 110 a schedule is entered as a **payee** and a **memo**; its name
+  is the derived label (memo, else payee, else a transfer's counterparty
+  account), so a payee or memo edit is what renames it. A payee-less flat
+  schedule (memo only) still uses its label as its instances' payee, so it
+  feeds match scoring (§5) and `whats_new`'s bills-due list. The rule side: **estimated**
   schedules refresh their live un-pinned instances whenever the estimate
   moves (audited `schedule.refresh`) — the estimate reads posted chain heads
   only (§5, decision 69); a rule **edit** resyncs — slots the new
@@ -2685,6 +2752,22 @@ the preview, and rolls back when what ran differs from it. Audited
   No balances: read scope sees ledger balances elsewhere. `feed_status` returns
   one line per login and only the accounts that need attention
   (`not_connected`, `stale Nd`, an `act.*` code, `ambiguous_id`).
+- **Ignored feed accounts** (issue #560, decision 112). `POST
+  /connections/{id}/ignore` (admin; `external_id`, `ignored` default true)
+  marks an unmapped account of the latest sync as not tracked, or tracks it
+  again. Only reporting changes: `/discovered` and the inventory carry
+  `ignored`, `feed_status` leaves the account out of `not_connected`, and the
+  admin app stops asking for it to be mapped. Nothing is imported or removed,
+  and the archive keeps its rows, so mapping it later imports them as for any
+  unmapped account (mapping clears the mark). Audited as `feed_account.ignore`
+  / `feed_account.unignore` on the connection; a repeat records nothing. A
+  mapped account is refused (unmap by closing or remapping instead).
+- **Login issues are matched to logins leniently** (issue #559). A `con.*`
+  issue names its login by `conn_id`; a server may send it without the
+  provider prefix the `connections` entry carries, so
+  `envelope.login_of_issue` takes an id with no exact match as the one login
+  whose id ends with `-<id>`. The health block keeps the issue's own id as its
+  key.
 - **Available balance** (issue #483, decision 101). `/discovered` carries the
   bank's `available-balance` as `available_balance` when it differs from the
   balance and the account is checking, savings, cash or a credit card (or
@@ -2694,16 +2777,17 @@ the preview, and rolls back when what ran differs from it. Audited
   recommended 45 days (first sync, backfill, outage repair) draw a `gen.api`
   warning only; they are paged at 45 days if the Bridge starts capping.
 - The fetch schedule is admin-configurable (`sync_schedule` in `app_settings`,
-  Config UI): daily at HH:MM UTC (default 06:30), every 12h (06:30/18:30),
-  every 6h, or hourly (:30) — every preset lands a run just before the 06:45
+  Settings → Connections): daily at HH:MM in the household `timezone`
+  (default 06:30; decision 111), every 12h (06:30/18:30 UTC), every 6h, or
+  hourly (:30) — the interval presets land a run just before the 06:45 UTC
   matching job, and hourly (24/day) sits exactly at the Bridge budget; the
   per-connection fetch guard fails soft beyond it. Job id stays
-  `feed.sync_daily` (contract test) regardless of cadence. Every job time is
-  UTC whatever the household `timezone` (decision 105): the setting moves the
-  ledger day, never the job train. Changes reschedule
-  the running scheduler live in the single-process topology; in the split
-  serve/worker topology they apply at worker restart (the API reports which
-  via `sync_reschedule_live`). Each run is delayed by a random 0–10 minutes
+  `feed.sync_daily` (contract test) regardless of cadence. Every other job
+  time is UTC whatever the household `timezone` (decision 105): the setting
+  moves the ledger day, not the job train. Changes to the schedule or to the
+  `timezone` reschedule the running scheduler live in the single-process
+  topology; in the split serve/worker topology they apply at worker restart
+  (the API reports which via `sync_reschedule_live`). Each run is delayed by a random 0–10 minutes
   (`SYNC_JITTER_SECONDS`, APScheduler jitter; issue #483, decision 101), as the
   Bridge asks apps to spread their fetches: the :30 presets still land before
   06:45.
@@ -3307,8 +3391,9 @@ it.
   current ledger, on the basis the same sync history (or the pin) selects
   (tri-state: both null = not applicable; ledger set + drift null = clean;
   both set = drifting; `drift_basis` and `drift_basis_learned` are set
-  whenever `ledger_balance` is). The Config → SimpleFIN "Feed accounts" table
-  renders it with the basis (and a "pinned" badge) next to the drift, and a
+  whenever `ledger_balance` is). Settings → Connections shows the result per account
+  ("Compared with Purser"); its "How balances are compared" table (under
+  Maintenance) renders the basis (and a "pinned" badge) next to the drift, and a
   per-row basis select (Auto, showing the learned basis, or a pin) that sends
   the `PATCH`; deliberate asymmetry: the UI
   shows current raw drift immediately (it is the convergence meter while
@@ -3441,7 +3526,7 @@ it.
     manual close never pins a symbol. A feed-implied close is market value /
     quantity of a feed snapshot of the same symbol that day, computed on read
     and never stored. The provider is `none` (default) or `tiingo`
-    (`price_provider`, env or Config → Prices); its API key is Purser's own
+    (`price_provider`, env or Settings → Prices); its API key is Purser's own
     write-only secret in `app_settings`, never an env value, a log line or a
     response. The provider sees ticker symbols only. The daily job
     `prices.fetch_daily` (06:40 UTC, after the sync, before the 07:30
@@ -3480,7 +3565,7 @@ it.
     fit an amount at its close is no price for that row (`core.valued`),
     never a failure of the whole account. Every failure surface carries the
     reason: the run's `failed[]`, its `price.fetch` audit row,
-    `GET /prices/status` `last_failure` and Config, Prices. The job then
+    `GET /prices/status` `last_failure` and Settings → Prices. The job then
     re-projects every manual account (this also picks up
     feed-implied prices and heals a missed trigger, at no cost when nothing
     changed); then emits `price.stale` once per symbol per stale close. A
@@ -3873,18 +3958,114 @@ it.
   `/prices/status`, `whats_new`), judged on the stored closes the overlay
   reads. No provider fetch is made for these symbols, and the importer is
   unchanged.
-- Property: asset account + manual `valuations` series. Loans: liability
-  account, SimpleFIN-synced or manual valuations.
-- **Only loan and property accounts take valuations** (decision 81):
-  `networth.VALUATION_TYPES` is the one set every reader below filters on and
-  the feed's balance valuation uses, and an account's type never changes, so
-  `networth.record_valuation` refuses every other real type (422 over REST, a
-  tool error over MCP) before the sign rule, naming the two types and where
-  that account's balance comes from instead: its transactions, plus its latest
-  holdings snapshot for brokerage. Valuation rows already stored on another
+- **Hand-valued assets are ledgers** (issue #566, decision 113). A
+  `property` account (a house, a car, land: the UI says "Asset") is valued by
+  its postings, like a checking account. A change in its value is an entry: a
+  posted two-leg transaction between the asset and the system virtual account
+  `equity.revaluation` (type `equity`, never a category, so path reports,
+  spending and income never see it), through one service,
+  `assets.record_value_change` (REST `POST /accounts/{id}/value-changes`, MCP
+  `record_value_change`, write scope). Inputs: `as_of` (today or earlier in
+  the ledger day), a signed nonzero `amount` fitting NUMERIC(20,4), an
+  optional `note` (the entry's encrypted description) and an optional
+  `reference`: a reference already used on the account posts nothing and
+  answers with the first change (`created: false`, REST 200), so a retried
+  call never posts twice. Refused on any other type (naming where that
+  account's balance comes from), on a closed account and in the future. It
+  locks the account row first (reconciliation's lock order), audits
+  `asset.value_change` and emits `asset.value_changed`. "Worth X on D" is
+  reconciliation (§3.7), which posts the difference the same way, so a target
+  is a calculator over the same entries, not a second model. Such rows carry
+  a system leg, so the matcher, transfer pool, rules and detection leave them
+  alone (the decision-103 machinery: `has_system_leg`), the register marks
+  them `value_change` (not `securities_trade`), `review_batch` flags them
+  `value_change`, and `update_transaction` refuses them: a wrong change is
+  undone by `assets.reverse_value_change` (REST
+  `POST /value-changes/{transaction_id}/reverse`, MCP `reverse_value_change`)
+  through the reversal pair with a zero replacement, as trade cash is undone
+  — a change a reconcile posted included, whose claim then reads out of
+  balance like after any backdated change. A feed-mapped asset's reported
+  balance, when it differs from the asset's pending-inclusive balance on the
+  fetch's ledger day, becomes a value change for the difference (origin
+  `import`, note "Balance the bank reported"); the drift check still excludes
+  the type. Migration 0054 turned every property account's stored valuations
+  into entries (the newest-recorded row per date; a closed account's from its
+  close date on skipped and its entries taken back out on the close date) and
+  re-derived running balances; the valuation rows stay, unread. Loans:
+  liability account, SimpleFIN-synced or manual valuations.
+- **Asset kinds, money put in and equity** (issue #567, decision 114). Each
+  asset has an `asset_details` row: `kind` (house, land, car, boat, rv,
+  jewelry, art, equipment, other — a label and an icon, never behaviour),
+  `acquired_on` and an encrypted `description`, set at creation
+  (`POST /accounts` `asset_kind`/`acquired_on`/`asset_description`, refused
+  on other types) and by `PATCH /accounts/{id}` or MCP
+  `update_account(asset_kind)`, audited `asset.update`; `AccountOut.asset`
+  carries them. A value change takes `kind`: `revaluation` (default, against
+  `equity.revaluation`) or `capital` — money put in that no tracked account
+  paid (the purchase before the user's history, an improvement paid in cash),
+  against the system account `equity.capital`, so it never reads as a gain;
+  money a tracked account paid is a transfer to the asset. The register marks
+  those rows `money_put_in`. A loan's `secured_by_id` names the property
+  account that secures it (`PATCH /accounts/{id}`, MCP `update_account
+  (secured_by)`, audited `account.secure`; loans only, pointing at a property
+  account); the asset then reports `equity` = its reported balance plus the
+  reported balances of the open loans it secures (ledger sign) and
+  `secured_loan_ids` on the account surfaces with balances, and MCP
+  `list_accounts` shows `asset_kind`, `equity`, `secured_loans`,
+  `secured_by`. The admin UI calls the type "Asset", lets a person add one
+  (the purchase price becomes money put in on the purchase date), record a
+  value or a change, edit its details, link loans and undo an entry, and
+  shows an icon for every account type and asset kind (lucide-react,
+  decorative beside text).
+- **Stale values** (issue #568, decision 115). `asset_details.revalue_after_days`
+  (1..3650, NULL = never; POST/PATCH `/accounts`, MCP
+  `update_account(revalue_after_days)`, 0 clears). An asset's value was last
+  stated on `assets.last_valued`: the later of its newest live, nonzero,
+  posted value entry (a leg on `equity.revaluation` or `equity.capital`,
+  chain heads only, so a reversed entry does not count) and its newest
+  reconciliation's `as_of` (a clean reconcile posts nothing but still states
+  the value). An open asset with a limit is stale when that date is more than
+  the limit ago, or there is none. `AccountOut.asset` carries
+  `revalue_after_days`, `last_valued` and `stale`; MCP `list_accounts` adds
+  `value_stale` and `last_valued` to a stale asset only. The daily job
+  `assets.stale_check` (07:20 UTC, after the shortfall scan, before net-worth
+  materialization) emits `asset.stale` through `events.emit_once` keyed
+  `{account}:{last_valued}`, so a value that stays stale alerts once and a
+  refreshed one that goes stale again alerts again; `whats_new.stale_assets`
+  reads the stale set live on every call (capped at 10), like the feed
+  block.
+- **Sale or disposal; money put in and gain** (issue #569, decision 116). An
+  asset reports `gain` (the live sum of its postings in rows with a leg on
+  `equity.revaluation`) and `money_put_in` (its value less that: the purchase
+  and every transfer in or out, proceeds included) on `AccountOut.asset` and
+  MCP `list_accounts`; ledger sums, no tax computation (§13). `assets.dispose`
+  (REST `POST /accounts/{id}/dispose`, MCP `dispose_asset`, write scope,
+  `dry_run`): the sale's money is recorded first, as transfers out of the
+  asset dated on or before `as_of`; dispose refuses an `as_of` before the
+  asset's latest entry, then closes the account with `on=as_of`. Closing a
+  property account (dispose or the ordinary close, which dates it today)
+  posts its leftover balance as a value change against `equity.revaluation`
+  — a gain or loss at sale, the whole value for a write-off — instead of an
+  adjustment category, so the asset leaves net worth on the sale date and
+  nothing reads as spending. Audited `asset.dispose` beside the close's own
+  rows.
+- **The newest valuation is the latest date, then the latest recorded**
+  (#565): readers order `(as_of, created_at, id)` newest first through one
+  helper, `networth.VALUATION_NEWEST_FIRST` (the balance-series SQL spells
+  the same order), so a loan whose feed balance changes twice in one day, or
+  a figure re-recorded for a date, answers with the later one. The feed's
+  unchanged-balance check reads the same order.
+- **Only loan accounts take valuations** (decision 81; property left the set
+  in decision 113): `networth.VALUATION_TYPES` is the one set every reader
+  below filters on and the feed's balance valuation uses, and an account's
+  type never changes, so `networth.record_valuation` refuses every other real
+  type (422 over REST, a tool error over MCP) before the sign rule, naming
+  where that account's balance comes from instead: its transactions, plus its
+  latest holdings snapshot for brokerage; for a property account its value
+  ledger (`record_value_change`, `reconcile_account`). Valuation rows already stored on another
   type stay where they are and are never read.
-- **Valuations are stored in ledger sign** (decision 71): a property positive,
-  a loan negative while money is owed — the sign SimpleFIN reports (§7.3) and
+- **Valuations are stored in ledger sign** (decision 71): a loan negative
+  while money is owed — the sign SimpleFIN reports (§7.3) and
   every reader below assumes. A manual valuation
   (`POST /accounts/{id}/valuations` or MCP `record_valuation`, decision 73,
   both through `networth.record_valuation`, the one write path) takes
@@ -3896,7 +4077,7 @@ it.
   the audit row and the `valuation.recorded` event carry the stored figure.
 - **Account surfaces honor the valuation model** (decision 42): the accounts
   API/MCP listing, single-account GET, and `/balance` report an OPEN
-  loan/property account's latest valuation as its balance
+  loan account's latest valuation as its balance
   (`balance_method="valuation"`, `balance_as_of` = valuation date), falling
   back to postings when no valuation exists; `postings_balance` rides
   alongside for flows that operate on postings (close). The overlay is
@@ -3920,7 +4101,7 @@ it.
   row, so the projection's event loop never sees it, and dropping it from the
   opening balance too would erase it from the forecast entirely.
 - Net worth at time T = Σ postings ≤ T (real accounts) + latest holdings
-  snapshot ≤ T (market value) + latest valuation ≤ T. Materialized into
+  snapshot ≤ T (market value) + latest valuation ≤ T (loans). Materialized into
   `net_worth_daily` (Grafana's flagship source; keeps the MCP tool fast) —
   **watermark-driven** (decision 38, §3.5): every balance-affecting write
   LEAST-updates `networth_dirty_from`; `consume_watermark` re-materializes
@@ -3957,7 +4138,7 @@ operators must still complete setup before exposing a fresh instance (#429).
   what a task needs. There is no approval step: the agent decides, the tool
   guidance (MCP `instructions`, `describe()`'s conventions, `GET /llms.txt`,
   the skill) teaches it to choose, and two user settings (app settings
-  registry, audited, both **off** by default; Config → Settings) set the
+  registry, audited, both **off** by default; Settings → Agents & API) set the
   defaults. They are defaults the agent may override per call, not ceilings.
   - **`privacy_purchase`:** each payee is returned as a stable reference
     (`py_...`, §3.1 `encryption_keys`) in place of its name; descriptions,
@@ -4257,7 +4438,7 @@ operators must still complete setup before exposing a fresh instance (#429).
     ~300ms, or a product need for word search across all history at agent call
     rates (#141). Substring-within-word search still works under
     decrypt-and-filter (a token index would lose it).
-  The Config → Settings page surfaces this posture read-only (issue #123): live
+  The Settings → Security page surfaces this posture read-only (issue #123): live
   canary check, key fingerprint, acknowledgment state, and the encrypted-scope
   list (now naming the narrative scopes + the keyed content hash) — with the
   explicit note that encrypting the database files themselves is a
@@ -4349,10 +4530,16 @@ can pair a rejected one, decision 86) / `confirm_transfer` (optional
 `remainder_category`: a split loan payment, decision 62; an ordinary confirm
 proposes a payee-scoped `transfer_link` suggestion and returns its id,
 decision 67; it accepts the pair's `transfer_pair` card and can link a
-rejected pair, decision 102) · `reconcile_account` (statement-balance
-reconciliation with dry run, write scope, decision 61) · `record_valuation`
-(a loan's or property's value on a date, `convention` ledger or statement,
-write scope, decision 73) · `record_position` ("I hold N shares as of D" on a
+rejected pair, decision 102) · `record_value_change` / `reverse_value_change` / `dispose_asset`
+(a hand-valued asset's change in value against `equity.revaluation`, or money
+put in against `equity.capital` with `kind="capital"`, with an optional retry
+`reference`, its reversal, and its sale or write-off; write scope,
+decisions 113/114/116) ·
+`reconcile_account` (statement-balance
+reconciliation with dry run, write scope, decision 61; a property account's
+value on a date, decision 113) · `record_valuation`
+(a loan's value on a date, `convention` ledger or statement,
+write scope, decisions 73/113) · `record_position` ("I hold N shares as of D" on a
 manually tracked brokerage account; opens the position when needed; commit
 scope, decision 88) / `record_price` (a manual close of a symbol on a date;
 write scope, decision 89) / `record_sale` (a sale and its cash through the
@@ -4715,6 +4902,13 @@ with no connected agent, or for nuances that surface between sessions.
 | 108 | **Certainty belongs to each occurrence and each dimension** (#512, migration 0047; amends 55, 65, 80 and 85): immutable original snapshots, encrypted evidence/history, independent confirmation, matched-actual provenance and variance; uncertain or ambiguous matches require review, and unmatch preserves confirmation. | A recurring rule and an amount edit cannot establish this occurrence's amount and date independently. Keeping evidence separate from posting preserves the immutable ledger and prevents double counting without losing the estimate that led to the payment. |
 
 | 109 | **Projected certainty uses schedule plus recurrence date, independently of value calculation** (#518, migration 0048, §3/§6). Slot evidence is metadata-only, retains a first observed projection, and transfers to the instance with history on materialization. New instance evidence distinguishes value overrides from certainty-only annotations; existing classifications remain compatible. | A fixed planning amount need not be known, and distant projections have no transaction UUID. Preserve forecast values while making uncertainty and its evidence visible through REST, MCP and the UI. |
+| 110 | **A scheduled transaction is entered as a payee and a memo; its name is derived** (issue #534, migration 0050, §3.2/§6; amends 79): `schedules.memo_enc` (encrypted narrative, nullable); `schedules.resolve_labels` derives the label `name` = memo, else payee, else (transfer) the counterparty account's name, and refuses a flat schedule with neither payee nor memo; create, update and suggestion drafts (`ScheduleDraft.memo`, optional, so stored drafts still parse) take `payee` and `memo`; `name` is still accepted and, sent without a memo, splits — a transfer's memo, a flat schedule's payee when none is sent, otherwise its memo unless it normalizes to the payee; on update `""` clears payee or memo and fields not sent keep their value; REST `ScheduleOut` and MCP `list_schedules` return `payee` and `memo` (memo is a description path and a privacy narrative); migration 0050 splits stored names by the same rule, finding or creating the payee by blind index, and leaves `name_enc` unchanged because the derived label equals the old name in every case. | Quicken-style scheduled transactions have a payee and a memo, and the admin form had a single "name" doing two jobs: the instance description and, for payee-less bills, the payee. The payee was accepted on write but never returned, so the form could not show or keep it. Deriving the label keeps every reader of `name` (instance descriptions, decision 79's relabel, the forecast, the digest, privacy scrubbing, suggestion fingerprints) working unchanged; keeping `name` as an accepted input keeps connected agents working without a breaking tool change. |
+| 111 | **The daily sync time is a clock time in the household time zone** (issue #556, migration 0051; amends 105): `sync_schedule`'s daily `hour`/`minute` are read in the household `timezone`, and `feed.sync_daily`'s daily trigger runs in that zone, so it keeps its clock time across daylight-saving changes (a skipped time runs an hour later, a repeated one twice); the interval presets and every other job stay on UTC times; a `timezone` change (set or reset) reschedules the sync; migration 0051 converts a stored daily UTC time with the day's offset, and writes the default's 06:30 UTC as an explicit local time for a non-UTC household with no stored schedule, so no install's sync moves; the admin page shows and sends the stored time as is. | People set the sync for a time of their day ("before I wake up"), and a UTC time moved it by an hour twice a year. The rest of the job train is ordered relative to itself, not to the household's day, and keeping it in UTC keeps that order fixed; the sync was the one time a person picks. |
+| 112 | **An admin can ignore an unmapped feed account; the mark changes reporting only** (issue #560, migration 0052, §7.1): `ignored_feed_accounts(connection_id, external_id)`; `POST /connections/{id}/ignore`; `/discovered`, the inventory and `feed_status` honour it; mapping clears it; the setup card asks for mapping only until the first account is mapped, and an account delivered later is raised by its own Dashboard notice until mapped or ignored. | A joint account arrives once per bank login that can see it. The second copy could only be mapped to a new account (double-counting it) or onto the first copy's account (moving the feed between logins), so it stayed "unmapped" for good, kept first-run setup open and was reported to agents as a new account on every check. Keyed by the feed's own id rather than a link to the account it duplicates, so it also covers accounts that are simply out of scope, and it stores nothing the archive does not already hold. It never gates import: unmapped accounts were not imported before either. |
+| 113 | **A hand-valued asset is a ledger: a change in value is an entry against `equity.revaluation`, and "worth X on D" is reconciliation** (issue #566, migration 0054, §3.1/§3.7/§8/§10; amends 42, 71, 73 and 81 for property; owner-approved 2026-11-21): property leaves `VALUATION_TYPES` (loans stay); `assets.record_value_change` posts signed changes with an optional note and retry `reference` (`asset_value_changes`, UNIQUE per account); reconcile accepts property and posts its difference against `equity.revaluation`; `reverse_value_change` undoes either through the reversal pair; a feed-mapped asset's reported balance becomes a value change; 0054 converts stored property valuations into entries. MCP `record_value_change`, `reverse_value_change`; `reconcile_account` takes property and `note`; `record_valuation` refuses property. | The owner tracks a house as an asset ledger whose value moves by +/− amounts, the way a balance does, with a monthly estimate applied as a reconciliation. The snapshot model could not express that: a retried job duplicated rows (and before #565 a same-day pick was random), a wrong figure could never be removed, any transaction on the account was hidden behind the latest valuation, so purchase and improvements had no place, and closing a valued asset posted its leftover to an expense category. As a ledger, every existing guarantee applies unchanged — running balances, reversal-pair corrections, backdating, reconciliation's idempotent retries and live staleness — and the change rows reuse the system-leg exclusions decision 103 built for trade cash. A target stays a calculator, not the stored fact, so a backdated change never needs a target rewritten. Loans keep snapshots: a mortgage feed reports a balance and nothing else, which is exactly what a snapshot is. |
+| 114 | **An asset has a kind (a label and an icon), money put in is kept apart from gains, and a loan can name the asset that secures it** (issue #567, migration 0055, §3.1/§8): `asset_details` (kind, acquired_on, encrypted description), `equity.capital` for `kind="capital"` value changes, `accounts.secured_by_id` on loans with `equity` on the asset; MCP `update_account(asset_kind, secured_by)`, `record_value_change(kind)`, `list_accounts` asset fields. | The owner wants every hand-tracked thing — a house, a car — to say what it is and show it, without types multiplying: the account type stays `property` (agents and integrations name it) and everything that differs between a house and a car is presentation. The purchase price is not appreciation, so booking it against `equity.revaluation` would report the whole price as a gain; a second system account keeps "money put in" and "gain" separable by construction, which the sale flow (#569) reads. Equity is the number a person asks for about a mortgaged house; storing the link on the loan (one asset per loan, many loans per asset) answers it without a join table. |
+| 115 | **An asset's value can go stale: a per-asset limit, an event once per stale value, and a live `whats_new` list** (issue #568, migration 0056, §3.1/§8): `revalue_after_days`; last stated = newest live value entry or reconciliation; daily `assets.stale_check` at 07:20 UTC emits `asset.stale` (dedup account + last date); `whats_new.stale_assets`. | An asset valued by an outside job (a monthly estimate) can stop updating without anyone noticing — the job's own failure alarm may not fire if it silently writes nothing. Purser sees the effect directly: no new value. A reconcile that matched counts, because the monthly job sends the same figure when the estimate did not move and must not trip the alarm. The event follows `price.stale`'s once-per-transition rule; the brief reads the set live so it keeps naming the asset until fixed. |
+| 116 | **An asset is sold by recording its proceeds as transfers out and closing it on the sale date; what is left is its last change in value** (issue #569, §3.4/§8): `dispose(as_of)`, the property branch of `close_account` (value change, not a category), `gain`/`money_put_in` on asset surfaces; MCP `dispose_asset`. | The proceeds are bank reality the feed delivers, so they are recorded where they land (a transfer from the asset), not re-entered as a sale price; the residual is then exactly gain or loss including selling costs, and a write-off is the same call with nothing recorded. Dating the closing entry on the sale date keeps net-worth history right when the sale is entered late; routing it through `equity.revaluation` keeps it out of spending, which the generic close's adjustment category would not. |
 
 ## 13. Non-goals (v1)
 

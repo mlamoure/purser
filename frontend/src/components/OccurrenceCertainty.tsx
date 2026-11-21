@@ -2,7 +2,9 @@ import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import type { components } from "../api/schema";
 import { api, errorDetail } from "../lib/api";
-import { fmtAmount } from "../lib/utils";
+import { formatMoney } from "../lib/money";
+import { formatDate, formatDayOrTimestamp } from "../lib/dates";
+import { useClock } from "../lib/clock";
 import { Badge, Button, ErrorText, Input, Label } from "./ui";
 
 type Certainty = components["schemas"]["CertaintyOut"];
@@ -13,6 +15,7 @@ const labels: Record<Certainty["status"], string> = {
 };
 
 export function OccurrenceCertainty({ value }: { value?: Certainty | null }) {
+  const timeZone = useClock().data?.timezone;
   if (!value) return null;
   return <details className="text-xs">
     <summary className="cursor-pointer">
@@ -23,15 +26,15 @@ export function OccurrenceCertainty({ value }: { value?: Certainty | null }) {
       {value.date_estimated && " · date estimated"}
     </summary>
     <div className="mt-1 space-y-1 text-muted-foreground">
-      <p>Amount: {value.amount.state} · {value.amount.source} · as of {value.amount.as_of ?? "not recorded"}. {value.amount.note}{value.amount.evidence_value && ` Evidence was recorded against ${fmtAmount(value.amount.evidence_value)}; the current value is estimated.`}</p>
-      <p>Date: {value.date.state} · {value.date.source} · as of {value.date.as_of ?? "not recorded"}. {value.date.note}</p>
+      <p>Amount: {value.amount.state} · {value.amount.source} · as of {value.amount.as_of ? formatDate(value.amount.as_of) : "not recorded"}. {value.amount.note}{value.amount.evidence_value && ` Evidence was recorded against ${formatMoney(value.amount.evidence_value)}; the current value is estimated.`}</p>
+      <p>Date: {value.date.state} · {value.date.source} · as of {value.date.as_of ? formatDate(value.date.as_of) : "not recorded"}. {value.date.note}</p>
       {value.original && <p>
-        {value.original.backfilled ? "First retained snapshot" : "Original estimate"}: {fmtAmount(value.original.amount)} on {value.original.date}
-        {` · ${value.original.amount_basis} · captured ${value.original.as_of}`}
+        {value.original.backfilled ? "First retained snapshot" : "Original estimate"}: {formatMoney(value.original.amount)} on {formatDate(value.original.date)}
+        {` · ${value.original.amount_basis} · captured ${formatDayOrTimestamp(value.original.as_of, timeZone)}`}
       </p>}
-      {value.original?.window && <p>Observation window: {String(value.original.window.from ?? "none")} to {String(value.original.window.to ?? "none")} ({String(value.original.window.count ?? 0)} observations).</p>}
-      {value.actual && <p>Linked {value.actual.status} transaction: {fmtAmount(value.actual.amount)} on {value.actual.date}.
-        {value.actual.variance && ` Difference from original: ${fmtAmount(value.actual.variance.amount)}; ${value.actual.variance.days} days (positive means later).`}
+      {value.original?.window && <p>Observation window: {value.original.window.from ? formatDate(String(value.original.window.from)) : "none"} to {value.original.window.to ? formatDate(String(value.original.window.to)) : "none"} ({String(value.original.window.count ?? 0)} observations).</p>}
+      {value.actual && <p>Linked {value.actual.status} transaction: {formatMoney(value.actual.amount)} on {formatDate(value.actual.date)}.
+        {value.actual.variance && ` Difference from original: ${formatMoney(value.actual.variance.amount, { signDisplay: "always" })}; ${value.actual.variance.days} days (positive means later).`}
       </p>}
       {value.status === "pending_review" && <p>This is a proposed match, not confirmation. Its bank movement already contributes to the forecast where applicable.</p>}
     </div>

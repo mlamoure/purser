@@ -55,7 +55,8 @@ every response says which method produced it via `balance_method` (`method` on
 | Method | Applies to | What it means |
 | --- | --- | --- |
 | `postings` | checking, savings, cash, credit cards | The stored running balance alone. |
-| `valuation` | loan, property | The latest valuation **replaces** the postings sum. A mortgage's feed reports a balance, not a transaction history, so the postings sum is not the debt. |
+| `postings` | property (a hand-valued asset) | Its value is a ledger: a change in value is an entry against `equity.revaluation`, and reconciling sets the value on a date. See [Track a house or other asset](../../how-to/hand-valued-assets/). |
+| `valuation` | loan | The latest valuation **replaces** the postings sum. A mortgage's feed reports a balance, not a transaction history, so the postings sum is not the debt. |
 | `postings+holdings` | brokerage | The latest holdings market value is **added to** the postings sum. Brokerage cash is real money the feed already reported, so it is not discarded. The holdings come from the feed's snapshots or, for an account [tracked by hand](../../how-to/manual-holdings/), from its positions priced at the newest close. |
 
 When an overlay produced the answer, `balance_as_of` names the date of the
@@ -114,14 +115,16 @@ the cash claim unchanged. See
 
 ## Recording a valuation
 
-A loan or property balance is its latest valuation. The feed records one for a
+A loan balance is its latest valuation. The feed records one for a
 synced account; record one yourself with `POST /accounts/{id}/valuations`, or
 from an agent with the MCP tool `record_valuation` (both write scope), giving
 the date and the value on that date.
 
-Only loan and property accounts take a valuation. Any other account is refused
-with a `422` that says where its balance comes from instead: its transactions,
-plus its latest holdings snapshot for a brokerage account. To bring a checking,
+Only loan accounts take a valuation. Any other account is refused with a
+`422` that says where its balance comes from instead: its transactions, plus
+its latest holdings snapshot for a brokerage account. A hand-valued asset
+(type `property`) is a ledger: record a change or set its value on a date
+([Track a house or other asset](../../how-to/hand-valued-assets/)). To bring a checking,
 savings, cash or credit-card balance to a statement, see
 [Reconcile an account](../../how-to/reconcile-an-account/).
 
@@ -132,7 +135,6 @@ negates it exactly as reconciliation does:
 
 | Account | On the date | You send | Purser stores |
 | --- | --- | --- | --- |
-| Property | worth 400000.00 | `"value": "400000.00"` | `400000.0000` |
 | Loan | 250000.00 owed | `"value": "-250000.00"` | `-250000.0000` |
 | Loan | 250000.00 owed | `"value": "250000.00", "convention": "statement"` | `-250000.0000` |
 | Loan | 250000.00 owed | `"value": "250000.00"` | rejected with `422` |

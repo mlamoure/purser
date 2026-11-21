@@ -11,7 +11,7 @@ from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from purser import clock, ledger
 from purser.mcp._registry import _amount, _principal, _run, audited_tool
@@ -87,8 +87,10 @@ async def describe() -> dict[str, Any]:
             "conventions": {
                 "amounts": "decimal strings; negative = money out of the account",
                 "balances": (
-                    "loan/property balances are the latest valuation "
-                    "(marked balance_method='valuation'); brokerage adds its "
+                    "loan balances are the latest valuation "
+                    "(marked balance_method='valuation'); a hand-valued asset "
+                    "(type property) is a ledger changed by record_value_change "
+                    "and set on a date by reconcile_account; brokerage adds its "
                     "latest holdings market value to the postings sum "
                     "(balance_method='postings+holdings'; holdings come from the "
                     "feed or, for holdings_source=manual, from record_position); "
@@ -177,12 +179,16 @@ def _reconciliation_field(check: Any) -> dict[str, Any]:
     }
 
 
+def _iso(day: Any) -> str | None:
+    return day.isoformat() if day is not None else None
+
+
 @audited_tool(
     kind="read", entity="account", scope="read", emits=Emits(external_ids=("[].external_id",))
 )
 async def list_accounts(include_balances: bool = True) -> list[dict[str, Any]]:
-    """Real accounts with current balances (pending+posted). Loan/property
-    accounts report their latest valuation instead of the postings sum
+    """Real accounts with current balances (pending+posted). Loan accounts
+    report their latest valuation instead of the postings sum
     (marked balance_method='valuation'); brokerage accounts add their latest
     holdings market value on top of it (balance_method='postings+holdings').
     Both carry the overlay's balance_as_of date. A reconciled account carries
@@ -190,9 +196,16 @@ async def list_accounts(include_balances: bool = True) -> list[dict[str, Any]]:
     only for brokerage, balance for other accounts), and whether the
     ledger still matches the statement on that date (difference = ledger
     minus statement target, ledger sign; nonzero means a later write moved
-    it)."""
+    it). A hand-valued asset (type property) carries asset_kind (house, car,
+    ...) and, when it secures loans, equity (its value plus those loans,
+    ledger sign) with secured_loans (their paths); a secured loan carries
+    secured_by (the asset's path). An asset whose value is older than its
+    revalue_after_days carries value_stale=true and last_valued. Every asset
+    carries gain (the sum of its changes in value) and money_put_in (its
+    purchase and transfers); together they are its value."""
 
     def op(session: Session) -> list[dict[str, Any]]:
+        from purser import assets as assets_service
         from purser import networth as networth_service
         from purser import reconciliation as reconciliation_service
         from purser.models import Account
@@ -204,6 +217,23 @@ async def list_accounts(include_balances: bool = True) -> list[dict[str, Any]]:
         )
         reported = networth_service.reported_balances(session) if include_balances else {}
         checks = reconciliation_service.latest_checks(session, accounts)
+        paths = {a.id: a.path for a in accounts}
+        asset_ids = [a.id for a in accounts if a.type in assets_service.ASSET_TYPES]
+        asset_rows = assets_service.details_for(session, asset_ids)
+        kinds = {account_id: row.kind for account_id, row in asset_rows.items()}
+        sums = assets_service.gains(session, asset_ids)
+        last = assets_service.last_valued(session, asset_ids)
+        today = clock.ledger_today()
+        stale = {
+            account_id
+            for account_id, row in asset_rows.items()
+            if assets_service.is_stale(last.get(account_id), row.revalue_after_days, today)
+        }
+        equity = (
+            assets_service.equities(session, accounts, {k: v.balance for k, v in reported.items()})
+            if include_balances
+            else {}
+        )
         return [
             {
                 "id": str(a.id),
@@ -219,6 +249,37 @@ async def list_accounts(include_balances: bool = True) -> list[dict[str, Any]]:
                 **(_method_field(reported.get(a.id)) if include_balances else {}),
                 # present only on reconciled accounts (token budget)
                 **_reconciliation_field(checks.get(a.id)),
+                # hand-valued assets and secured loans only (#567)
+                **(
+                    {
+                        "asset_kind": kinds.get(a.id, "other"),
+                        "gain": _amount(sums[a.id][1]),
+                        "money_put_in": _amount(sums[a.id][0]),
+                    }
+                    if a.id in kinds
+                    else {}
+                ),
+                **(
+                    {
+                        "equity": _amount(equity[a.id][0]),
+                        "secured_loans": [paths.get(i, str(i)) for i in equity[a.id][1]],
+                    }
+                    if a.id in equity and equity[a.id][1]
+                    else {}
+                ),
+                **(
+                    {"secured_by": paths.get(a.secured_by_id, str(a.secured_by_id))}
+                    if a.secured_by_id
+                    else {}
+                ),
+                **(
+                    {
+                        "value_stale": True,
+                        "last_valued": _iso(last.get(a.id)),
+                    }
+                    if a.id in stale and a.closed_at is None
+                    else {}
+                ),
             }
             for a in accounts
         ]
@@ -232,7 +293,8 @@ async def feed_status() -> dict[str, Any]:
     needs_login — log in again at the bank through SimpleFIN Bridge — or
     error, with how many accounts it delivers and how many feed a ledger
     account), then only the accounts that need attention: not_connected (a
-    feed account no ledger account takes, e.g. a newly opened one), stale Nd
+    feed account no ledger account takes, e.g. a newly opened one; one the
+    user chose to ignore is not listed), stale Nd
     (the bank balance has not updated for N days), an act.* code (the bank
     failed to deliver it), ambiguous_id. Account numbers are never shown.
     Use it for "did a new account show up?" or "which bank needs me?"."""
@@ -248,7 +310,7 @@ async def feed_status() -> dict[str, Any]:
 @audited_tool(kind="read", entity="account", scope="read", emits=NOTHING)
 async def account_balance(account: str, as_of: str | None = None) -> dict[str, Any]:
     """Point-in-time balance of one real account (UUID or path). Open
-    loan/property accounts answer with their latest valuation at or before
+    loan accounts answer with their latest valuation at or before
     as_of (method 'valuation'); open brokerage accounts add their latest
     holdings market value on top of the postings basis (method
     'postings+holdings'); everything else answers from the STORED running
@@ -490,15 +552,19 @@ async def list_categories(include_descriptions: bool = False) -> list[str] | lis
     kind="read",
     entity="schedule",
     scope="read",
-    emits=Emits(payee=True, narrative=True, description=("[].name",), amount=("[].amount",)),
+    emits=Emits(
+        payee=True, narrative=True, description=("[].name", "[].memo"), amount=("[].amount",)
+    ),
 )
 async def list_schedules(status: str | None = None) -> list[dict[str, Any]]:
-    """Bill/income schedules with next due dates."""
+    """Bill/income schedules with next due dates. name is the label (memo,
+    else payee, else the transfer counterparty); payee and memo are the
+    fields create_schedule and update_schedule take."""
 
     def op(session: Session) -> list[dict[str, Any]]:
         from purser.models import Account, Schedule
 
-        stmt = select(Schedule).order_by(Schedule.next_due)
+        stmt = select(Schedule).options(selectinload(Schedule.payee)).order_by(Schedule.next_due)
         if status is not None:
             stmt = stmt.where(Schedule.status == status)
         schedules = list(session.execute(stmt).scalars())
@@ -519,6 +585,8 @@ async def list_schedules(status: str | None = None) -> list[dict[str, Any]]:
             {
                 "id": str(s.id),
                 "name": s.name,
+                "payee": s.payee.name if s.payee is not None else None,
+                "memo": s.memo,
                 "account": paths.get(s.account_id),
                 "rrule": s.rrule,
                 "dtstart": s.dtstart.isoformat(),

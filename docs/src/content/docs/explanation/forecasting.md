@@ -80,8 +80,8 @@ five-day match window, and the line is exactly what confirming the match would
 give: the bank's amount, never a leftover difference. Reject the proposal and
 the instance is back on the next forecast; confirm it (in the register, or
 with `match` on the same pair) and it is settled for good. An account valued
-by a stated figure rather than its postings (a loan or property with a
-valuation) keeps such instances, because no bank row moves that figure.
+by a stated figure rather than its postings (a loan with a valuation)
+keeps such instances, because no bank row moves that figure.
 
 ## Where each amount comes from
 
@@ -119,7 +119,7 @@ pessimistic pass dips below the floor, the headline says which event would
 cause it: "It could dip to -125.00 on 2026-10-26 if Citi payment comes in
 high." The `forecast.shortfall` event stays on the expected amounts, so a
 wide range never raises an alert on its own. The forecast widget and the
-Schedules page chart shade the band behind the line, and an event's
+Scheduled transactions page chart shade the band behind the line, and an event's
 tooltip names its basis and range.
 
 ## What the event list shows
@@ -169,7 +169,7 @@ section 6 (schedules and forecasting). The tool contract is in the
 
 ## Independent amount and date uncertainty
 
-Forecast events carry the same per-occurrence certainty shown in Schedules,
+Forecast events carry the same per-occurrence certainty shown in Scheduled transactions,
 including rule-only projected events. The Estimate badge explains whether amount,
 date or both remain estimated. Confirmed upcoming events remain scheduled until
 matched; confirmation itself does not post money. A confirmed amount has no

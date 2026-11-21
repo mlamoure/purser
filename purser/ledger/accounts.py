@@ -66,6 +66,15 @@ def check_min_balance(account_type: str, value: Decimal | None) -> None:
 # Only Purser's own securities-trade cash does, through the holdings service.
 SYSTEM_TYPES = core.SYSTEM_ACCOUNT_TYPES
 SECURITIES_PATH = "equity.securities"
+# The other side of a change in a hand-valued asset's value (#566, decision
+# 113): a property account is a ledger, and a rise or fall in its value is an
+# entry between it and this account. Only the asset service books here.
+REVALUATION_PATH = "equity.revaluation"
+# The other side of money put into an asset that no tracked account paid (the
+# purchase before Purser's records, an improvement paid in cash; #567): kept
+# apart from equity.revaluation so it never reads as a gain in value.
+CAPITAL_PATH = "equity.capital"
+ASSET_ENTRY_PATHS = frozenset({REVALUATION_PATH, CAPITAL_PATH})
 # The subtree the system accounts live in. Nothing else may: a category under
 # equity.securities, or an ``equity`` category, would share the subtree that
 # path-based reports and filters read, and mix with trade cash there.
@@ -95,10 +104,27 @@ def is_category(account: Account) -> bool:
 
 
 def has_system_leg(postings: "Iterable[Posting]") -> bool:
-    """A securities trade's cash row: a leg on a system account. Such a row
-    moves only with its trade, so the matcher, the transfer pool, rules and
-    schedule detection all leave it alone (decision 103)."""
+    """A row with a leg on a system account: a securities trade's cash
+    (decision 103) or a change in an asset's value (decision 113). Such a row
+    is Purser's own bookkeeping, so the matcher, the transfer pool, rules and
+    schedule detection all leave it alone."""
     return any(p.account is not None and is_system_account(p.account) for p in postings)
+
+
+def is_value_change(postings: "Iterable[Posting]") -> bool:
+    """An entry in a hand-valued asset's value: a leg on equity.revaluation (a
+    change in value) or equity.capital (money put in)."""
+    return any(p.account is not None and p.account.path in ASSET_ENTRY_PATHS for p in postings)
+
+
+def is_capital(postings: "Iterable[Posting]") -> bool:
+    """Money put into a hand-valued asset: a leg on equity.capital."""
+    return any(p.account is not None and p.account.path == CAPITAL_PATH for p in postings)
+
+
+def is_securities_trade(postings: "Iterable[Posting]") -> bool:
+    """A securities trade's cash: a leg on equity.securities."""
+    return any(p.account is not None and p.account.path == SECURITIES_PATH for p in postings)
 
 
 def _system_leg_rows() -> Any:
@@ -215,6 +241,12 @@ def refuse_trade_cash_lineage(
     for the whole pass: membership replaces the chain walk. Explicit paths
     (match, confirm, convert) pass nothing and walk."""
     found = tx.id in claimed if claimed is not None else is_trade_cash_lineage(session, tx)
+    if found and is_value_change(tx.postings):
+        raise LedgerError(
+            f"transaction {tx.id} is a change in an asset's value: it is Purser's own "
+            f"entry against {REVALUATION_PATH}, so it cannot {what}. Reverse it "
+            "(reverse_value_change) and record the right figure if it is wrong"
+        )
     if found:
         raise LedgerError(
             f"transaction {tx.id} is the cash of a securities trade (or the row a trade "
@@ -225,48 +257,88 @@ def refuse_trade_cash_lineage(
 
 def refuse_system_account(account: Account) -> None:
     """A user-supplied category must be a category: a system account (the
-    other side of a securities trade's cash) is refused, naming why."""
+    other side of a securities trade's cash, or of a change in an asset's
+    value) is refused, naming why."""
     if is_system_account(account):
+        what = (
+            "an asset's value entries book to it (record_value_change)"
+            if account.path in ASSET_ENTRY_PATHS
+            else "securities trades book their cash to it"
+        )
         raise LedgerError(
-            f"{account.path} is a system account: securities trades book their cash to it, "
-            "never a category you choose"
+            f"{account.path} is a system account: {what}, never a category you choose"
         )
 
 
 def securities_account(session: Session) -> Account:
     """``equity.securities``, the account trade cash balances against.
     Migration 0043 seeds it; if it is ever missing (a wiped test database, a
-    hand-deleted row) it is created again here, audited. The insert is
+    hand-deleted row) it is created again here, audited."""
+    return _system_account(
+        session,
+        path=SECURITIES_PATH,
+        name="Securities",
+        description="System account: the other side of a securities trade's cash. Not a category.",
+        needed_for="trade cash needs that path for the system securities account",
+    )
+
+
+def revaluation_account(session: Session) -> Account:
+    """``equity.revaluation``, the account a change in an asset's value
+    balances against (decision 113). Migration 0054 seeds it; recreated here,
+    audited, if it is ever missing."""
+    return _system_account(
+        session,
+        path=REVALUATION_PATH,
+        name="Revaluation",
+        description=(
+            "System account: the other side of a change in a hand-valued asset's value. "
+            "Not a category."
+        ),
+        needed_for="asset value changes need that path for the system revaluation account",
+    )
+
+
+def capital_account(session: Session) -> Account:
+    """``equity.capital``, the other side of money put into an asset (#567).
+    Migration 0055 seeds it; recreated here, audited, if it is ever missing."""
+    return _system_account(
+        session,
+        path=CAPITAL_PATH,
+        name="Capital",
+        description=(
+            "System account: the other side of money put into a hand-valued asset that no "
+            "tracked account paid. Not a category."
+        ),
+        needed_for="money put into an asset needs that path for the system capital account",
+    )
+
+
+def _system_account(
+    session: Session, *, path: str, name: str, description: str, needed_for: str
+) -> Account:
+    """A system account by path, created if missing. The insert is
     ``ON CONFLICT (path) DO NOTHING``: when two writers recreate it at once,
     the one that loses reads the winner's row instead of failing on the
     unique path."""
-    account = session.execute(
-        select(Account).where(Account.path == SECURITIES_PATH)
-    ).scalar_one_or_none()
+    account = session.execute(select(Account).where(Account.path == path)).scalar_one_or_none()
     created: uuid.UUID | None = None
     if account is None:
         created = session.execute(
             pg_insert(Account)
             .values(
-                name="Securities",
+                name=name,
                 type="equity",
                 is_virtual=True,
-                path=SECURITIES_PATH,
-                description=(
-                    "System account: the other side of a securities trade's cash. Not a category."
-                ),
+                path=path,
+                description=description,
             )
             .on_conflict_do_nothing(index_elements=[Account.path])
             .returning(Account.id)
         ).scalar_one_or_none()
-        account = session.execute(
-            select(Account).where(Account.path == SECURITIES_PATH)
-        ).scalar_one()
+        account = session.execute(select(Account).where(Account.path == path)).scalar_one()
     if not is_system_account(account):
-        raise LedgerError(
-            f"{SECURITIES_PATH} is taken by a {account.type} account; trade cash needs "
-            "that path for the system securities account"
-        )
+        raise LedgerError(f"{path} is taken by a {account.type} account; {needed_for}")
     if created is not None:
         audit.record(
             session,
@@ -361,6 +433,13 @@ def create_account(
     )
     session.add(account)
     session.flush()
+    if type_ == "property":
+        # Every hand-valued asset has its details row (#567); the asset
+        # service fills it in.
+        from purser.models import AssetDetails
+
+        session.add(AssetDetails(account_id=account.id))
+        session.flush()
     audit.record(
         session,
         actor_token_id=actor_token_id,
@@ -457,10 +536,7 @@ def update_account(
     ``check_min_balance``."""
     account = get_account(session, account_id)
     if is_system_account(account):
-        raise LedgerError(
-            f"{account.path} is a system account, the other side of securities trades' cash; "
-            "Purser keeps it as it is"
-        )
+        raise LedgerError(f"{account.path} is a system account; Purser keeps it as it is")
     if account.is_virtual:
         raise LedgerError(f"{account.path} is a category; use PATCH /categories")
     if min_balance_set:

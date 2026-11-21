@@ -1,4 +1,5 @@
 import { Badge, Button, Input, Label, Td } from "../../components/ui";
+import { accountTypeLabel } from "../../lib/labels";
 import {
   ALL_TYPES,
   CREATE,
@@ -74,7 +75,7 @@ export function AccountRow({
             {account.name === "__default__" ? "(single account)" : account.name}
           </div>
           <div className="mt-1 space-x-1">
-            <Badge>{account.type}</Badge>
+            <Badge>{accountTypeLabel(account.type)}</Badge>
             <span className="text-xs text-muted-foreground">{account.transactions} rows</span>
           </div>
         </Td>
@@ -90,7 +91,7 @@ export function AccountRow({
                 <optgroup label="Accounts">
                   {manual.map((a) => (
                     <option key={a.id} value={a.id}>
-                      {a.path}
+                      {a.name}
                     </option>
                   ))}
                 </optgroup>
@@ -99,7 +100,7 @@ export function AccountRow({
                 <optgroup label="SimpleFIN accounts">
                   {simplefin.map((a) => (
                     <option key={a.id} value={a.id}>
-                      {a.path} (SimpleFIN)
+                      {`${a.name} (SimpleFIN)`}
                     </option>
                   ))}
                 </optgroup>
@@ -133,7 +134,7 @@ export function AccountRow({
                   >
                     {ALL_TYPES.map((t) => (
                       <option key={t} value={t}>
-                        {t}
+                        {accountTypeLabel(t)}
                       </option>
                     ))}
                   </select>
@@ -174,8 +175,8 @@ export function AccountRow({
             flip signs
           </label>
           {account.sign.suspect && !skipped && (
-            <div className="mt-1 text-xs text-amber-600 dark:text-amber-500">
-              Looks income-positive for a {selected?.type ?? account.type} — invert suggested.
+            <div className="mt-1 text-xs text-warning">
+              Looks income-positive for a {accountTypeLabel(selected?.type ?? account.type).toLowerCase()} — invert suggested.
             </div>
           )}
         </Td>

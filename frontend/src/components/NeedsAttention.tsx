@@ -2,7 +2,8 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api, errorDetail } from "../lib/api";
-import { fmtAmount } from "../lib/utils";
+import { formatMoney } from "../lib/money";
+import { formatDate } from "../lib/dates";
 import { SuggestionCard } from "./SuggestionCard";
 import { Badge, Button, Card, CardTitle, ErrorText } from "./ui";
 
@@ -20,7 +21,7 @@ const groups: { kind: Kind; title: string; help: string }[] = [
   },
   {
     kind: "schedule",
-    title: "Recurring schedules",
+    title: "Scheduled transactions",
     help: "Review a pattern before adding it to your forecast.",
   },
   {
@@ -164,7 +165,7 @@ export default function NeedsAttention() {
           </p>
         </div>
         <Link to="/schedules" className="text-sm text-primary underline">
-          Manage schedules
+          Manage scheduled transactions
         </Link>
       </div>
       <div className="my-4 flex flex-wrap gap-3">
@@ -223,7 +224,7 @@ export default function NeedsAttention() {
         </p>
       )}
       {bills.length > 0 && (
-        <section className="mb-4 rounded-lg border border-amber-300 p-3">
+        <section className="mb-4 rounded-lg border border-warning/40 p-3">
           <h3 className="font-medium">
             Expected payments not seen <Badge variant="amber">{bills.length}</Badge>
           </h3>
@@ -240,13 +241,13 @@ export default function NeedsAttention() {
                 <div className="min-w-0 break-words">
                   <p className="font-medium">{b.description || b.payee || "Expected payment"}</p>
                   <p className="text-xs text-muted-foreground">
-                    {b.account_name} · {fmtAmount(b.amount)} · expected {b.date} · {b.aging_days}{" "}
+                    {b.account_name} · {formatMoney(b.amount)} · expected {formatDate(b.date)} · {b.aging_days}{" "}
                     days ago
                   </p>
                   {(b.amount_estimated || b.date_estimated) && (
                     <Badge variant="amber">Estimate — verify details</Badge>
                   )}
-                  {b.schedule_status === "paused" && <Badge>Schedule paused</Badge>}
+                  {b.schedule_status === "paused" && <Badge>Scheduled transaction paused</Badge>}
                 </div>
                 <Link
                   className="text-primary underline"

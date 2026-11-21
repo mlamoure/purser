@@ -266,7 +266,9 @@ def update_config(body: ConfigUpdate, admin: AdminToken, session: DbSession) -> 
         appsettings.set_values(session, changes, actor_token_id=admin.id)
         session.commit()
         appsettings.invalidate()
-        if appsettings.SYNC_SCHEDULE_KEY in changes:
+        # The daily sync time reads in the household zone (decision 111), so a
+        # time zone change moves its trigger too.
+        if appsettings.SYNC_SCHEDULE_KEY in changes or "timezone" in changes:
             scheduler.reschedule_sync()
     return _config_out(session)
 
@@ -278,7 +280,7 @@ def reset_config(key: str, admin: AdminToken, session: DbSession) -> ConfigOut:
     appsettings.reset_value(session, key, actor_token_id=admin.id)
     session.commit()
     appsettings.invalidate()
-    if key == appsettings.SYNC_SCHEDULE_KEY:
+    if key in (appsettings.SYNC_SCHEDULE_KEY, "timezone"):
         scheduler.reschedule_sync()
     return _config_out(session)
 

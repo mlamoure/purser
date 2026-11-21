@@ -98,13 +98,14 @@ async def update_transaction(
 
 @audited_tool(kind="write", entity="schedule", scope="write", emits=NOTHING)
 async def create_schedule(
-    name: str,
     account: str,
     rrule: str,
+    payee: str | None = None,
+    memo: str | None = None,
     amount: str | None = None,
     amount_type: str = "fixed",
     date_mode: str = "fixed",
-    payee: str | None = None,
+    name: str | None = None,
     category: str | None = None,
     dtstart: str | None = None,
     estimate_basis: str | None = None,
@@ -121,6 +122,13 @@ async def create_schedule(
     names it). note (200 characters or fewer) is a proposal's evidence for
     the person deciding it, such as the statement line you read; it shows on
     the suggestion's card. A direct create keeps no note.
+
+    payee is who is paid or pays (required for a flat schedule unless memo is
+    sent); memo is an optional free-text note. The schedule's label (its
+    instances' description) is the memo, else the payee, else a transfer's
+    counterparty account. name is the older single field: sent without memo
+    it becomes a transfer's memo, a flat schedule's payee when payee is
+    omitted, or otherwise its memo — prefer payee and memo.
 
     rrule is RFC 5545 (FREQ=MONTHLY;BYMONTHDAY=6,20 is semi-monthly); dtstart
     (YYYY-MM-DD) anchors it — pass the last real occurrence so anchor-sensitive
@@ -151,6 +159,7 @@ async def create_schedule(
             amount_type=amount_type,
             amount=Decimal(amount) if amount is not None else None,
             payee_name=payee,
+            memo=memo,
             category_path=category,
             estimate_basis=estimate_basis,
             autopost_policy=autopost_policy,
@@ -189,15 +198,17 @@ async def update_schedule(
     date_mode: str | None = None,
     estimate_basis: str | None = None,
     payee: str | None = None,
+    memo: str | None = None,
     category: str | None = None,
     autopost_policy: str | None = None,
     counterparty_account: str | None = None,
 ) -> dict[str, Any]:
-    """Edit a schedule's rule (write scope); only the fields sent change.
+    """Edit a schedule's rule (write scope); only the fields sent change
+    ("" clears payee or memo; a flat schedule keeps at least one).
     Live instances the user has not overridden follow the new rule (slots the
     rule no longer produces are dropped, amounts re-estimated, missing slots
     added); overridden ("pinned") instances keep their amounts and dates.
-    A new name or payee relabels every live instance, pinned ones too, whose
+    A new payee or memo relabels every live instance, pinned ones too, whose
     description or payee still equals the old one (`relabeled` counts them);
     labels set by hand stay. category and counterparty_account are mutually
     exclusive: sending one switches the schedule's shape between flat and
@@ -220,6 +231,7 @@ async def update_schedule(
             estimate_basis=estimate_basis,
             category_path=category,
             payee_name=payee,
+            memo=memo,
             autopost_policy=autopost_policy,
             counterparty_account_ref=counterparty_account,
         )
@@ -517,11 +529,21 @@ async def update_account(
     description: str | None = None,
     hidden: bool | None = None,
     min_balance: str | None = None,
+    asset_kind: str | None = None,
+    secured_by: str | None = None,
+    revalue_after_days: int | None = None,
 ) -> dict[str, Any]:
     """Rename, re-describe or hide a real account, or set its floor (write
-    scope); only the fields sent change. name is the display name only: the
-    account's path, which tools, rules and outside integrations use to find
-    it, never changes, so a rename breaks nothing that refers to the account. The name is also
+    scope); only the fields sent change. asset_kind sets what a hand-valued
+    asset (type property) is: house, land, car, boat, rv, jewelry, art,
+    equipment or other (a label and an icon only). secured_by, on a loan,
+    names the hand-valued asset that secures it (its path or id; "" clears
+    it), so the asset reports its equity. revalue_after_days, on an asset,
+    is how many days its value may go without an update before Purser calls
+    it stale (asset.stale, whats_new.stale_assets); 0 turns that off.
+    name is the display name only: the account's path, which tools, rules
+    and outside integrations use to find it, never changes, so a rename breaks
+    nothing that refers to the account. The name is also
     what transfer auto-link looks for in bank text (a row that mentions the
     counterparty account's name is a transfer signal), so a rename changes
     which bank descriptions link to the account. description="" clears it.
@@ -542,8 +564,12 @@ async def update_account(
         from purser import ledger as ledger_service
 
         principal = _principal()
-        if name is None and description is None and hidden is None and min_balance is None:
-            raise ValueError("nothing to change: pass name, description, hidden or min_balance")
+        sent = (name, description, hidden, min_balance, asset_kind, secured_by, revalue_after_days)
+        if all(v is None for v in sent):
+            raise ValueError(
+                "nothing to change: pass name, description, hidden, min_balance, asset_kind, "
+                "secured_by or revalue_after_days"
+            )
         if name is not None and not name.strip():
             raise ValueError("name must not be empty")
         floor: Decimal | None = None
@@ -569,13 +595,40 @@ async def update_account(
             min_balance_set=min_balance is not None,
             actor_token_id=principal.token_id,
         )
-        return {
+        from purser import assets as assets_service
+
+        out: dict[str, Any] = {
             "id": str(updated.id),
             "path": updated.path,
             "name": updated.name,
             "hidden": updated.hidden_at is not None,
             "min_balance": _amount(updated.min_balance),
         }
+        if asset_kind is not None or revalue_after_days is not None:
+            row = assets_service.update_details(
+                session,
+                account=updated,
+                kind=asset_kind.strip().lower() if asset_kind is not None else None,
+                revalue_after_days=revalue_after_days or None,
+                revalue_after_days_set=revalue_after_days is not None,
+                actor_token_id=principal.token_id,
+            )
+            out["asset_kind"] = row.kind
+            out["revalue_after_days"] = row.revalue_after_days
+        if secured_by is not None:
+            asset = (
+                ledger_service.resolve_account(session, secured_by.strip())
+                if secured_by.strip()
+                else None
+            )
+            assets_service.secure_loan(
+                session,
+                loan=updated,
+                asset_id=asset.id if asset else None,
+                actor_token_id=principal.token_id,
+            )
+            out["secured_by"] = asset.path if asset else None
+        return out
 
     return await _run(op)
 
@@ -588,11 +641,13 @@ async def reconcile_account(
     basis: str = "posted",
     dry_run: bool = False,
     component: Literal["balance", "cash"] = "balance",
+    note: str | None = None,
 ) -> dict[str, Any]:
     """Reconcile a checking, savings, cash or credit-card account to a
-    statement (write scope). statement_balance is the figure AS THE STATEMENT
-    SHOWS IT: positive = money in the account, or for a credit card the amount
-    owed. Purser converts it to ledger sign (cards are negative when owed), and
+    statement, or set a hand-valued asset's value on a date (write scope).
+    statement_balance is the figure AS THE STATEMENT SHOWS IT: positive =
+    money in the account, or for a credit card the amount owed. Purser
+    converts it to ledger sign (cards are negative when owed), and
     every other amount in the answer is ledger sign. basis is posted (default)
     or pending_inclusive (posted plus pending); as_of is YYYY-MM-DD, today or
     earlier. Purser posts ONE adjustment for the difference to a system
@@ -605,7 +660,14 @@ async def reconcile_account(
     statement_balance must be cash only, excluding securities and unvested
     awards. Holdings and prices never change. Other accounts use the default
     component="balance". Results and list_accounts identify which component
-    was reconciled; list_accounts checks whether it still holds."""
+    was reconciled; list_accounts checks whether it still holds.
+    A hand-valued asset (type property: a house, a car) reconciles to its
+    value: statement_balance is what it is worth on as_of, and the difference
+    posts against the system account equity.revaluation as a change in value
+    (category in the answer), so net worth moves and spending does not. One
+    value per date; a date before the latest one is refused (record a
+    backdated change with record_value_change instead). note says where the
+    figure came from (an appraisal, an estimate) and is kept on the entry."""
 
     def op(session: Session) -> dict[str, Any]:
         from purser import ledger as ledger_service
@@ -625,6 +687,7 @@ async def reconcile_account(
             basis=basis,
             dry_run=dry_run,
             token=_token_row(session, principal),
+            note=note,
         )
         return {
             "reconciliation_id": (
@@ -659,13 +722,15 @@ async def record_valuation(
     value: str,
     convention: str = "ledger",
 ) -> dict[str, Any]:
-    """Record a loan or property account's value on a date (write scope).
-    Such an account's balance IS its latest valuation, in net worth and on
-    every account surface, so this is how it is kept current: it cannot be
-    reconciled (reconcile_account is for checking, savings, cash and credit
-    cards). as_of is YYYY-MM-DD. value is a decimal string in ledger sign by
-    default (convention='ledger'): a property positive, a loan NEGATIVE while
-    money is owed. To enter the figure as the statement prints it, a loan's
+    """Record a loan account's value on a date (write scope). A loan's
+    balance IS its latest valuation, in net worth and on every account
+    surface, so this is how it is kept current: it cannot be reconciled
+    (reconcile_account is for checking, savings, cash, credit cards and
+    hand-valued assets). A hand-valued asset (type property) is refused here:
+    its value is a ledger, changed with record_value_change or set on a date
+    with reconcile_account. as_of is YYYY-MM-DD. value is a decimal string in
+    ledger sign by default (convention='ledger'): a loan NEGATIVE while money
+    is owed. To enter the figure as the statement prints it, a loan's
     amount owed positive, pass convention='statement' and Purser negates it,
     exactly as reconcile_account converts a statement balance. Never flip the
     sign yourself: a positive loan value in ledger convention is refused,

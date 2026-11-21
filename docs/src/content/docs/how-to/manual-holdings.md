@@ -271,7 +271,7 @@ sweep's cash, not the account's value. For such an account, an admin can turn
 on **Feed balance is cash** (admin only; `PATCH /accounts/<id>` with
 `{"feed_balance_is_cash": true}`). Each sync then compares the feed's balance
 with the account's transactions, exactly as it does for a checking account,
-and reports drift in **Config -> SimpleFIN**, as `balance.drift` events and in
+and reports drift in **Settings -> Connections**, as `balance.drift` events and in
 `whats_new`.
 
 That is how a missing sale shows up: while the proceeds that funded the
@@ -311,7 +311,7 @@ and recording a close does not change it; correct the count instead.
 
 ### Configure a provider
 
-**Config -> Prices** sets the provider, its API key and the staleness
+**Settings -> Prices** sets the provider, its API key and the staleness
 threshold:
 
 - **Provider**: `none` (the default: record closes by hand) or `tiingo`
@@ -374,9 +374,9 @@ curl -X POST https://purser.example.com/prices \
 - Recording a price for an earlier date re-values the account's history
   from that date; net worth heals by itself.
 - Weekly is enough: the newest price carries forward, and once it is older
-  than the staleness threshold (Config, Prices) the fund is reported stale
+  than the staleness threshold (Settings, Prices) the fund is reported stale
   like a hand-tracked one: `stale` in `list_holdings`, a `price.stale`
-  event, Config -> Prices and `whats_new`'s `stale_prices`.
+  event, Settings -> Prices and `whats_new`'s `stale_prices`.
 - Until a price exists, the position shows **no price** (`no_price` in
   `list_holdings`, `market_value` null), never a silent 0, and `whats_new`
   reports it once (`unpriced_holdings`).

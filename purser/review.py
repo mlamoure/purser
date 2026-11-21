@@ -452,7 +452,9 @@ LOCKED_GUIDANCE = (
     "bank row a trade linked as its cash: it moves only with the trade. mark_reviewed it if "
     "the trade is right; if not, reverse_position_event(locked.event_id) — reopen_position"
     "(locked.position_id) first when the position is closed — and record the trade again. "
-    "Never update_transaction or confirm_transfer it."
+    "Never update_transaction or confirm_transfer it. A row flagged value_change is a change "
+    "in a hand-valued asset's value: mark_reviewed it if the figure is right; if not, "
+    "reverse_value_change it and record the right figure."
 )
 
 
@@ -522,7 +524,13 @@ def _row_payload(
         if claimed is not None
         else ledger_service.is_trade_cash_lineage(session, tx)
     )
-    if locked:
+    # A change in an asset's value (decision 113) is Purser's own entry too:
+    # it is mark_reviewed when right, reversed (reverse_value_change) when not.
+    value_change = locked and ledger_service.is_value_change(tx.postings)
+    if value_change:
+        flags.append("value_change")
+        locked = False
+    elif locked:
         flags.append("securities_trade")
 
     automation: list[dict[str, Any]] = []

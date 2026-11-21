@@ -63,6 +63,12 @@ Every transaction moves through `expected -> pending -> posted -> void`:
 Corrections to posted transactions are recorded as ledger events with an
 audit trail.
 
+In the admin app's register, changing a posted row's category is just that:
+there is no confirmation step. The corrected row shows **Corrected · Undo**,
+and Undo puts the previous category back the only way a posted row allows, as
+one more reversal + replacement. Both corrections stay in the ledger and the
+audit log.
+
 ## The raw feed underneath
 
 Every payload a bank connection returns is archived verbatim, append-only,

@@ -592,14 +592,14 @@ class TestFeedStart:
 
 
 class TestNetWorthCutoff:
-    def test_closed_property_drops_out_after_close_date(self, db_session: Session) -> None:
+    def test_closed_valuation_account_drops_out_after_close_date(self, db_session: Session) -> None:
         suffix = uuid.uuid4().hex[:10]
         token = _commit_token(db_session, suffix)
         account = ledger.create_account(
             db_session,
-            name="House",
-            type_="property",
-            path=f"assets.house_{suffix}",
+            name="Mortgage",
+            type_="loan",
+            path=f"liabilities.mortgage_{suffix}",
             actor_token_id=token.id,
         )
         # The cutoff compares `as_of` against `closed_at.date()`, and
@@ -612,7 +612,7 @@ class TestNetWorthCutoff:
         as_of_val = today - timedelta(days=30)
         db_session.add(
             Valuation(
-                account_id=account.id, as_of=as_of_val, value=Decimal("500000"), source="manual"
+                account_id=account.id, as_of=as_of_val, value=Decimal("-500000"), source="manual"
             )
         )
         db_session.flush()

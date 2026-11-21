@@ -20,17 +20,37 @@ in the ledger.
 ## Connect
 
 Get a **setup token** from your SimpleFIN Bridge account page and paste it into
-the first-run wizard, or later into **Config -> SimpleFIN**. Setup tokens are
+the first-run wizard, or later into **Settings -> Connections**. Setup tokens are
 one-time secrets — paste them only into Purser, never into a chat. Purser
 exchanges the token once for an encrypted access URL (stored encrypted at rest;
 it never appears in logs) and discovers the accounts the connection exposes.
 
 ## Map feed accounts to ledger accounts
 
-Discovered feed accounts are not ledger accounts until you map them. In
-**Config -> SimpleFIN**, map each one to a Purser account (or create the account
-inline). Only mapped accounts sync. Closing a ledger account unmaps it, and the
-feed account reappears as unmapped — reopen and remap to resume.
+Discovered feed accounts are not ledger accounts until you map them. The setup
+wizard's map step covers the accounts found at setup; an account your bank adds
+later shows as **not in Purser yet**, first under its bank, in **Settings -> Connections**.
+Select **Map** beside it (admins only) and either create a new Purser account
+(name, type and ledger path; cards and loans default under `liabilities.`) or
+pick an existing open account in the same currency. Picking an account that
+another feed account already feeds moves the feed onto the new one. The
+already-fetched transactions import as soon as you map. Only mapped accounts
+sync. Closing a ledger account unmaps it, and the feed account reappears as
+unmapped — reopen and remap to resume.
+
+Until you decide, the Dashboard lists each such account under **bank accounts
+not in Purser yet**, with a link that opens its row.
+
+### Ignore an account you do not want
+
+Select **Ignore** instead of **Map** when the account should stay out of the
+ledger. The usual case is a joint account that two bank logins can both see:
+SimpleFIN delivers it once per login, and only one copy should be mapped. The
+page says so when an unmapped account has the name of a mapped one. An ignored
+account is listed last with **Track again**, is no longer reported as waiting
+(in the app, or to agents as `not_connected`), and nothing about it is
+imported or deleted. Mapping it later imports its fetched transactions as
+usual.
 
 For checking, savings, cash and card accounts, discovery also shows the
 bank's `available_balance` when it differs from the balance: the cash you can
@@ -159,9 +179,11 @@ nothing.
 
 ## Bank health in the app
 
-**Config -> SimpleFIN** shows the same picture for people: a **Bank health**
-table lists every bank login with its status (ok, needs login, error) and each
-account it delivers with the ledger account it feeds (or "not connected"), its
+**Settings -> Connections** shows the same picture for people. Each connection
+opens with a summary in words (how many banks need a new login, how many
+accounts are not in Purser yet or have stopped updating), then one list of
+every bank login with its status (ok, needs login, error) and each
+account it delivers with the Purser account it feeds (or "not in Purser yet"), its
 bank balance date and age (stale ones flagged), and what the latest sync
 carried. **Re-fetch a date range** runs the refetch described above for a range
 and the accounts you pick. **Stale after (days)** next to the sync schedule sets
@@ -179,18 +201,36 @@ answers "did my new account show up?" without admin rights. API tokens without
 admin scope never see SimpleFIN ids, and the masked account numbers banks put
 in names (`(1234)`, `*1234`) are removed. Agents use the MCP tool
 `feed_status`: one line per bank login plus only the accounts that need
-attention (`not_connected`, `stale Nd`, an error code).
+attention (`not_connected`, `stale Nd`, an error code). An ignored account is
+not reported as `not_connected`.
 
 ## Sync schedule and the fetch budget
 
-The schedule is a runtime setting in **Config -> SimpleFIN** (not an environment
-variable): **daily** at 06:30 UTC (default), **every 12h**, **every 6h**, or
-**hourly**. Every preset lands a run just before the matching job. SimpleFIN
+The schedule is a runtime setting in **Settings -> Connections** (not an environment
+variable): **daily** at a time you choose (06:30 by default), **every 12h**,
+**every 6h**, or **hourly**. The interval presets land a run just before the
+matching job. SimpleFIN
 Bridge allows **24 fetches per day**; the hourly preset sits exactly at that
 budget, and the per-connection guard fails soft beyond it. Each run starts
 at a random point in the 10 minutes after its slot, as SimpleFIN asks apps to
 spread their fetches. Agents should call
 `trigger_sync` when the user wants fresh data, not on every question.
+
+The daily time is a clock time in the household time zone (`PURSER_TIMEZONE`,
+**Settings -> General**), stored as the hour and minute of `sync_schedule` in
+`PUT /config`, and the scheduler reads it in that zone. It stays at the same
+time on the clock when daylight saving starts or ends: 06:30 in New York is
+06:30 in winter and in summer. On the night the clocks change, a time the
+clocks skip runs an hour later and a time in the repeated hour runs twice.
+Changing the household time zone keeps the clock time and moves the sync to
+the new zone. The interval presets run on fixed UTC times.
+
+Members (read + write) see each connection's summary, its banks and accounts,
+**Sync now** and, under **Maintenance and schedule**, **Fetch older history**
+and **Re-fetch a date range**. Bank balances, the comparison with Purser,
+**Map** and **Ignore**, adding a connection and the schedule are admin-only.
+The schedule, older history, re-fetching, the comparison basis and adding a
+connection all sit under **Maintenance and schedule** at the foot of the page.
 
 Every request asks for at most 45 days, the span SimpleFIN recommends: a first
 sync (88 days) takes two requests, and a long backfill, an outage repair or a
@@ -202,9 +242,10 @@ Banks report a charge as **pending** before it posts, and Purser imports it as a
 `pending` row. Every sync re-checks each open pending on a checking, savings,
 cash or credit card account against the bank, not only the last week's: the
 fetch reaches back to the oldest such pending (and a week before it), up to
-44 days (one request within the Bridge's recommended 45 days). Pendings on brokerage, loan and property accounts
+44 days (one request within the Bridge's recommended 45 days). Pendings on brokerage, loan and property (asset) accounts
 never stretch the fetch: some investment feeds list every purchase as pending
-indefinitely, and those accounts are valued by holdings or valuations anyway.
+indefinitely, and those accounts are valued by holdings, valuations or the
+reported balance anyway.
 They are still settled whenever the fetch covers their dates.
 
 - When the bank posts it, the posted row replaces the pending, whether it
@@ -234,7 +275,7 @@ row a disappearing pending may have posted as.
 ## Backfill older history
 
 The first sync reaches 88 days back. To page **older** history,
-use **Fetch older history** in Config (or `POST /connections/{id}/backfill`,
+use **Fetch older history** under **Maintenance and schedule** in **Settings -> Connections** (or `POST /connections/{id}/backfill`,
 write scope). Backfill walks backward in windows of at most 45 days (the
 Bridge's recommended span), archiving each verbatim, and latches complete after
 four consecutive empty windows (180 days with nothing). It never
@@ -270,10 +311,10 @@ re-imports history, and rows already in the ledger are never rewritten —
 repairing existing wrong-signed rows is a separate, deliberate admin
 operation.
 
-## Loan and property balances come from valuations
+## Loan balances come from valuations
 
 A loan or mortgage feed often reports a balance but few or no transactions.
-Purser records each reported balance for a `loan` or `property` account as a
+Purser records each reported balance for a `loan` account as a
 row in that account's **valuations** series, and every balance surface — the
 accounts list, the account page headline, `GET /accounts/{id}/balance`, and
 the agent tools — reports the latest valuation as the account's balance
@@ -283,6 +324,11 @@ register as ordinary postings history, and the postings sum rides along as
 `postings_balance`. An account with no valuation yet falls back to the
 postings sum. Net worth uses the same rule, so the account page and
 `net_worth` always agree.
+
+An account mapped as `property` is a ledger instead: when its reported
+balance differs from its balance on the sync's day, Purser posts a value
+change for the difference (see
+[Track a house or other asset](../hand-valued-assets/#an-asset-with-a-bank-feed)).
 
 ## Brokerage balances add holdings to cash
 
@@ -316,10 +362,11 @@ See [Track holdings by hand](../../how-to/manual-holdings/).
 
 ## Watch accounts converge
 
-**Config -> SimpleFIN** shows a **Feed accounts** table fed by
-`GET /connections/{id}/discovered`: per account, the feed-reported
-`balance_date`, the ledger balance, and any `drift` between them, recomputed
-live from the latest archived payload. It is the convergence meter while you
+**Settings -> Connections** shows an admin, per account, the bank's balance and
+its date and a **Compared with Purser** column (matches, or how far off), from
+`GET /connections/{id}/discovered`, recomputed live from the latest archived
+payload. **How balances are compared**, under **Maintenance and schedule**,
+lists both balances and the `drift` side by side. It is the convergence meter while you
 onboard or backfill — expect drift to shrink toward zero as history fills in.
 After every successful sync, Purser also runs a balance-drift check that emits a
 `balance.drift` event when a mapped cash or card account's reported balance
@@ -353,7 +400,7 @@ checking account. See
 ## Pin an account's drift basis
 
 When an account's history is short or misleading, pin its basis by hand: the
-**Basis** select in the Feed accounts table offers **Auto** (showing the basis
+**Basis** select under **Maintenance and schedule -> How balances are compared** offers **Auto** (showing the basis
 Purser learned) and the two pins. Over the API, an admin sends
 `PATCH /accounts/{id}` with `{"drift_basis_override": "posted_only"}` or
 `"pending_inclusive"`; `null` clears the pin and absent leaves it alone. Only

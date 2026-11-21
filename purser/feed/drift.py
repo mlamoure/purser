@@ -28,8 +28,9 @@ from purser.models import Account, AuditLog, Connection, Posting, RawFetch, Tran
 
 log = get_logger(__name__)
 
-# loan/property consume the reported balance as valuations (importer.
-# _record_balance_valuation, DESIGN §8); brokerage balances are market value
+# loans consume the reported balance as valuations, and a feed-mapped asset
+# (property) is moved to it by a value change (importer.
+# _record_balance_valuation, DESIGN §8, decision 113); brokerage balances are market value
 # (holdings-driven, §8). Drift compares postings sums, so cash/card only —
 # plus a brokerage account tracked by hand whose admin said its feed balance
 # is its cash (``accounts.feed_balance_is_cash``, decision 103): a cash sweep

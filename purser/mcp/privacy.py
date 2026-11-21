@@ -198,7 +198,7 @@ _SUGGESTION_AMOUNT_KEYS = (
     "variance",
     "amount_exact",
 )
-_SUGGESTION_NAME_KEYS = ("name", "label")
+_SUGGESTION_NAME_KEYS = ("name", "label", "memo")
 
 _cache_lock = threading.Lock()
 _cache: tuple[tuple[Any, ...], Dictionary] | None = None
@@ -258,9 +258,13 @@ def _build_dictionary(session: Any) -> Dictionary:
         out.refs[ref] = name
         if name:
             out.payees[name] = ref
-    for name, amount in session.execute(select(Schedule.name, Schedule.amount)):
+    for name, memo, amount in session.execute(
+        select(Schedule.name, Schedule.memo, Schedule.amount)
+    ):
         if name:
             out.narratives.add(name)
+        if memo:
+            out.narratives.add(memo)
         if amount is not None:
             out.item_amounts.add(str(amount))
     for (draft,) in session.execute(select(Suggestion.draft).where(Suggestion.status == "open")):

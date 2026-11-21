@@ -5,8 +5,9 @@ description: Every PURSER_* environment variable, and which settings are runtime
 
 Purser is configured through `PURSER_*` environment variables (a `.env` file
 next to the process also works). A subset can be **overridden at runtime** in
-the admin UI (**Config -> Settings**) or via the admin-scoped `/config` REST
-API; overrides persist in the database and win over the environment.
+the admin UI (under **Settings**: **General**, **Security**, **Connections**,
+**Prices**, **Categories** and **Agents & API**) or via the admin-scoped
+`/config` REST API; overrides persist in the database and win over the environment.
 
 ## Required
 
@@ -52,10 +53,12 @@ The client address is the connection's peer as uvicorn reports it. Behind a
 reverse proxy (Traefik, nginx, an ingress) every request comes from the proxy
 unless uvicorn is told to believe the proxy's `X-Forwarded-For`: set uvicorn's
 own `FORWARDED_ALLOW_IPS` variable to the proxy's address or network (default
-`127.0.0.1`), and list nothing else — any address on that list can claim to be
+`127.0.0.1,::1`), and list nothing else — any address on that list can claim to be
 any client. Without it, the per-address limit counts the whole instance's
 failed sign-ins together, so a password spray pauses password sign-in for
-everyone until the lockout ends. SSO sign-in and agent tokens are unaffected.
+everyone until the lockout ends. SSO sign-in and agent tokens are unaffected. With
+Docker Compose, see
+[Put Purser behind a reverse proxy](../../how-to/reverse-proxy/#forwarded-headers-and-forwarded_allow_ips).
 
 ## Runtime-editable
 
@@ -80,25 +83,26 @@ write-only and encrypted at rest.
 | `PURSER_OIDC_ISSUER` | unset | OpenID Provider issuer URL (e.g. an Authentik instance). SSO enables when issuer, client id, and secret are all set; password login always remains as fallback. |
 | `PURSER_OIDC_CLIENT_ID` | unset | OIDC client id. |
 | `PURSER_OIDC_CLIENT_SECRET` | unset | OIDC client secret (write-only secret). |
-| `PURSER_OIDC_AUTO_PROVISION` | `false` | Auto-create a member account for an SSO identity whose email matches no account, ignoring letter case (requires the provider to assert `email_verified`). Off by default: such sign-ins get "account not provisioned" — pre-create users in the admin UI instead. |
+| `PURSER_OIDC_AUTO_PROVISION` | `false` | Auto-create a member account for an SSO identity whose email matches no account, ignoring letter case (requires the provider to assert `email_verified`). Off by default: such sign-ins get "account not provisioned" — pre-create users in the admin UI (**Settings -> Users**) instead. |
 | `PURSER_GRAFANA_URL` | unset | Grafana base URL for deep links on tool responses; links omitted when unset. |
 | `PURSER_PRICE_PROVIDER` | `none` | Daily closes for hand-tracked positions: `none` (record closes by hand) or `tiingo`. The provider sees ticker symbols only. See [Track holdings by hand](../../how-to/manual-holdings/). |
 | `PURSER_PRICE_STALE_DAYS` | `7` | A hand-tracked position whose newest close is older than this many days is flagged `stale` (and `price.stale` fires once). 1 to 365. |
 | `PURSER_FEED_STALE_DAYS` | `4` | A mapped SimpleFIN account whose bank balance date is more than this many days old is stale: `feed.stale` fires once per frozen date and `whats_new` lists it until the bank updates. 1 to 90. Runtime-editable through `PUT /config` (`feed_stale_days`). See [Connect a bank with SimpleFIN](../../how-to/simplefin/). |
-| `PURSER_TIMEZONE` | `UTC` | The household time zone, an IANA name such as `America/New_York`. Its calendar date is "today" everywhere Purser reasons about days: due and overdue bills, matching's late bills, snoozes, the digest's week ahead, net worth and balance defaults, review age, reconciliation's "no future dates", price and feed staleness, and the Grafana forecast view. Timestamps (audit log, fetches, sessions) stay UTC, and so do the scheduled job times (06:30 sync, 06:45 matching and the rest). The default keeps an existing install on the day it already had. Runtime-editable through **Config -> Settings** or `PUT /config` (`timezone`); an unknown zone is refused with 422, and an unknown `PURSER_TIMEZONE` stops startup. Any token with read scope gets the current ledger day and zone from `GET /clock`, for a client that dates its own writes. |
+| `PURSER_TIMEZONE` | `UTC` | The household time zone, an IANA name such as `America/New_York`. Its calendar date is "today" everywhere Purser reasons about days: due and overdue bills, matching's late bills, snoozes, the digest's week ahead, net worth and balance defaults, review age, reconciliation's "no future dates", price and feed staleness, and the Grafana forecast view. Timestamps (audit log, fetches, sessions) are stored in UTC and shown in the household time zone by the admin app; the scheduled job times stay UTC (06:45 matching and the rest), except the daily SimpleFIN sync, whose time (**Settings -> Connections**) is a clock time in the household time zone and keeps it across daylight-saving changes; changing the zone keeps that clock time in the new zone. The default keeps an existing install on the day it already had. Runtime-editable through **Settings -> General** or `PUT /config` (`timezone`); an unknown zone is refused with 422, and an unknown `PURSER_TIMEZONE` stops startup. Any token with read scope gets the current ledger day and zone from `GET /clock`, for a client that dates its own writes. |
 
 The price provider's **API key** has no environment variable on purpose: Purser
 is the party that sends it, so it lives only in Purser's encrypted settings
-(**Config -> Prices**, or `PUT /config` with `price_api_key`). It is write-only:
+(**Settings -> Prices**, or `PUT /config` with `price_api_key`). It is write-only:
 responses report only `price_api_key_set`.
 
 The SimpleFIN **sync schedule** (daily / every 12h / every 6h / hourly) is
-runtime-only — set it in **Config -> SimpleFIN**.
+runtime-only — set it in **Settings -> Connections**.
 
 ## Compose extras
 
 The bundled `docker-compose.yml` also reads `POSTGRES_PASSWORD` (defaults to
-`purser`) for the sidecar database.
+`purser`) for the sidecar database. Set it before the first start; see
+[Run with Docker Compose](../../how-to/docker-compose/#set-the-database-password).
 
 ## Licence and notices
 
@@ -128,4 +132,4 @@ The Compose file uses `PURSER_BIND_ADDRESS` (default `127.0.0.1`) for its
 published host port. This is a Compose setting, not an application setting.
 Complete first-admin setup before exposing a remote interface. Compose also
 passes `PURSER_PUBLIC_URL` through to the application; use your HTTPS URL behind
-a reverse proxy.
+a reverse proxy (see [Put Purser behind a reverse proxy](../../how-to/reverse-proxy/)).

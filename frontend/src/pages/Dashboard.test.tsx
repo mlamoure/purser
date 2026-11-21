@@ -3,8 +3,9 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import type { components } from "../api/schema";
 import { apiMock, mockApi, ok, fail } from "../test/api";
-import { transferLinkSuggestion, transferPairSuggestion } from "../test/fixtures";
+import { accountOut, transferLinkSuggestion, transferPairSuggestion } from "../test/fixtures";
 import { renderWithProviders } from "../test/render";
+import { meQuery } from "../lib/me";
 import Dashboard from "./Dashboard";
 
 type SuggestionOut = components["schemas"]["SuggestionOut"];
@@ -85,7 +86,7 @@ describe("Dashboard — Needs attention", () => {
   it("pages each group and preserves server ordering", async () => {
     quietDashboard([...Array.from({ length: 30 }, (_, n) => schedule(n)), transferPairSuggestion()]);
     renderWithProviders(<Dashboard />);
-    await userEvent.click(await screen.findByRole("button", { name: /Recurring schedules/ }));
+    await userEvent.click(await screen.findByRole("button", { name: /Scheduled transactions/ }));
     expect(await screen.findByText(/Bill 9: monthly/)).toBeInTheDocument();
     expect(screen.queryByText(/Bill 10: monthly/)).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Show 10 more of 20" }));
@@ -125,7 +126,7 @@ describe("Dashboard — Needs attention", () => {
     });
     renderWithProviders(<Dashboard />);
     expect(await screen.findByText("Estimate — verify details")).toBeInTheDocument();
-    expect(screen.getByText("Schedule paused")).toBeInTheDocument();
+    expect(screen.getByText("Scheduled transaction paused")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Review expectation" })).toHaveAttribute("href", "/accounts/a1?status=expected&start=2026-10-01&end=2026-10-01&transaction=t1");
     await userEvent.click(screen.getByText("Transaction review"));
     expect(screen.getByRole("link", { name: "3 posted" })).toHaveAttribute("href", "/accounts/a1?reviewed=false&status=posted");
@@ -151,7 +152,7 @@ describe("Dashboard future stock value", () => {
     await userEvent.click(assets.getByText("Unvested stock: $500.00"));
     expect(detail).toHaveAttribute("open");
     expect(screen.getByText(/before tax withholding/)).toBeInTheDocument();
-    expect(screen.getByText(/Next scheduled vest: 2027-01-01/)).toBeInTheDocument();
+    expect(screen.getByText(/Next scheduled vest: Jan 1, 2027/)).toBeInTheDocument();
     expect(screen.getByText("Net worth")).toBeInTheDocument();
   });
   it("keeps missing values unknown and identifies partial and stale valuations", async () => {
@@ -199,5 +200,95 @@ describe("Dashboard future stock value", () => {
     renderWithProviders(<Dashboard />);
     expect(await screen.findByText("Unvested values unavailable: Award values unavailable")).toBeInTheDocument();
     expect(screen.queryByText(/0 unvested award/)).not.toBeInTheDocument();
+  });
+});
+
+describe("Dashboard accounts", () => {
+  it("shows a failed account load as an error, not as no accounts", async () => {
+    quietDashboard();
+    mockApi({ "GET /accounts": fail(500, "database unavailable") });
+    renderWithProviders(<Dashboard />);
+
+    expect(
+      await screen.findByText("Could not load accounts: database unavailable"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/No accounts yet/)).not.toBeInTheDocument();
+  });
+
+  it("shows liabilities with the same sign as the liability rows (#540)", async () => {
+    quietDashboard();
+    mockApi({
+      "GET /networth": ok({ net_worth: "1120.00", assets: "1500.00", liabilities: "380.00" }),
+      "GET /accounts": ok([
+        accountOut({
+          id: "a-cc",
+          name: "Card",
+          path: "liabilities.card",
+          type: "credit_card",
+          balance: "-380.0000",
+        }),
+      ]),
+    });
+    renderWithProviders(<Dashboard />);
+
+    const tile = await screen.findByRole("region", { name: "Liabilities" });
+    expect(await within(tile).findByText("-$380.00")).toBeInTheDocument();
+    const row = (await screen.findByRole("link", { name: "Card" })).closest("tr")!;
+    expect(within(row).getByText("-$380.00")).toBeInTheDocument();
+    expect(within(screen.getByRole("region", { name: "Net worth" })).getByText("$1,120.00")).toBeInTheDocument();
+  });
+
+  it("keeps a compact summary: name and balance, and a link to all accounts (#542)", async () => {
+    quietDashboard();
+    mockApi({
+      "GET /accounts": ok([
+        accountOut({ id: "a-cc", name: "Rewards Card", path: "liabilities.card", type: "credit_card", balance: "-12.5000" }),
+      ]),
+    });
+    renderWithProviders(<Dashboard />);
+
+    const row = (await screen.findByRole("link", { name: "Rewards Card" })).closest("tr")!;
+    expect(within(row).getByRole("link")).toHaveAttribute("href", "/accounts/a-cc");
+    expect(within(row).getByText("-$12.50")).toBeInTheDocument();
+    expect(within(row).queryByText("liabilities.card")).not.toBeInTheDocument();
+    const headers = screen.getAllByRole("columnheader").map((h) => h.textContent);
+    expect(headers).toEqual(["Account", "Balance"]);
+    expect(screen.getByRole("link", { name: "All accounts" })).toHaveAttribute("href", "/accounts");
+    // Hidden and closed accounts are the Accounts page's toggles.
+    expect(screen.queryByLabelText("Show hidden")).not.toBeInTheDocument();
+  });
+});
+
+describe("Dashboard — first-run checklist (#539)", () => {
+  it("shows the checklist to an admin with setup left to do", async () => {
+    quietDashboard();
+    mockApi({
+      "GET /config": ok({
+        encryption: {
+          field_encryption_active: true,
+          canary_ok: true,
+          key_fingerprint: "abcd1234",
+          key_acknowledged_at: null,
+          encrypted_scopes: [],
+        },
+      }),
+      "GET /connections": ok([]),
+      "GET /tokens": ok([]),
+    });
+    const view = renderWithProviders(<Dashboard />);
+    view.queryClient.setQueryData(meQuery.queryKey, { scopes: ["read", "write", "admin"] } as never);
+
+    const card = await screen.findByRole("region", { name: "Finish setting up" });
+    expect(within(card).getByRole("link", { name: "Show and record the key" })).toBeInTheDocument();
+  });
+
+  it("never reads setup state for a non-admin session", async () => {
+    quietDashboard();
+    const view = renderWithProviders(<Dashboard />);
+    view.queryClient.setQueryData(meQuery.queryKey, { scopes: ["read", "write"] } as never);
+
+    await screen.findByText(/No accounts yet/);
+    expect(screen.queryByRole("region", { name: "Finish setting up" })).not.toBeInTheDocument();
+    // An unrouted GET /config, /connections or /tokens would fail the test.
   });
 });

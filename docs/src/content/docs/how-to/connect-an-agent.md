@@ -12,7 +12,7 @@ same way.
 - Endpoint: `https://<purser-host>/mcp` (streamable HTTP, same process as REST)
 - Auth: `Authorization: Bearer <api-token>` — the same scoped tokens REST uses
 
-Create the token in the admin UI (**Tokens** page) — the setup wizard also
+Create the token in the admin UI (**Settings -> Agents & API**) — the setup wizard also
 offers to mint one as its final step, with ready-to-paste config for the
 clients below. Recommended agent scopes: **`read + write`**.
 
@@ -172,7 +172,7 @@ The full toolset is in the [MCP tool catalog](../../reference/mcp-tools/).
 
 ## Replace a credential without splitting its audit history
 
-In **API & MCP Access**, choose **Replace credential for ...** under
+In **Settings -> Agents & API**, choose **Replace credential for ...** under
 **Integration identity** when creating the replacement. The new credential keeps
 the same integration ID, with its own grant and effective permissions. Update the
 integrator to use it, then revoke the old credential. Creating a replacement does

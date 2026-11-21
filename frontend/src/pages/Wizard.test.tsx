@@ -47,7 +47,7 @@ describe("Wizard (first-run flow across the steps)", () => {
         mapped = true;
         return ok({});
       },
-      "GET /accounts": ok([]), // the import step's account picker
+      "GET /accounts": ok([]), // the mapping form's and the import step's account pickers
       "POST /tokens": ok({ token: "synthetic-agent-token" }, 201),
     });
     const { user, container } = renderWithProviders(<Wizard />);
@@ -82,13 +82,20 @@ describe("Wizard (first-run flow across the steps)", () => {
     const row = (await screen.findByText("Everyday Checking · Example Bank")).closest("tr")!;
     expect(within(row).getByText("unmapped")).toBeInTheDocument();
     await user.click(within(row).getByRole("button", { name: "Map" }));
+    // The mapping form opens with the defaults: a new checking account.
+    await user.click(screen.getByRole("button", { name: "Map account" }));
     expect(await within(row).findByText("assets.everyday_checking")).toBeInTheDocument();
     expect(within(row).queryByRole("button", { name: "Map" })).not.toBeInTheDocument();
     expect(apiMock.POST).toHaveBeenCalledWith("/connections/{connection_id}/map", {
       params: { path: { connection_id: "c-1" } },
       body: {
         external_id: "ext-1",
-        create: { name: "Everyday Checking", type: "checking", path: "assets.everyday_checking" },
+        create: {
+          name: "Everyday Checking",
+          type: "checking",
+          path: "assets.everyday_checking",
+          currency: "USD",
+        },
       },
     });
     await user.click(screen.getByRole("button", { name: "Continue" }));

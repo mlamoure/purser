@@ -3,7 +3,7 @@ title: Visualize with Grafana
 description: Point Grafana at Purser's stable read schema, import the shipped dashboards, and enable deep links on tool responses.
 ---
 
-Purser includes a forecast chart on the Schedules page and widgets for
+Purser includes a forecast chart on the Scheduled transactions page and widgets for
 compatible MCP clients. Grafana provides broader reporting over a stable read
 schema, so your data remains available to dashboards outside the app. Three dashboards ship in the repository under
 [`grafana/dashboards/`](https://github.com/mlamoure/purser/tree/main/grafana/dashboards):
@@ -47,8 +47,8 @@ are needed.
 Set `PURSER_GRAFANA_URL` to your Grafana base URL and Purser decorates tool
 responses with `links.grafana` deep links into the matching dashboard — so an
 agent's answer about net worth can offer the chart. When it is unset, links are
-omitted entirely. `PURSER_GRAFANA_URL` is runtime-editable in **Config ->
-Settings**; see [Configuration](../../reference/configuration/).
+omitted entirely. `PURSER_GRAFANA_URL` is runtime-editable in **Settings ->
+General**; see [Configuration](../../reference/configuration/).
 
 The design rationale for a shared read schema, built-in visualizations and
 external dashboard templates is

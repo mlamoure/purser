@@ -24,9 +24,13 @@ For example, cash of -100.00 in the ledger and a reported cash balance of
 25.00 produce a 125.00 adjustment. Holdings worth 1000.00 remain unchanged,
 so total owned value becomes 1025.00. Unvested awards remain outside net worth.
 
-Loan and property balances are valuations. Record a
-valuation for a loan or property instead, with `POST /accounts/{id}/valuations`
-or the MCP tool `record_valuation` (see
+A hand-valued asset (type `property`: a house, a car) reconciles to its
+value on the date: the difference posts against the system account
+`equity.revaluation` as a change in value, not to the adjustments category
+(see [Track a house or other asset](../hand-valued-assets/)).
+
+A loan balance is a valuation. Record a valuation for a loan instead, with
+`POST /accounts/{id}/valuations` or the MCP tool `record_valuation` (see
 [Recording a valuation](../../explanation/balances/#recording-a-valuation)).
 
 Reconciling a credit card checks what the card owed on the statement date;
@@ -184,7 +188,7 @@ The MCP tool `reconcile_account` takes the same inputs and needs write scope.
 Do a dry run first, read `adjustment` back to the user, and commit only when
 they agree. Never flip a card statement's sign yourself. Purser does that.
 
-A loan or property statement is not reconciled. Record its figure with the MCP
+A loan statement is not reconciled. Record its figure with the MCP
 tool `record_valuation` (write scope), entered as printed, with
 `convention` set to `statement`:
 

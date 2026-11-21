@@ -1,397 +1,34 @@
-/** Schedules page (#236): the rules behind the forecast. List with status
- * filter, a create/edit form whose cadence picker writes the RRULE, pause /
- * resume / end, "Detect now" into the suggestions inbox, a per-schedule
- * instance panel (skip / override / reset, a card payment's statement
- * balance), and a per-account forecast chart
- * where projected occurrences draw hollow and the coverage line says what the
- * projection is made of. The page dogfoods the same REST surface agents use. */
+/** Scheduled transactions page (#236, #535): the rules behind the forecast.
+ * The account forecast comes first; below it every scheduled transaction is
+ * listed under its account (a transfer under both of its accounts), with
+ * pause / resume / end, "Detect now" into the suggestions inbox, a
+ * per-schedule instance panel (skip / override / reset, a card payment's
+ * statement balance) and the create/edit form (payee + memo, #534). The page
+ * dogfoods the same REST surface agents use. */
 
 import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, errorDetail } from "../lib/api";
-import { fmtAmount, overrideBody } from "../lib/utils";
+import { overrideBody } from "../lib/utils";
+import { compareMoney, formatMoney, negateMoney } from "../lib/money";
+import { formatDate } from "../lib/dates";
+import { amountBasisLabel } from "../lib/labels";
+import { useCategoryNames, type PathName } from "../lib/names";
+import { plotCoordinate } from "../lib/plot";
 import type { components } from "../api/schema";
-import CategorySelect from "../components/CategorySelect";
 import { OccurrenceCertainty, OccurrenceEvidence } from "../components/OccurrenceCertainty";
-import { Badge, Button, Card, CardTitle, ErrorText, Input, Label, Table, Td, Th } from "../components/ui";
+import { Badge, Button, Card, CardTitle, ErrorText, Input, Table, Td, Th } from "../components/ui";
+import { QueryState } from "../components/QueryState";
+import { cadenceLabel, selectClass } from "./schedules/cadence";
+import ScheduleForm from "./schedules/ScheduleForm";
+
+export { cadenceLabel };
 
 type ScheduleOut = components["schemas"]["ScheduleOut"];
 type ScheduleDetail = components["schemas"]["ScheduleDetail"];
-type ScheduleCreate = components["schemas"]["ScheduleCreate"];
 type AccountOut = components["schemas"]["AccountOut"];
 type ForecastOut = components["schemas"]["ForecastOut"];
-
-const selectClass =
-  "h-9 rounded-md border border-input bg-background px-2 text-sm focus:outline-none focus:ring-2 focus:ring-ring";
-
-const WEEKDAYS = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"] as const;
-const WEEKDAY_LABELS: Record<string, string> = {
-  MO: "Monday",
-  TU: "Tuesday",
-  WE: "Wednesday",
-  TH: "Thursday",
-  FR: "Friday",
-  SA: "Saturday",
-  SU: "Sunday",
-};
-
-type Cadence = "weekly" | "biweekly" | "semimonthly" | "monthly" | "quarterly" | "yearly" | "custom";
-
-/** Cadence picker state → RRULE. The picker covers the shapes detection
- * proposes; anything else is a raw RRULE. */
-function buildRrule(c: {
-  cadence: Cadence;
-  weekday: string;
-  day: number;
-  day2: number;
-  month: number;
-  custom: string;
-}): string {
-  const day = Math.min(Math.max(c.day, 1), 28);
-  const day2 = Math.min(Math.max(c.day2, 1), 28);
-  switch (c.cadence) {
-    case "weekly":
-      return `FREQ=WEEKLY;BYDAY=${c.weekday}`;
-    case "biweekly":
-      return `FREQ=WEEKLY;INTERVAL=2;BYDAY=${c.weekday}`;
-    case "semimonthly":
-      return `FREQ=MONTHLY;BYMONTHDAY=${Math.min(day, day2)},${Math.max(day, day2)}`;
-    case "monthly":
-      return `FREQ=MONTHLY;BYMONTHDAY=${day}`;
-    case "quarterly":
-      return `FREQ=MONTHLY;INTERVAL=3;BYMONTHDAY=${day}`;
-    case "yearly":
-      return `FREQ=YEARLY;BYMONTH=${c.month};BYMONTHDAY=${day}`;
-    default:
-      return c.custom.trim();
-  }
-}
-
-function rruleParams(rrule: string): Record<string, string> {
-  /* Only the RRULE line: a rule may carry EXDATE/RDATE lines after it
-   * (agent-authored schedules do), which are not key=value parameters. */
-  const line = rrule.split(/\r?\n/).find((l) => /^(RRULE:)?FREQ=/i.test(l.trim())) ?? rrule;
-  const out: Record<string, string> = {};
-  for (const part of line.trim().replace(/^RRULE:/i, "").split(";")) {
-    const [k, v] = part.split("=");
-    if (k && v) out[k.toUpperCase()] = v.trim();
-  }
-  return out;
-}
-
-/** Human cadence for the table, mirroring core_forecasting.cadence_label
- * plus the day-of-month detail the RRULE carries. */
-export function cadenceLabel(rrule: string): string {
-  const p = rruleParams(rrule);
-  const interval = Number(p.INTERVAL ?? "1");
-  const days = p.BYMONTHDAY ? ` on the ${p.BYMONTHDAY.split(",").join(" & ")}` : "";
-  const weekday = p.BYDAY ? ` on ${WEEKDAY_LABELS[p.BYDAY] ?? p.BYDAY}` : "";
-  switch (p.FREQ) {
-    case "WEEKLY":
-      return (interval === 1 ? "weekly" : interval === 2 ? "every 2 weeks" : `every ${interval} weeks`) + weekday;
-    case "MONTHLY":
-      if (interval === 1) return (p.BYMONTHDAY?.includes(",") ? "semi-monthly" : "monthly") + days;
-      return `every ${interval} months${days}`;
-    case "YEARLY":
-      return `yearly${p.BYMONTH ? ` in month ${p.BYMONTH}` : ""}${days}${/EXDATE/i.test(rrule) ? " (with exclusions)" : ""}`;
-    case "DAILY":
-      return interval === 1 ? "daily" : `every ${interval} days`;
-    default:
-      return rrule;
-  }
-}
-
-function today(): string {
-  return new Date().toISOString().slice(0, 10);
-}
-
-/* --------------------------------------------------------------------------
- * Create / edit form
- * ------------------------------------------------------------------------ */
-
-type FormState = {
-  name: string;
-  account: string;
-  target: string; // category path, or "[account.path]" for a transfer counterparty
-  cadence: Cadence;
-  weekday: string;
-  day: number;
-  day2: number;
-  month: number;
-  custom: string;
-  dtstart: string;
-  date_type: "fixed" | "estimated";
-  amount_type: "fixed" | "estimated";
-  estimate_basis: "last" | "rolling_avg_3" | "rolling_avg_12" | "counterparty_balance";
-  amount: string;
-  payee: string;
-  autopost_policy: "auto_post" | "wait_for_match" | "reminder_only";
-};
-
-function initialForm(accounts: AccountOut[], existing?: ScheduleOut, accountPath?: string): FormState {
-  const p = existing ? rruleParams(existing.rrule) : {};
-  const bymonthday = p.BYMONTHDAY?.split(",").map(Number) ?? [];
-  let cadence: Cadence = "monthly";
-  if (existing) {
-    if (p.FREQ === "WEEKLY") cadence = Number(p.INTERVAL ?? "1") === 2 ? "biweekly" : "weekly";
-    else if (p.FREQ === "MONTHLY" && Number(p.INTERVAL ?? "1") === 3) cadence = "quarterly";
-    else if (p.FREQ === "MONTHLY" && bymonthday.length === 2) cadence = "semimonthly";
-    else if (p.FREQ === "MONTHLY" && Number(p.INTERVAL ?? "1") === 1) cadence = "monthly";
-    else if (p.FREQ === "YEARLY") cadence = "yearly";
-    else cadence = "custom";
-  }
-  const counterparty = existing?.counterparty_account_id
-    ? accounts.find((a) => a.id === existing.counterparty_account_id)?.path
-    : undefined;
-  return {
-    name: existing?.name ?? "",
-    account: accountPath ?? accounts.find((a) => !a.is_virtual)?.path ?? "",
-    target: counterparty ? `[${counterparty}]` : (existing?.category_path ?? ""),
-    cadence,
-    weekday: p.BYDAY ?? "FR",
-    day: bymonthday[0] ?? Number(today().slice(8, 10)),
-    day2: bymonthday[1] ?? 20,
-    month: Number(p.BYMONTH ?? today().slice(5, 7)),
-    custom: existing?.rrule ?? "",
-    dtstart: existing?.dtstart ?? today(),
-    date_type: existing?.date_type ?? "fixed",
-    amount_type: (existing?.amount_type as "fixed" | "estimated") ?? "fixed",
-    estimate_basis: (existing?.estimate_basis as FormState["estimate_basis"]) ?? "rolling_avg_3",
-    amount: existing?.amount ?? "",
-    payee: "",
-    autopost_policy: (existing?.autopost_policy as FormState["autopost_policy"]) ?? "wait_for_match",
-  };
-}
-
-function ScheduleForm({
-  accounts,
-  existing,
-  onDone,
-  onCancel,
-}: {
-  accounts: AccountOut[];
-  existing?: ScheduleOut;
-  onDone: () => void;
-  onCancel: () => void;
-}) {
-  const [form, setForm] = useState<FormState>(() => {
-    const accountPath = existing ? accounts.find((a) => a.id === existing.account_id)?.path : undefined;
-    return initialForm(accounts, existing, accountPath);
-  });
-  const [error, setError] = useState<string | null>(null);
-  const set = <K extends keyof FormState>(key: K, value: FormState[K]) =>
-    setForm((f) => ({ ...f, [key]: value }));
-  const rrule = buildRrule(form);
-  const isTransfer = form.target.startsWith("[");
-
-  const save = useMutation({
-    mutationFn: async () => {
-      const body: ScheduleCreate = {
-        name: form.name,
-        account: form.account,
-        rrule,
-        dtstart: form.dtstart || null,
-        date_type: form.date_type,
-        amount_type: form.amount_type,
-        amount: form.amount === "" ? null : form.amount,
-        payee: form.payee || null,
-        category: isTransfer || form.target === "" ? null : form.target,
-        counterparty_account: isTransfer ? form.target.slice(1, -1) : null,
-        estimate_basis: form.amount_type === "estimated" ? form.estimate_basis : null,
-        autopost_policy: form.autopost_policy,
-        propose: false,
-      };
-      if (existing) {
-        const { error: err } = await api.PATCH("/schedules/{schedule_id}", {
-          params: { path: { schedule_id: existing.id } },
-          body: {
-            name: body.name,
-            rrule: body.rrule,
-            dtstart: body.dtstart,
-            date_type: body.date_type,
-            amount_type: body.amount_type,
-            amount: body.amount,
-            payee: body.payee,
-            category: body.category,
-            counterparty_account: body.counterparty_account,
-            estimate_basis: body.estimate_basis,
-            autopost_policy: body.autopost_policy,
-          },
-        });
-        if (err) throw new Error(errorDetail(err));
-      } else {
-        const { error: err } = await api.POST("/schedules", { body });
-        if (err) throw new Error(errorDetail(err));
-      }
-    },
-    onSuccess: onDone,
-    onError: (e) => setError(e.message),
-  });
-
-  const realAccounts = accounts.filter((a) => !a.is_virtual && !a.closed_at);
-
-  return (
-    <Card className="mt-4">
-      <CardTitle>{existing ? `Edit ${existing.name}` : "New schedule"}</CardTitle>
-      <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
-        <div>
-          <Label>Name</Label>
-          <Input value={form.name} onChange={(e) => set("name", e.target.value)} placeholder="Citi card payment" />
-        </div>
-        <div>
-          <Label>Account</Label>
-          <select
-            className={`${selectClass} w-full`}
-            value={form.account}
-            disabled={!!existing}
-            onChange={(e) => set("account", e.target.value)}
-          >
-            {realAccounts.map((a) => (
-              <option key={a.id} value={a.path}>
-                {a.name} ({a.path})
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <Label>Category, or transfer to</Label>
-          <CategorySelect value={form.target} currentAccountPath={form.account} onChange={(v) => set("target", v)} />
-          <p className="mt-1 text-xs text-muted-foreground">
-            A transfer target makes this a two-account schedule (card payment, contribution).
-          </p>
-        </div>
-
-        <div>
-          <Label>Cadence</Label>
-          <select
-            className={`${selectClass} w-full`}
-            value={form.cadence}
-            onChange={(e) => set("cadence", e.target.value as Cadence)}
-          >
-            <option value="weekly">Weekly</option>
-            <option value="biweekly">Every 2 weeks</option>
-            <option value="semimonthly">Semi-monthly (two days)</option>
-            <option value="monthly">Monthly</option>
-            <option value="quarterly">Every 3 months</option>
-            <option value="yearly">Yearly</option>
-            <option value="custom">Custom RRULE</option>
-          </select>
-        </div>
-        {(form.cadence === "weekly" || form.cadence === "biweekly") && (
-          <div>
-            <Label>Weekday</Label>
-            <select
-              className={`${selectClass} w-full`}
-              value={form.weekday}
-              onChange={(e) => set("weekday", e.target.value)}
-            >
-              {WEEKDAYS.map((d) => (
-                <option key={d} value={d}>
-                  {WEEKDAY_LABELS[d]}
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
-        {(form.cadence === "monthly" || form.cadence === "quarterly" || form.cadence === "yearly" || form.cadence === "semimonthly") && (
-          <div>
-            <Label>{form.cadence === "semimonthly" ? "First day of month" : "Day of month (1–28)"}</Label>
-            <Input type="number" min={1} max={28} value={form.day} onChange={(e) => set("day", Number(e.target.value))} />
-          </div>
-        )}
-        {form.cadence === "semimonthly" && (
-          <div>
-            <Label>Second day of month</Label>
-            <Input type="number" min={1} max={28} value={form.day2} onChange={(e) => set("day2", Number(e.target.value))} />
-          </div>
-        )}
-        {form.cadence === "yearly" && (
-          <div>
-            <Label>Month (1–12)</Label>
-            <Input type="number" min={1} max={12} value={form.month} onChange={(e) => set("month", Number(e.target.value))} />
-          </div>
-        )}
-        {form.cadence === "custom" && (
-          <div className="md:col-span-2">
-            <Label>RRULE</Label>
-            <Input value={form.custom} onChange={(e) => set("custom", e.target.value)} placeholder="FREQ=MONTHLY;BYMONTHDAY=6,20" />
-          </div>
-        )}
-        <div>
-          <Label>Date certainty</Label>
-          <select className={`${selectClass} w-full`} aria-label="Schedule date certainty" value={form.date_type} onChange={e => set("date_type", e.target.value as FormState["date_type"])}>
-            <option value="fixed">Known recurring date</option><option value="estimated">Estimated arrival date</option>
-          </select>
-          <Label>Anchor date (dtstart)</Label>
-          <Input type="date" value={form.dtstart} onChange={(e) => set("dtstart", e.target.value)} />
-          <p className="mt-1 text-xs text-muted-foreground">Every-2-weeks counts from here; pass the last real occurrence.</p>
-        </div>
-
-        <div>
-          <Label>Amount</Label>
-          <select
-            className={`${selectClass} w-full`}
-            value={form.amount_type}
-            onChange={(e) => set("amount_type", e.target.value as FormState["amount_type"])}
-          >
-            <option value="fixed">Fixed</option>
-            <option value="estimated">Estimated from history</option>
-          </select>
-        </div>
-        {form.amount_type === "estimated" && (
-          <div>
-            <Label>Estimate basis</Label>
-            <select
-              className={`${selectClass} w-full`}
-              value={form.estimate_basis}
-              onChange={(e) => set("estimate_basis", e.target.value as FormState["estimate_basis"])}
-            >
-              <option value="last">Last matched amount</option>
-              <option value="rolling_avg_3">Average of last 3</option>
-              <option value="rolling_avg_12">Average of last 12</option>
-              {isTransfer && <option value="counterparty_balance">Pay the other account's balance</option>}
-            </select>
-          </div>
-        )}
-        <div>
-          <Label>{form.amount_type === "fixed" ? "Amount (negative = money out)" : "Fallback amount"}</Label>
-          <Input value={form.amount} onChange={(e) => set("amount", e.target.value)} placeholder="-1500.00" />
-        </div>
-        {!isTransfer && (
-          <div>
-            <Label>Payee</Label>
-            <Input value={form.payee} onChange={(e) => set("payee", e.target.value)} placeholder="optional" />
-          </div>
-        )}
-        <div>
-          <Label>When the bill posts</Label>
-          <select
-            className={`${selectClass} w-full`}
-            value={form.autopost_policy}
-            onChange={(e) => set("autopost_policy", e.target.value as FormState["autopost_policy"])}
-          >
-            <option value="wait_for_match">Wait for the bank row</option>
-            <option value="auto_post">Post automatically</option>
-            <option value="reminder_only">Reminder only</option>
-          </select>
-        </div>
-      </div>
-      <p className="mt-3 text-xs text-muted-foreground">
-        Rule: <span className="font-mono">{rrule || "—"}</span> · {rrule ? cadenceLabel(rrule) : ""}
-      </p>
-      {error && <ErrorText>{error}</ErrorText>}
-      <div className="mt-3 flex gap-2">
-        <Button disabled={save.isPending || !form.name || !rrule} onClick={() => save.mutate()}>
-          {existing ? "Save" : "Create"}
-        </Button>
-        <Button variant="ghost" onClick={onCancel}>
-          Cancel
-        </Button>
-      </div>
-    </Card>
-  );
-}
 
 /* --------------------------------------------------------------------------
  * Instances panel (skip / override / reset / statement)
@@ -402,11 +39,14 @@ type InstanceOut = ScheduleDetail["instances"][number];
 /** Where an instance's amount comes from (decision 80), when it is worth a
  * badge: a recorded card statement, a user's override, or the card's current
  * balance a card payment estimates from. */
-function BasisBadge({ instance }: { instance: InstanceOut }) {
+function BasisBadge({ instance, currency }: { instance: InstanceOut; currency?: string | null }) {
   if (instance.basis === "statement") {
     return (
-      <Badge variant="green" title={`statement balance ${fmtAmount(instance.statement_balance)}`}>
-        {instance.statement_date ? `statement · closed ${instance.statement_date}` : "statement"}
+      <Badge
+        variant="green"
+        title={`statement balance ${formatMoney(instance.statement_balance, { currency })}`}
+      >
+        {instance.statement_date ? `statement · closed ${formatDate(instance.statement_date)}` : "statement"}
       </Badge>
     );
   }
@@ -498,9 +138,10 @@ export function InstancesPanel({
     onError: (e) => setError(e.message),
   });
 
-  if (detail.isLoading) return <p className="text-sm text-muted-foreground">Loading instances…</p>;
-  const instances = detail.data?.instances ?? [];
-  const matched = detail.data?.matched_instances ?? [];
+  if (detail.data === undefined) return <QueryState query={detail} what="instances" />;
+  const currency = detail.data.currency;
+  const instances = detail.data.instances ?? [];
+  const matched = detail.data.matched_instances ?? [];
   if (instances.length === 0 && matched.length === 0) return <p className="text-sm text-muted-foreground">No live instances.</p>;
   return (
     <div className="mt-2">
@@ -517,13 +158,13 @@ export function InstancesPanel({
         <tbody>
           {instances.map((i) => (
             <tr key={i.transaction_id}>
-              <Td>{i.date}</Td>
-              <Td className="text-muted-foreground">{i.occurrence_date ?? "—"}</Td>
-              <Td className="text-right font-mono">{fmtAmount(i.amount)}</Td>
+              <Td className="whitespace-nowrap">{formatDate(i.date)}</Td>
+              <Td className="whitespace-nowrap text-muted-foreground">{formatDate(i.occurrence_date)}</Td>
+              <Td className="text-right font-mono">{formatMoney(i.amount, { currency })}</Td>
               <Td>
                 <span className="flex gap-1">
                   {i.overdue && <Badge variant="red">overdue</Badge>}
-                  <BasisBadge instance={i} />
+                  <BasisBadge instance={i} currency={currency} />
                   <OccurrenceCertainty value={i.certainty} />
                 </span>
               </Td>
@@ -628,7 +269,7 @@ export function InstancesPanel({
       {matched.length > 0 && <details className="mt-3">
         <summary>Recently matched occurrences ({matched.length}, up to 50)</summary>
         {matched.map(i => <div key={i.transaction_id} className="mt-2">
-          <span>{i.date} · {fmtAmount(i.amount)}</span>
+          <span>{formatDate(i.date)} · {formatMoney(i.amount, { currency })}</span>
           <OccurrenceCertainty value={i.certainty} />
         </div>)}
       </details>}
@@ -642,21 +283,19 @@ export function InstancesPanel({
  * ------------------------------------------------------------------------ */
 
 /** How a forecast event's amount came about (decisions 80, 85). */
-const BASIS_LABEL: Record<string, string> = {
-  fixed: "fixed",
-  last: "last amount",
-  rolling_avg_3: "3-payment average",
-  rolling_avg_12: "12-payment average",
-  counterparty_balance: "current balance",
-  override: "your amount",
-  statement: "statement balance",
-};
-
 const CHART_W = 720;
 const CHART_H = 220;
 const PAD = { l: 56, r: 12, t: 12, b: 28 };
 
-export function ForecastChart({ accountPath }: { accountPath: string }) {
+export function ForecastChart({
+  accountPath,
+  currency,
+}: {
+  accountPath: string;
+  /** The account's currency (USD when unknown). */
+  currency?: string | null;
+}) {
+  const money = (value: string | null | undefined) => formatMoney(value, { currency });
   const [days, setDays] = useState<30 | 90 | 365>(30);
   const forecast = useQuery({
     queryKey: ["forecast", accountPath, days],
@@ -672,35 +311,45 @@ export function ForecastChart({ accountPath }: { accountPath: string }) {
   const data = forecast.data;
   const geometry = useMemo(() => {
     if (!data) return null;
-    const balances = data.days.map((d) => Number(d.balance));
+    // Money stays decimal strings: the extremes, the floor and the low day
+    // are picked by exact string comparison, and the axis labels show those
+    // original strings. Only the pixel positions go through plotCoordinate.
+    const balances = data.days.map((d) => d.balance);
     // The estimate range band (#247): every day's pessimistic/optimistic
     // balance, present only when an estimated event carries a range.
     const banded = data.days.filter((d) => d.low != null && d.high != null);
-    const bandValues = banded.flatMap((d) => [Number(d.low), Number(d.high)]);
-    const floor = data.min_balance != null ? Number(data.min_balance) : 0;
-    const lo = Math.min(...balances, ...bandValues, floor, Number(data.start_balance));
-    const hi = Math.max(...balances, ...bandValues, floor, Number(data.start_balance));
-    const span = hi - lo || 1;
+    const bandValues = banded.flatMap((d) => [d.low!, d.high!]);
+    const floor = data.min_balance ?? "0";
+    const all = [...balances, ...bandValues, floor, data.start_balance];
+    const lo = all.reduce((a, b) => (compareMoney(b, a) < 0 ? b : a));
+    const hi = all.reduce((a, b) => (compareMoney(b, a) > 0 ? b : a));
+    const loY = plotCoordinate(lo);
+    const span = plotCoordinate(hi) - loY || 1;
     const x = (i: number) => PAD.l + (i / Math.max(data.days.length - 1, 1)) * (CHART_W - PAD.l - PAD.r);
-    const y = (v: number) => PAD.t + (1 - (v - lo) / span) * (CHART_H - PAD.t - PAD.b);
+    const y = (value: string | null | undefined) =>
+      PAD.t + (1 - (plotCoordinate(value) - loY) / span) * (CHART_H - PAD.t - PAD.b);
     // A step line: the balance holds until the day an event lands.
     const path = data.days
       .map((d, i) =>
         i === 0
-          ? `M${x(0).toFixed(1)},${y(Number(d.balance)).toFixed(1)}`
-          : `H${x(i).toFixed(1)} V${y(Number(d.balance)).toFixed(1)}`,
+          ? `M${x(0).toFixed(1)},${y(d.balance).toFixed(1)}`
+          : `H${x(i).toFixed(1)} V${y(d.balance).toFixed(1)}`,
       )
       .join(" ");
     const events = data.days.flatMap((d, i) =>
-      d.events.map((e) => ({ ...e, x: x(i), y: y(Number(d.balance)), date: d.date })),
+      d.events.map((e) => ({ ...e, x: x(i), y: y(d.balance), date: d.date })),
     );
-    const lowIndex = balances.indexOf(Math.min(...balances));
+    // The first day at the lowest balance.
+    const lowIndex = balances.reduce(
+      (best, b, i) => (compareMoney(b, balances[best]) < 0 ? i : best),
+      0,
+    );
     // Stepped like the line: highs left to right, back along the lows.
     const edge = (pick: "low" | "high") =>
       data.days.flatMap((d, i) => {
-        const v = Number(d[pick]);
-        const prev = i > 0 ? Number(data.days[i - 1][pick]) : v;
-        return i === 0 ? [[x(0), y(v)]] : [[x(i), y(prev)], [x(i), y(v)]];
+        const v = y(d[pick]);
+        const prev = i > 0 ? y(data.days[i - 1][pick]) : v;
+        return i === 0 ? [[x(0), v]] : [[x(i), prev], [x(i), v]];
       });
     const band =
       banded.length === data.days.length && banded.length > 1
@@ -723,8 +372,7 @@ export function ForecastChart({ accountPath }: { accountPath: string }) {
           ))}
         </div>
       </div>
-      {forecast.isLoading && <p className="text-sm text-muted-foreground">Loading…</p>}
-      {forecast.error && <ErrorText>{(forecast.error as Error).message}</ErrorText>}
+      <QueryState query={forecast} what="the forecast" />
       {data && geometry && (
         <>
           <svg viewBox={`0 0 ${CHART_W} ${CHART_H}`} className="mt-2 w-full" role="img" aria-label={`Forecast for ${accountPath}`}>
@@ -738,10 +386,10 @@ export function ForecastChart({ accountPath }: { accountPath: string }) {
               opacity={0.4}
             />
             <text x={PAD.l - 6} y={geometry.y(geometry.hi) + 4} textAnchor="end" fontSize={10} fill="currentColor">
-              {fmtAmount(String(geometry.hi))}
+              {money(geometry.hi)}
             </text>
             <text x={PAD.l - 6} y={geometry.y(geometry.lo) + 4} textAnchor="end" fontSize={10} fill="currentColor">
-              {fmtAmount(String(geometry.lo))}
+              {money(geometry.lo)}
             </text>
             {geometry.band && <path data-testid="forecast-band" d={geometry.band} fill="var(--chart-band)" stroke="none" />}
             <path d={geometry.path} fill="none" stroke="currentColor" strokeWidth={1.5} />
@@ -751,30 +399,30 @@ export function ForecastChart({ accountPath }: { accountPath: string }) {
                 cx={e.x}
                 cy={e.y}
                 r={3.5}
-                fill={e.projected ? "var(--background, white)" : "currentColor"}
+                fill={e.projected ? "var(--color-card)" : "currentColor"}
                 stroke="currentColor"
                 strokeWidth={1.5}
               >
                 <title>
-                  {`${e.label} ${fmtAmount(e.amount)} · ${e.date}${e.projected ? " · projected" : ""}${e.overdue ? " · overdue" : ""}` +
-                    (e.basis ? ` · ${BASIS_LABEL[e.basis] ?? e.basis}` : "") +
-                    (e.range ? ` · ${fmtAmount(e.range.low)} to ${fmtAmount(e.range.high)}` : "")}
+                  {`${e.label} ${money(e.amount)} · ${formatDate(e.date)}${e.projected ? " · projected" : ""}${e.overdue ? " · overdue" : ""}` +
+                    (e.basis ? ` · ${amountBasisLabel(e.basis)}` : "") +
+                    (e.range ? ` · ${money(e.range.low)} to ${money(e.range.high)}` : "")}
                 </title>
               </circle>
             ))}
             <text x={PAD.l} y={CHART_H - 8} fontSize={10} fill="currentColor">
-              {data.days[0]?.date}
+              {formatDate(data.days[0]?.date)}
             </text>
             <text x={CHART_W - PAD.r} y={CHART_H - 8} fontSize={10} textAnchor="end" fill="currentColor">
-              {data.days[data.days.length - 1]?.date}
+              {formatDate(data.days[data.days.length - 1]?.date)}
             </text>
           </svg>
           <details className="mt-2 text-sm">
             <summary>Upcoming occurrences and estimate details</summary>
             <div className="max-h-80 space-y-2 overflow-auto">
               {data.days.flatMap(day => day.events.map((event, index) => <div key={`${day.date}-${index}`}>
-                <span>{day.date} · {event.label} · {fmtAmount(event.amount)}</span>
-                <span className="text-xs text-muted-foreground"> · Amount calculation: {BASIS_LABEL[event.basis ?? ""] ?? event.basis ?? "not recorded"}</span>
+                <span>{formatDate(day.date)} · {event.label} · {money(event.amount)}</span>
+                <span className="text-xs text-muted-foreground"> · Amount calculation: {event.basis ? amountBasisLabel(event.basis) : "not recorded"}</span>
                 <OccurrenceCertainty value={event.certainty} />
                 {event.certainty?.slot && <OccurrenceEvidence slot={event.certainty.slot} onSaved={() => { void forecast.refetch(); }} />}
               </div>))}
@@ -782,8 +430,8 @@ export function ForecastChart({ accountPath }: { accountPath: string }) {
           </details>
           <p className="mt-1 text-xs text-muted-foreground">
             {data.coverage.schedules_active === 0
-              ? "No schedules are modeled on this account — the line is flat by construction."
-              : `Modeled from ${data.coverage.schedules_active} schedule${data.coverage.schedules_active === 1 ? "" : "s"}: ${data.coverage.instances} instance${data.coverage.instances === 1 ? "" : "s"}, ${data.coverage.projected} projected (hollow).`}
+              ? "No scheduled transactions are modeled on this account — the line is flat by construction."
+              : `Modeled from ${data.coverage.schedules_active} scheduled transaction${data.coverage.schedules_active === 1 ? "" : "s"}: ${data.coverage.instances} instance${data.coverage.instances === 1 ? "" : "s"}, ${data.coverage.projected} projected (hollow).`}
             {data.coverage.suggestions_open > 0 && (
               <>
                 {" "}
@@ -795,12 +443,12 @@ export function ForecastChart({ accountPath }: { accountPath: string }) {
             )}
             {(data.coverage.matches_pending ?? 0) > 0 &&
               ` ${data.coverage.matches_pending} awaiting match confirmation (left out as paid).`}
-            {data.first_shortfall && ` Projected below the floor on ${data.first_shortfall}.`}
-            {` Low ${fmtAmount(data.days[geometry.lowIndex]?.balance)} on ${data.days[geometry.lowIndex]?.date}.`}
+            {data.first_shortfall && ` Projected below the floor on ${formatDate(data.first_shortfall)}.`}
+            {` Low ${money(data.days[geometry.lowIndex]?.balance)} on ${formatDate(data.days[geometry.lowIndex]?.date)}.`}
             {data.pessimistic_low &&
-              Number(data.pessimistic_low.balance) < geometry.floor &&
+              compareMoney(data.pessimistic_low.balance, geometry.floor) < 0 &&
               !data.first_shortfall &&
-              ` Could dip to ${fmtAmount(data.pessimistic_low.balance)} on ${data.pessimistic_low.date} if estimates come in at the edge of their range (shaded).`}
+              ` Could dip to ${money(data.pessimistic_low.balance)} on ${formatDate(data.pessimistic_low.date)} if estimates come in at the edge of their range (shaded).`}
           </p>
         </>
       )}
@@ -809,8 +457,46 @@ export function ForecastChart({ accountPath }: { accountPath: string }) {
 }
 
 /* --------------------------------------------------------------------------
- * Page
+ * Page: forecast first, then scheduled transactions grouped by account
  * ------------------------------------------------------------------------ */
+
+/** A schedule as one account sees it: a transfer is listed under both of
+ * its accounts (#535), the counterparty's copy marked `mirror`, with the
+ * amount in that account's sign. */
+type Row = { schedule: ScheduleOut; mirror: boolean; other?: AccountOut };
+
+/** The other side's leg: flip the sign of a decimal string (no floats). */
+export function negateAmount(value: string | null | undefined): string | null {
+  return value == null ? null : negateMoney(value);
+}
+
+export function groupByAccount(
+  schedules: ScheduleOut[],
+  accounts: AccountOut[],
+): { account: AccountOut; rows: Row[] }[] {
+  const byId = new Map(accounts.map((a) => [a.id, a]));
+  const groups = new Map<string, Row[]>();
+  const push = (accountId: string, row: Row) => {
+    const rows = groups.get(accountId) ?? [];
+    rows.push(row);
+    groups.set(accountId, rows);
+  };
+  for (const s of schedules) {
+    const other = s.counterparty_account_id ? byId.get(s.counterparty_account_id) : undefined;
+    push(s.account_id, { schedule: s, mirror: false, other });
+    if (s.counterparty_account_id) {
+      push(s.counterparty_account_id, { schedule: s, mirror: true, other: byId.get(s.account_id) });
+    }
+  }
+  const due = (r: Row) => r.schedule.next_due ?? "9999-12-31";
+  return [...groups.entries()]
+    .filter(([id]) => byId.has(id))
+    .map(([id, rows]) => ({
+      account: byId.get(id)!,
+      rows: rows.sort((a, b) => due(a).localeCompare(due(b)) || a.schedule.name.localeCompare(b.schedule.name)),
+    }))
+    .sort((a, b) => a.account.name.localeCompare(b.account.name));
+}
 
 export default function Schedules() {
   const qc = useQueryClient();
@@ -824,21 +510,23 @@ export default function Schedules() {
 
   const accounts = useQuery({
     queryKey: ["accounts", "schedules-page"],
-    queryFn: async () =>
-      (
-        await api.GET("/accounts", {
-          params: { query: { include_balances: false, include_hidden: true, include_closed: true } },
-        })
-      ).data ?? [],
+    queryFn: async () => {
+      const { data, error: err } = await api.GET("/accounts", {
+        params: { query: { include_balances: false, include_hidden: true, include_closed: true } },
+      });
+      if (err) throw new Error(errorDetail(err));
+      return data ?? [];
+    },
   });
   const schedules = useQuery({
     queryKey: ["schedules", statusFilter],
-    queryFn: async () =>
-      (
-        await api.GET("/schedules", {
-          params: { query: statusFilter === "all" ? {} : { status: [statusFilter] } },
-        })
-      ).data ?? [],
+    queryFn: async () => {
+      const { data, error: err } = await api.GET("/schedules", {
+        params: { query: statusFilter === "all" ? {} : { status: [statusFilter] } },
+      });
+      if (err) throw new Error(errorDetail(err));
+      return data ?? [];
+    },
   });
   // The open total, not the length of one capped inbox page (#386 review).
   const suggestionCounts = useQuery({
@@ -847,9 +535,16 @@ export default function Schedules() {
   });
   const suggestionsOpen = suggestionCounts.data?.total ?? 0;
 
-  const accountById = new Map((accounts.data ?? []).map((a) => [a.id, a]));
-  const realAccounts = (accounts.data ?? []).filter((a) => !a.is_virtual);
-  const chartAccount = forecastAccount || realAccounts.find((a) => !a.closed_at)?.path || "";
+  const categoryName = useCategoryNames();
+  const allAccounts = accounts.data ?? [];
+  const realAccounts = allAccounts.filter((a) => !a.is_virtual);
+  const accountById = new Map(allAccounts.map((a) => [a.id, a]));
+  const groups = groupByAccount(schedules.data ?? [], realAccounts);
+  const chartAccount =
+    forecastAccount ||
+    groups.find((g) => !g.account.closed_at)?.account.path ||
+    realAccounts.find((a) => !a.closed_at)?.path ||
+    "";
 
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["schedules"] });
@@ -890,9 +585,10 @@ export default function Schedules() {
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
-        <h1 className="text-2xl font-bold">Schedules</h1>
+        <h1 className="text-2xl font-bold">Scheduled transactions</h1>
         <select
           className={selectClass}
+          aria-label="Show status"
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value as typeof statusFilter)}
         >
@@ -905,7 +601,14 @@ export default function Schedules() {
         <Button variant="outline" disabled={detect.isPending} onClick={() => detect.mutate()}>
           Detect now
         </Button>
-        <Button onClick={() => setCreating(true)}>New schedule</Button>
+        <Button
+          onClick={() => {
+            setEditing(null);
+            setCreating(true);
+          }}
+        >
+          New scheduled transaction
+        </Button>
       </div>
       {suggestionsOpen > 0 && (
         <p className="text-sm text-muted-foreground">
@@ -922,6 +625,7 @@ export default function Schedules() {
       {creating && accounts.data && (
         <ScheduleForm
           accounts={accounts.data}
+          defaultAccount={chartAccount}
           onDone={() => {
             setCreating(false);
             refresh();
@@ -931,6 +635,7 @@ export default function Schedules() {
       )}
       {editing && accounts.data && (
         <ScheduleForm
+          key={editing.id}
           accounts={accounts.data}
           existing={editing}
           onDone={() => {
@@ -942,151 +647,296 @@ export default function Schedules() {
       )}
 
       <Card>
-        <Table>
-          <thead>
-            <tr>
-              <Th>Name</Th>
-              <Th>Account</Th>
-              <Th>With</Th>
-              <Th>Cadence</Th>
-              <Th className="text-right">Amount</Th>
-              <Th>Next due</Th>
-              <Th>Status</Th>
-              <Th></Th>
-            </tr>
-          </thead>
-          <tbody>
-            {(schedules.data ?? []).map((s) => {
-              const account = accountById.get(s.account_id);
-              const counterparty = s.counterparty_account_id
-                ? accountById.get(s.counterparty_account_id)
-                : undefined;
-              return (
-                <ScheduleRow
-                  key={s.id}
-                  schedule={s}
-                  accountLabel={account?.path ?? s.account_id}
-                  withLabel={counterparty ? `→ ${counterparty.path}` : ""}
-                  cardPayment={counterparty?.type === "credit_card"}
-                  expanded={expanded === s.id}
-                  onToggle={() => setExpanded(expanded === s.id ? null : s.id)}
-                  onEdit={() => {
-                    setCreating(false);
-                    setEditing(s);
-                  }}
-                  onAction={(verb) => action.mutate({ id: s.id, verb })}
-                />
-              );
-            })}
-            {schedules.data?.length === 0 && (
-              <tr>
-                <Td colSpan={8} className="text-muted-foreground">
-                  No {statusFilter === "all" ? "" : statusFilter + " "}schedules yet — create one, or run
-                  detection and accept what Purser finds.
-                </Td>
-              </tr>
-            )}
-          </tbody>
-        </Table>
-      </Card>
-
-      <Card>
-        <div className="mb-2 flex items-center gap-3">
+        <div className="mb-2 flex flex-wrap items-center gap-3">
           <CardTitle>Account forecast</CardTitle>
           <select
             className={selectClass}
+            aria-label="Forecast account"
             value={chartAccount}
             onChange={(e) => setForecastAccount(e.target.value)}
           >
-            {realAccounts.map((a) => (
-              <option key={a.id} value={a.path}>
-                {a.name} ({a.path})
-              </option>
-            ))}
+            {realAccounts
+              .filter((a) => !a.closed_at || a.path === chartAccount)
+              .map((a) => (
+                <option key={a.id} value={a.path}>
+                  {a.name}
+                </option>
+              ))}
           </select>
         </div>
-        {chartAccount && <ForecastChart accountPath={chartAccount} />}
+        <QueryState query={accounts} what="accounts" />
+        {chartAccount && (
+          <ForecastChart
+            accountPath={chartAccount}
+            currency={realAccounts.find((a) => a.path === chartAccount)?.currency}
+          />
+        )}
       </Card>
+
+      <QueryState
+        query={schedules}
+        what="scheduled transactions"
+        empty={
+          <Card>
+            <p className="text-sm text-muted-foreground">
+              No {statusFilter === "all" ? "" : statusFilter + " "}scheduled transactions yet — create one, or
+              run detection and accept what Purser finds.
+            </p>
+          </Card>
+        }
+      />
+      {groups.map(({ account, rows }) => {
+        const shown = account.path === chartAccount;
+        const next = rows.map((r) => r.schedule.next_due).filter(Boolean).sort()[0];
+        return (
+          <section
+            key={account.id}
+            aria-label={account.name}
+            className={shown ? "rounded-lg ring-2 ring-primary" : undefined}
+          >
+            <Card>
+              <div className="mb-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                <h2 className="text-lg font-semibold">{account.name}</h2>
+                <span className="text-sm text-muted-foreground">
+                  {rows.length} scheduled{next ? ` · next due ${formatDate(next)}` : ""}
+                </span>
+                <span className="grow" />
+                {shown ? (
+                  <span className="text-xs text-muted-foreground">Shown in the forecast</span>
+                ) : (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      setForecastAccount(account.path);
+                      window.scrollTo?.({ top: 0, behavior: "smooth" });
+                    }}
+                  >
+                    Show forecast
+                  </Button>
+                )}
+              </div>
+              <ul className="divide-y divide-border lg:hidden">
+                {rows.map((row) => {
+                  const key = `${account.id}:${row.schedule.id}`;
+                  return (
+                    <ScheduleItem
+                      categoryName={categoryName}
+                      key={key}
+                      row={row}
+                      cardPayment={
+                        !!row.schedule.counterparty_account_id &&
+                        accountById.get(row.schedule.counterparty_account_id)?.type === "credit_card"
+                      }
+                      expanded={expanded === key}
+                      onToggle={() => setExpanded(expanded === key ? null : key)}
+                      onEdit={() => {
+                        setCreating(false);
+                        setEditing(row.schedule);
+                        window.scrollTo?.({ top: 0, behavior: "smooth" });
+                      }}
+                      onAction={(verb) => action.mutate({ id: row.schedule.id, verb })}
+                    />
+                  );
+                })}
+              </ul>
+              <div className="hidden lg:block">
+                <Table className="table-fixed">
+                  <colgroup>
+                    <col className="w-[16%]" />
+                    <col className="w-[11%]" />
+                    <col className="w-[13%]" />
+                    <col className="w-[13%]" />
+                    <col className="w-[11%]" />
+                    <col className="w-[10%]" />
+                    <col className="w-[7%]" />
+                    <col className="w-[19%]" />
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <Th>Payee</Th>
+                      <Th>Memo</Th>
+                      <Th>Category</Th>
+                      <Th>Repeats</Th>
+                      <Th className="text-right">Amount</Th>
+                      <Th>Next due</Th>
+                      <Th>Status</Th>
+                      <Th>
+                        <span className="sr-only">Actions</span>
+                      </Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rows.map((row) => {
+                      const key = `${account.id}:${row.schedule.id}`;
+                      return (
+                        <ScheduleRow
+                          categoryName={categoryName}
+                          key={key}
+                          row={row}
+                          cardPayment={
+                            !!row.schedule.counterparty_account_id &&
+                            accountById.get(row.schedule.counterparty_account_id)?.type === "credit_card"
+                          }
+                          expanded={expanded === key}
+                          onToggle={() => setExpanded(expanded === key ? null : key)}
+                          onEdit={() => {
+                            setCreating(false);
+                            setEditing(row.schedule);
+                            window.scrollTo?.({ top: 0, behavior: "smooth" });
+                          }}
+                          onAction={(verb) => action.mutate({ id: row.schedule.id, verb })}
+                        />
+                      );
+                    })}
+                  </tbody>
+                </Table>
+              </div>
+            </Card>
+          </section>
+        );
+      })}
     </div>
   );
 }
 
-function ScheduleRow({
-  schedule: s,
-  accountLabel,
-  withLabel,
-  expanded,
-  onToggle,
-  onEdit,
-  onAction,
-  cardPayment = false,
-}: {
-  schedule: ScheduleOut;
-  accountLabel: string;
-  withLabel: string;
-  cardPayment?: boolean;
+type RowProps = {
+  row: Row;
+  /** Category path -> name (#541): the table shows names, never paths. */
+  categoryName: PathName;
+  cardPayment: boolean;
   expanded: boolean;
   onToggle: () => void;
   onEdit: () => void;
   onAction: (verb: "pause" | "resume" | "end") => void;
-}) {
+};
+
+function rowLabels({ schedule: s, mirror, other }: Row) {
+  const isTransfer = !!s.counterparty_account_id;
+  const otherName = other?.name ?? "another account";
+  const who = isTransfer
+    ? mirror
+      ? `Transfer from ${otherName}`
+      : `Transfer to ${otherName}`
+    : (s.payee ?? s.name);
+  const amount = mirror ? negateAmount(s.amount) : s.amount;
+  const amountText =
+    s.amount_type === "estimated"
+      ? s.estimate_basis === "counterparty_balance"
+        ? "pays balance"
+        : amount != null
+          ? `~${formatMoney(amount, { currency: s.currency })}`
+          : "from history"
+      : formatMoney(amount, { currency: s.currency });
+  return { isTransfer, who, amountText };
+}
+
+function RowActions({ s, onEdit, onAction }: { s: ScheduleOut } & Pick<RowProps, "onEdit" | "onAction">) {
+  return (
+    <span className="flex flex-wrap gap-1">
+      {s.status !== "ended" && (
+        <Button size="sm" variant="outline" onClick={onEdit}>
+          Edit
+        </Button>
+      )}
+      {s.status === "active" && (
+        <Button size="sm" variant="ghost" onClick={() => onAction("pause")}>
+          Pause
+        </Button>
+      )}
+      {s.status === "paused" && (
+        <Button size="sm" variant="ghost" onClick={() => onAction("resume")}>
+          Resume
+        </Button>
+      )}
+      {s.status !== "ended" && (
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => {
+            if (window.confirm(`End ${s.name}? This is permanent; history stays.`)) onAction("end");
+          }}
+        >
+          End
+        </Button>
+      )}
+    </span>
+  );
+}
+
+function StatusBadge({ status }: { status: string }) {
+  return (
+    <Badge variant={status === "active" ? "green" : status === "paused" ? "amber" : "default"}>{status}</Badge>
+  );
+}
+
+/** Phone layout: one stacked item per scheduled transaction. */
+function ScheduleItem({ row, cardPayment, expanded, onToggle, onEdit, onAction }: RowProps) {
+  const s = row.schedule;
+  const { who, amountText } = rowLabels(row);
+  return (
+    <li className="py-3 text-sm">
+      <div className="flex items-baseline justify-between gap-3">
+        <button
+          className="text-left font-medium underline-offset-2 hover:underline"
+          aria-expanded={expanded}
+          onClick={onToggle}
+        >
+          {who}
+        </button>
+        <span className="whitespace-nowrap font-mono">{amountText}</span>
+      </div>
+      <p className="mt-1 text-muted-foreground">
+        {[s.memo, cadenceLabel(s.rrule), s.next_due ? `next ${formatDate(s.next_due)}` : null].filter(Boolean).join(" · ")}
+      </p>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <StatusBadge status={s.status} />
+        <RowActions s={s} onEdit={onEdit} onAction={onAction} />
+      </div>
+      {expanded && (
+        <div className="mt-2 overflow-x-auto">
+          <InstancesPanel scheduleId={s.id} cardPayment={cardPayment} />
+        </div>
+      )}
+    </li>
+  );
+}
+
+function ScheduleRow({ row, categoryName, cardPayment, expanded, onToggle, onEdit, onAction }: RowProps) {
+  const s = row.schedule;
+  const { isTransfer, who, amountText } = rowLabels(row);
   return (
     <>
       <tr>
         <Td>
-          <button className="text-left font-medium underline-offset-2 hover:underline" onClick={onToggle}>
-            {s.name}
+          <button
+            className="text-left font-medium underline-offset-2 hover:underline"
+            aria-expanded={expanded}
+            onClick={onToggle}
+          >
+            {who}
           </button>
         </Td>
-        <Td className="text-muted-foreground">{accountLabel}</Td>
-        <Td className="text-muted-foreground">{withLabel}</Td>
+        <Td className="text-muted-foreground">{s.memo ?? ""}</Td>
+        <Td
+          className="truncate text-muted-foreground"
+          title={isTransfer || !s.category_path ? undefined : categoryName(s.category_path)}
+        >
+          {isTransfer ? "Transfer" : categoryName(s.category_path)}
+        </Td>
         <Td>{cadenceLabel(s.rrule)}</Td>
-        <Td className="text-right font-mono">
-          {s.amount_type === "estimated" ? (
-            <span title={`estimated: ${s.estimate_basis ?? ""}`} className="text-muted-foreground">
-              {s.estimate_basis === "counterparty_balance"
-                ? "pays balance"
-                : s.amount != null
-                  ? `~${fmtAmount(s.amount)}`
-                  : "from history"}
-            </span>
-          ) : (
-            fmtAmount(s.amount)
-          )}
+        <Td
+          className={`whitespace-nowrap text-right font-mono${s.amount_type === "estimated" ? " text-muted-foreground" : ""}`}
+          title={s.amount_type === "estimated" ? s.estimate_basis ? `Estimated from the ${amountBasisLabel(s.estimate_basis)}` : "Estimated from history" : undefined}
+        >
+          {amountText}
         </Td>
-        <Td>{s.next_due ?? "—"}</Td>
+        <Td className="whitespace-nowrap">{formatDate(s.next_due)}</Td>
         <Td>
-          <Badge variant={s.status === "active" ? "green" : s.status === "paused" ? "amber" : "default"}>{s.status}</Badge>
+          <StatusBadge status={s.status} />
         </Td>
         <Td>
-          <span className="flex flex-wrap gap-1">
-            {s.status !== "ended" && (
-              <Button size="sm" variant="outline" onClick={onEdit}>
-                Edit
-              </Button>
-            )}
-            {s.status === "active" && (
-              <Button size="sm" variant="ghost" onClick={() => onAction("pause")}>
-                Pause
-              </Button>
-            )}
-            {s.status === "paused" && (
-              <Button size="sm" variant="ghost" onClick={() => onAction("resume")}>
-                Resume
-              </Button>
-            )}
-            {s.status !== "ended" && (
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => {
-                  if (window.confirm(`End ${s.name}? This is permanent; history stays.`)) onAction("end");
-                }}
-              >
-                End
-              </Button>
-            )}
-          </span>
+          <RowActions s={s} onEdit={onEdit} onAction={onAction} />
         </Td>
       </tr>
       {expanded && (

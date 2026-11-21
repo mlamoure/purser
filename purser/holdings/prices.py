@@ -291,7 +291,7 @@ def configured_provider(
     if name == TIINGO:
         key = appsettings.price_api_key()
         if not key:
-            return None, "the tiingo provider has no API key (Config, Prices)"
+            return None, "the tiingo provider has no API key (Settings, Prices)"
         return TiingoProvider(key, client=client), None
     return None, f"unknown price provider {name!r}"
 
@@ -727,7 +727,7 @@ class SymbolPrice:
 
 
 def status(session: Session, *, today: date | None = None) -> dict[str, Any]:
-    """What Config, Prices shows: the provider, the newest provider fetch,
+    """What Settings, Prices shows: the provider, the newest provider fetch,
     each open symbol's close in effect today, and the last failure."""
     today = today or clock.ledger_today()
     settings = appsettings.effective()

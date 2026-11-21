@@ -35,3 +35,9 @@ propos(al|e)[- ]by[- ]default
 # (external account identifiers omitted) is the default for every API token.
 read:redacted
 unredacted
+
+# Admin UI pages renamed by the navigation restructure (#542): the Config
+# tabs became one Settings area, "API & MCP Access" became Settings -> Agents &
+# API, and Memories became Agent memory.
+API (&|and|&amp;) MCP Access
+Config ?(->|→|,) ?(Settings|SimpleFIN|Categories|Rules|Memories|Prices)

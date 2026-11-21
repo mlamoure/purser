@@ -12,7 +12,7 @@ MCP tool digests), or register webhooks.
 
 | Type | Fires when |
 | --- | --- |
-| `account.closed` | An account is closed (balancing adjustment posted, feed unmapped). |
+| `account.closed` | An account is closed: its leftover balance posted (to an adjustment category, or for a hand-valued asset as its last change in value against `equity.revaluation`) and its feed unmapped. |
 | `account.deleted` | A duplicate account is hard-deleted via the guarded CLI. |
 | `account.feed_rows_purged` | An account's feed-origin rows are hard-deleted via the guarded `purge-feed-rows` CLI. |
 | `account.moved` | An account moves to a new path (`PATCH /accounts/{id}` with `path`). The payload carries the new `path`, the `from_path`, and `accounts_moved` — the account plus every account beneath it. |
@@ -47,7 +47,9 @@ MCP tool digests), or register webhooks.
 | `transfer.confirmed` | A transfer pair is merged by an explicit confirm. A split loan payment's payload also carries `remainder` (the interest/fee amount) and `remainder_category`; those keys are absent on an ordinary transfer. |
 | `transfer.absorbed` | A late-arriving counterpart is absorbed into an existing transfer. |
 | `transfer.unlinked` | A transfer link is undone. |
-| `valuation.recorded` | A property/loan valuation or holdings snapshot is recorded. |
+| `valuation.recorded` | A loan valuation is recorded. |
+| `asset.stale` | A hand-valued asset's value is older than its `revalue_after_days` (the daily check at 07:20 UTC). Once per stale value: payload `account` (path), `last_valued` (null when never valued), `revalue_after_days`. `whats_new` lists such assets in `stale_assets` on every call until a value is recorded. |
+| `asset.value_changed` | A hand-valued asset's value changed: a value change recorded or reversed, or a feed-reported balance applied. Payload: `account_id`, `path`, `as_of`, `amount` (signed), `transaction_id`, and `reference` or `reverses`. A value set by reconciling emits `account.reconciled` instead. |
 | `variance.threshold` | A matched pair's amount variance exceeds the threshold. |
 
 ### account.reconciled payload

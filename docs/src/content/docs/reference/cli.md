@@ -119,10 +119,11 @@ re-described, just as the sync skipped it (`skipped_redescribed` in the
 summary). Commits per fetch, so an interrupted replay keeps its progress and
 re-running is safe.
 
-A replay re-derives transactions only. A loan or property balance and a
+A replay re-derives transactions only. A loan balance, a feed-mapped asset's
+reported value and a
 brokerage's holdings describe the moment each fetch was made, and the live
-sync already recorded them, so a replay records no valuations and no
-holdings snapshots.
+sync already recorded them, so a replay records no valuations, value changes
+or holdings snapshots.
 
 ### purser admin purge-retired-rows
 

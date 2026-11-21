@@ -110,11 +110,6 @@ def observe(
             )
         ).scalars()
     }
-    names = {
-        institution.conn_id: institution.name or institution.conn_id
-        for institution in envelope.institutions(payload)
-        if institution.conn_id
-    }
     by_id = {
         sf_account.get("id"): sf_account
         for sf_account in payload.get("accounts") or []
@@ -128,8 +123,12 @@ def observe(
     seen = Observation()
     for issue in envelope.issues(payload):
         if issue.prefix == "con" and issue.conn_id:
+            # Keyed by the issue's own id, as every earlier sync's block is:
+            # the key is the episode memory. Only the name is looked up
+            # through the login (the two ids can differ by a prefix).
+            login = envelope.login_of_issue(payload, issue)
             seen.logins[issue.conn_id] = {
-                "institution": names.get(issue.conn_id, issue.conn_id),
+                "institution": (login.name if login else None) or issue.conn_id,
                 "code": issue.code,
                 "message": issue.msg,
             }
