@@ -18,7 +18,6 @@ here via the usual ``_require``.
 
 import json
 from datetime import date, timedelta
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +37,7 @@ from purser.mcp._registry import (
     withheld_now,
 )
 from purser.mcp.presentation import WIDGETS
-from purser.mcp.privacy import AMOUNT, Emits
+from purser.privacy import AMOUNT, Emits
 
 WIDGET_MIME = "text/html;profile=mcp-app"
 
@@ -340,9 +339,13 @@ def _parse_balance_period(raw: str) -> str | tuple[date, date]:
     description=(
         "Full-resolution balance history for one account (JSON): every stored "
         "change in the window with the balance after it, the delta, and the "
-        "transaction id to drill into, plus the opening balance carried in. "
+        "transaction id to drill into, plus the opening balance carried in, "
+        "so opening plus every delta equals the last point. "
         "Per-transaction IS the full resolution here — that is the grain the "
-        "running-balance store keeps and the register shows. The compact "
+        "running-balance store keeps and the register shows — so it is the "
+        "postings history for every account (method is always postings): a "
+        "brokerage account's cash without its holdings, a loan's postings "
+        "without its valuations. The compact "
         "balance_history tool references this via series_uri; period is "
         "30d | 90d | 1y | all (ending today; all is the whole history), or an "
         "explicit START_END window of ISO dates such as 2026-01-01_2026-03-31, "
@@ -356,10 +359,10 @@ def _parse_balance_period(raw: str) -> str | tuple[date, date]:
 async def balance_history_series(account: str, period: str) -> str:
     window = _parse_balance_period(period)
 
-    withheld = await withheld_now()
+    withheld = withheld_now()
 
     def op(session: Session) -> str:
-        from purser import balances, ledger, networth
+        from purser import balances, ledger
 
         _require(security.can_read, "read")
         target = ledger.resolve_account(session, account)
@@ -372,11 +375,10 @@ async def balance_history_series(account: str, period: str) -> str:
         else:
             start, end = named_balance_window(session, window, today=clock.ledger_today())
 
-        rows, truncated = balances.change_points(
+        # The postings history, as GET /accounts/{id}/balance/series serves it
+        # (one function): opening + every delta = the last point (decision 129).
+        opening, rows, truncated = balances.change_series(
             session, target.id, start=start, end=end, limit=_BALANCE_POINT_CAP
-        )
-        opening_map, method = networth.account_balance_series(
-            session, target, dates=[start - timedelta(days=1)]
         )
         points = [
             {
@@ -403,8 +405,8 @@ async def balance_history_series(account: str, period: str) -> str:
                 "start": start.isoformat(),
                 "end": end.isoformat(),
                 "currency": target.currency.strip(),
-                "method": method,
-                "opening": str(next(iter(opening_map.values()), Decimal("0"))),
+                "method": "postings",
+                "opening": str(opening),
                 "points": points,
                 "truncated": truncated,
                 **extra,

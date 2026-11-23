@@ -13,6 +13,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from purser.core import rules as core_rules
+from tests.conftest import today
 
 AMOUNTS = st.decimals(
     min_value=Decimal("-9999.99"),
@@ -265,7 +266,7 @@ def _row(
             "account": "assets.checking",
             "category": "expenses.uncategorized",
             "amount": amount,
-            "date": (day or date.today()).isoformat(),
+            "date": (day or today()).isoformat(),
             "payee": payee,
             "status": status,
         },
@@ -334,7 +335,7 @@ class TestPrecedence:
                     "account": "assets.checking",
                     "category": "expenses.dining",
                     "amount": "-20.00",
-                    "date": date.today().isoformat(),
+                    "date": today().isoformat(),
                     "payee": "Whole Foods",
                     "status": "posted",
                 },
@@ -504,14 +505,13 @@ class TestApplyHistory:
 
         monkeypatch.setattr(rules_service, "_HISTORY_BATCH", 3)
         monkeypatch.setattr(rules_service, "_SCAN_CAP", 4)
-        today = date.today()
         for days_ago in range(5):
-            _row(client, "Example Hardware", day=today - timedelta(days=days_ago))
+            _row(client, "Example Hardware", day=today() - timedelta(days=days_ago))
         pending = [
-            _row(client, "Example Taqueria", day=today - timedelta(days=10 + i)) for i in range(4)
+            _row(client, "Example Taqueria", day=today() - timedelta(days=10 + i)) for i in range(4)
         ]
         for i in range(3):
-            _row(client, "Example Taqueria", status="posted", day=today - timedelta(days=20 + i))
+            _row(client, "Example Taqueria", status="posted", day=today() - timedelta(days=20 + i))
         predicate = {"match_field": "payee", "match_mode": "contains", "match_text": "taqueria"}
         rule_id = client.post(
             "/rules",
@@ -580,7 +580,7 @@ class TestApplyHistory:
                     "from_account": "assets.checking",
                     "to_account": "assets.savings",
                     "amount": "40.00",
-                    "date": date.today().isoformat(),
+                    "date": today().isoformat(),
                     "description": "EXAMPLE GYM DUES SAVINGS SWEEP",
                     "status": status,
                 },

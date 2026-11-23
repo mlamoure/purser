@@ -121,11 +121,12 @@ function EventDetails({ event }: { event: Event }) {
     !!shared?.requested_accounts?.length ||
     !!shared?.returned_dates ||
     Object.keys(shared?.requested_coverage ?? {}).length > 0;
+  const privacy = event.privacy;
   const hasPrivacy =
+    !!privacy ||
     !!shared?.withheld?.length ||
     !!event.extra_fields.length ||
-    !!event.requested_extra.length ||
-    event.channel === "rest";
+    !!event.requested_extra.length;
   const grant = event.identity.authorization;
   const grantBy =
     typeof grant?.granted_by === "string" ? grant.granted_by : null;
@@ -229,23 +230,41 @@ function EventDetails({ event }: { event: Event }) {
         {hasPrivacy && (
           <div>
             <dt className="font-medium">Privacy</dt>
-            {!!shared?.withheld?.length && (
-              <dd className="mt-1">Withheld: {fieldList(shared.withheld)}</dd>
+            {privacy && privacy.requested.length > 0 && (
+              <dd className="mt-1">
+                Privacy requested: the caller asked to leave out{" "}
+                {fieldList(privacy.requested).toLowerCase()}.
+              </dd>
             )}
+            {(privacy?.withheld.length ?? shared?.withheld?.length ?? 0) > 0 && (
+              <dd>
+                Withheld from this answer:{" "}
+                {fieldList(privacy?.withheld ?? shared?.withheld ?? [])}
+              </dd>
+            )}
+            {privacy && privacy.identifiable.length > 0 && (
+              <dd>
+                Identifiable data returned: {fieldList(privacy.identifiable)}
+              </dd>
+            )}
+            {privacy &&
+              privacy.requested.length === 0 &&
+              privacy.identifiable.length === 0 &&
+              (event.outcome === "shared" || event.outcome === "empty") && (
+                <dd className="text-muted-foreground">
+                  No merchant names, descriptions or individual amounts were
+                  returned.
+                </dd>
+              )}
             {!!event.extra_fields.length && (
               <dd>
-                Returned beyond privacy defaults: {fieldList(event.extra_fields)}
+                Included on request: {fieldList(event.extra_fields)}
               </dd>
             )}
             {!!event.requested_extra.length && (
               <dd>
                 Additional fields requested: {fieldList(event.requested_extra)}. A
                 request does not prove those fields were returned.
-              </dd>
-            )}
-            {event.channel === "rest" && (
-              <dd className="text-muted-foreground">
-                REST does not apply the MCP privacy defaults.
               </dd>
             )}
           </div>
@@ -361,10 +380,13 @@ function EventCard({ event }: { event: Event }) {
             >
               {OUTCOMES[event.outcome] ?? event.outcome}
             </Badge>
-            {!!event.extra_fields.length && (
-              <Badge variant="amber">Beyond privacy defaults</Badge>
+            {!!event.privacy?.requested.length && (
+              <Badge variant="green">Privacy used</Badge>
             )}
-            {!!shared?.withheld?.length && <Badge>Some fields withheld</Badge>}
+            {!!event.privacy?.identifiable.length && (
+              <Badge variant="amber">Identifiable</Badge>
+            )}
+            {!!event.extra_fields.length && <Badge>External ids included</Badge>}
           </div>
         </div>
       </summary>
@@ -390,6 +412,9 @@ export default function AuditLog() {
     since,
     until,
     extra: params.get("extra") === "true",
+    ...(params.get("privacy")
+      ? { privacy: params.get("privacy") as Filters["privacy"] }
+      : {}),
     ...(params.get("integration_id")
       ? { integration_id: params.get("integration_id")! }
       : {}),
@@ -557,6 +582,19 @@ export default function AuditLog() {
             </select>
           </label>
           <label className="min-w-0 space-y-1 text-sm">
+            <span>Privacy use</span>
+            <select
+              aria-label="Privacy use"
+              className={selectClass}
+              value={filters.privacy ?? ""}
+              onChange={(e) => update("privacy", e.target.value)}
+            >
+              <option value="">All calls</option>
+              <option value="requested">Privacy used (fields withheld on request)</option>
+              <option value="identifiable">Identifiable data returned</option>
+            </select>
+          </label>
+          <label className="min-w-0 space-y-1 text-sm">
             <span>From (local time)</span>
             <Input
               type="datetime-local"
@@ -584,7 +622,7 @@ export default function AuditLog() {
               checked={filters.extra}
               onChange={(e) => update("extra", e.target.checked ? "true" : "")}
             />
-            Only fields returned beyond privacy defaults
+            Only calls that included external identifiers
           </label>
         </div>
         <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -648,7 +686,10 @@ export default function AuditLog() {
             rows.
           </p>
         )}
-        {(filters.account_id || filters.data_type || filters.extra) && (
+        {(filters.account_id ||
+          filters.data_type ||
+          filters.extra ||
+          filters.privacy) && (
           <p className="mt-2 text-xs text-muted-foreground">
             These filters require recorded response evidence. Historical entries
             without that evidence cannot match them.

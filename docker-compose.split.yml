@@ -8,7 +8,7 @@ services:
       PURSER_DISABLE_SCHEDULER: "1"
   worker:
     # The same image as the api service in docker-compose.yml.
-    image: ghcr.io/mlamoure/purser:v2026.11.5
+    image: ghcr.io/mlamoure/purser:v2026.11.6
     build: .
     restart: unless-stopped
     cap_drop: [ALL]
@@ -20,3 +20,4 @@ services:
     environment:
       PURSER_DATABASE_URL: postgresql+psycopg://purser:${POSTGRES_PASSWORD:-purser}@postgres:5432/purser
       PURSER_ENCRYPTION_KEY: ${PURSER_ENCRYPTION_KEY:?generate with 'purser keygen' and record it — see https://mlamoure.github.io/purser/tutorials/ai-setup/}
+      PURSER_TIMEZONE: ${PURSER_TIMEZONE:-UTC}

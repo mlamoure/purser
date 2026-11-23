@@ -106,6 +106,12 @@ def _perspective_leg(tx: Transaction, account_id: uuid.UUID | None) -> Posting |
     when given; otherwise a one-sided row's only real leg, and for a two-leg
     row with no perspective its outgoing (negative) leg — the payer's view."""
     real = _real_legs(tx)
+    if tx.split_account_id is not None:
+        # A split is seen only through its own leg, the bank line (decision
+        # 118): its [Account] lines are legs of the split, never a second
+        # perspective that could settle a bill on another account.
+        own = next((p for p in real if p.account_id == tx.split_account_id), None)
+        return own if account_id is None or account_id == tx.split_account_id else None
     if account_id is not None:
         return next((p for p in real if p.account_id == account_id), None)
     if len(real) == 1:
@@ -123,7 +129,9 @@ def _match_input(
         return None
     real = _real_legs(tx)
     counterparty = (
-        next((p.account_id for p in real if p.id != leg.id), None) if len(real) == 2 else None
+        next((p.account_id for p in real if p.id != leg.id), None)
+        if len(real) == 2 and tx.split_account_id is None
+        else None
     )
     # normalized_name is gone (#137: replaced by the blind index, an HMAC that
     # is NOT normalized text) — recompute the normalized form from the decrypted
@@ -206,7 +214,9 @@ def _candidates_for(
             or_(
                 Transaction.origin == "import",
                 and_(Transaction.origin == "system", Transaction.content_hash.is_not(None)),
-                Transaction.id.in_(two_real_legs),
+                # A split is not a transfer (decision 118): it settles a bill
+                # only through a bank lineage, like any one-sided row.
+                and_(Transaction.id.in_(two_real_legs), Transaction.split_account_id.is_(None)),
             )
         )
         .cte("bank_corrections", recursive=True)
@@ -1430,12 +1440,9 @@ def _one_sided_import_rows(
 
 
 def _is_split(tx: Transaction) -> bool:
-    return (
-        core.split_line_count(
-            [core.Leg(p.account_id, Decimal(p.amount), p.account.is_virtual) for p in tx.postings]
-        )
-        > 0
-    )
+    """A split transaction (decisions 87 and 118): the row carries the split
+    marker. Never in the transfer pool, whatever its legs."""
+    return tx.split_account_id is not None
 
 
 @dataclass(frozen=True)
@@ -1458,7 +1465,8 @@ def _transfer_sides(tx: Transaction) -> tuple[core.TransferShape, Posting, Posti
     if any(p.account is None for p in tx.postings):
         return None
     shape = core.transfer_shape(
-        [core.Leg(p.account_id, Decimal(p.amount), p.account.is_virtual) for p in tx.postings]
+        [core.Leg(p.account_id, Decimal(p.amount), p.account.is_virtual) for p in tx.postings],
+        split=tx.split_account_id is not None,
     )
     if shape is None:
         return None
@@ -2226,6 +2234,9 @@ def run_matching_job() -> None:
             # What the sweep left unlinked: the inbox's transfer_pair cards
             # and the transfer.candidate events (#386).
             stats.update(transfers.sync_candidate_suggestions(session))
+            from purser import splits
+
+            stats.update(splits.sync_split_suggestions(session))
             session.commit()
             log.info("scheduled matching complete", **stats)
         except Exception:

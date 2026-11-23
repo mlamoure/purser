@@ -12,6 +12,7 @@ from hypothesis import strategies as st
 from sqlalchemy import Engine, text
 
 from purser.core import matching
+from tests.conftest import today
 from tests.test_matching import _imported
 from tests.test_mcp import LiveServer, _mcp_call, live_server  # noqa: F401
 from tests.test_schedules import seeded  # noqa: F401
@@ -30,7 +31,7 @@ def create(
             "name": name,
             "account": "assets.checking",
             "rrule": "FREQ=WEEKLY",
-            "dtstart": date.today().isoformat(),
+            "dtstart": today().isoformat(),
             "amount": amount,
             "amount_type": "estimated",
             "estimate_basis": "last",
@@ -47,7 +48,7 @@ def evidence(state: str, value: str | None = None, source: str = "invoice") -> d
     return {
         "state": state,
         "source": source,
-        "as_of": date.today().isoformat(),
+        "as_of": today().isoformat(),
         "note": "Synthetic invoice for this occurrence",
         **({"value": value} if value else {}),
     }
@@ -98,7 +99,7 @@ def test_independent_dimensions_and_occurrence_isolation(
 def test_date_confirmation_does_not_freeze_amount_refresh(seeded: None, client: TestClient) -> None:
     sid, rows = create(client, name="Example payroll", amount="1000")
     tx = rows[0]["transaction_id"]
-    moved = (date.today() + timedelta(days=2)).isoformat()
+    moved = (today() + timedelta(days=2)).isoformat()
     update(client, tx, date=evidence("confirmed", moved, "payroll"))
     response = client.patch(f"/schedules/{sid}", json={"amount": "1100"})
     assert response.status_code == 200, response.text
@@ -129,7 +130,7 @@ def test_ambiguous_reimbursement_review_match_unmatch_and_replay(
             migrated_engine,
             "assets.checking",
             "100",
-            date.today(),
+            today(),
             payee="Example reimbursement",
         )
         for _ in range(2)
@@ -243,7 +244,7 @@ def test_card_statement_and_actual_keep_original_on_both_perspectives(
             "account": "assets.checking",
             "counterparty_account": "liabilities.example",
             "rrule": "FREQ=WEEKLY",
-            "dtstart": date.today().isoformat(),
+            "dtstart": today().isoformat(),
             "amount": "-100",
             "amount_type": "estimated",
             "estimate_basis": "last",
@@ -259,7 +260,7 @@ def test_card_statement_and_actual_keep_original_on_both_perspectives(
         json={
             "transaction_id": tx,
             "statement_balance": "125",
-            "statement_date": date.today().isoformat(),
+            "statement_date": today().isoformat(),
         },
     )
     assert statement.status_code == 200, statement.text
@@ -286,7 +287,7 @@ def test_card_statement_and_actual_keep_original_on_both_perspectives(
             from_account_ref="assets.checking",
             to_account_ref="liabilities.example",
             amount=Decimal("125"),
-            date=date.today(),
+            date=today(),
             requested_status=core.Status.POSTED,
             origin=core.Origin.SYSTEM,
             token=None,
@@ -340,12 +341,15 @@ def test_real_mcp_independent_updates_and_privacy(
     assert "error" not in changed, changed
     assert read["amount_estimated"] is False
     assert read["date_estimated"] is True
-    assert (
-        client.put("/config", json={"privacy_purchase": True, "privacy_amount": True}).status_code
-        == 200
-    )
     (private,) = _mcp_call(
-        live_server.url, token, [("get_schedule_occurrence", {"transaction_id": tx})]
+        live_server.url,
+        token,
+        [
+            (
+                "get_schedule_occurrence",
+                {"transaction_id": tx, "withhold": ["payee", "description", "amount"]},
+            )
+        ],
     )
     assert "error" not in private, private
     assert "value" not in private["amount"]
@@ -404,7 +408,7 @@ def test_incompatible_actuals_cannot_settle_even_manually(
         migrated_engine,
         path,
         "100" if change == "direction" else "-100",
-        date.today(),
+        today(),
         payee="Example landscaping",
         currency="EUR" if change == "currency" else "USD",
     )
@@ -435,7 +439,7 @@ def test_one_posted_movement_has_one_winner_under_concurrent_matches(
         migrated_engine,
         "assets.checking",
         "-100",
-        date.today(),
+        today(),
         payee="Example landscaping",
     )
     # Use the same authenticated actor as normal writes, with two independent sessions.
@@ -473,7 +477,7 @@ def test_date_variance_and_projected_uncertainty(
         migrated_engine,
         "assets.checking",
         "-125",
-        date.today() + timedelta(days=2),
+        today() + timedelta(days=2),
         payee="Example landscaping",
     )
     assert (
@@ -507,7 +511,7 @@ def test_upgrade_retains_current_snapshot_without_rewriting_ledger(
 
     _, rows = create(client)
     tx = rows[0]["transaction_id"]
-    moved = date.today() + timedelta(days=2)
+    moved = today() + timedelta(days=2)
     changed = client.patch(
         f"/transactions/{tx}", json={"amount": "-123", "date": moved.isoformat()}
     )
@@ -535,7 +539,7 @@ def test_upgrade_retains_current_snapshot_without_rewriting_ledger(
             )
             assert snapshot["original_amount"] == Decimal("-123")
             assert snapshot["original_date"] == moved
-            assert snapshot["occurrence_date"] == date.today()
+            assert snapshot["occurrence_date"] == today()
             assert snapshot["original_amount_basis"] == "override"
             assert snapshot["original_backfilled"] is True
             assert snapshot["amount_state"] is None and snapshot["date_state"] is None

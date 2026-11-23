@@ -1,6 +1,7 @@
 import { screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { apiMock, mockApi, ok } from "../../test/api";
+import { accountOut } from "../../test/fixtures";
 import { renderWithProviders } from "../../test/render";
 import { meQuery } from "../../lib/me";
 import Connections from "./Connections";
@@ -126,6 +127,7 @@ describe("Banks and accounts (issues #489, #561)", () => {
 describe("Re-fetch a date range (issue #489)", () => {
   it("posts the range and the chosen accounts and reports the result", async () => {
     const { user } = setup({
+      "GET /accounts": ok([accountOut({ name: "Everyday Checking", path: "assets.checking" })]),
       "POST /connections/{connection_id}/refetch": ok({
         raw_fetch_id: "rf-1",
         start: "2026-04-01",
@@ -135,6 +137,10 @@ describe("Re-fetch a date range (issue #489)", () => {
         skipped: 9,
       }),
     });
+    // Each mapped account is offered by its name (#552); the path is the value sent.
+    expect(await screen.findByRole("option", { name: "Everyday Checking" })).toHaveValue(
+      "assets.checking",
+    );
     const from = await screen.findByLabelText("From");
     await user.clear(from);
     await user.type(from, "2026-04-01");

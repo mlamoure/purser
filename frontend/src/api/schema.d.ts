@@ -121,6 +121,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/accounts/{account_id}/balance/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Balance History
+         * @description Balance history for a chart: the account's reported end-of-day
+         *     balance (holdings added for brokerage, valuations for loans) on dates
+         *     sampled across the window — daily for a year at the default cap,
+         *     weekly for five. ``start`` clamps forward to the account's first
+         *     activity. ``change``, ``change_pct`` and the extremes are computed
+         *     server-side. For every stored change of the postings basis, use
+         *     ``/balance/series``.
+         */
+        get: operations["balance_history_accounts__account_id__balance_history_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/accounts/{account_id}/balance/series": {
         parameters: {
             query?: never;
@@ -132,12 +158,21 @@ export interface paths {
          * Balance Series
          * @description Balance history for one account over ``[start, end]``, one point per
          *     transaction that moved it, plus the ``opening`` balance carried into the
-         *     window.
+         *     window, so ``opening`` plus every ``delta`` equals the last point.
          *
-         *     REST is not token-budgeted, so this is the full per-change series — the
-         *     downsampled, narrated form is MCP ``balance_history``. Both compose on
-         *     the same service functions, so they can never disagree. ``truncated`` is
-         *     set rather than silently dropping the tail past 5000 points.
+         *     This is the postings history for every account type (``method`` is
+         *     always ``postings``): a brokerage account's points and opening are its
+         *     cash, a loan's its postings. A holdings market value or a valuation has
+         *     no per-transaction grain; for the balance the account reports day by
+         *     day (holdings added, valuations used), read ``/balance/history``.
+         *
+         *     REST is not token-budgeted, so this is the full per-change series.
+         *     ``truncated`` is set rather than silently dropping the tail past 5000
+         *     points.
+         *
+         *     ``withhold=amount`` collapses it to one end-of-day balance per day, with
+         *     no deltas or transaction ids: per change, the deltas are the amounts and
+         *     the balances give them away by subtraction (#613).
          */
         get: operations["balance_series_accounts__account_id__balance_series_get"];
         put?: never;
@@ -209,6 +244,30 @@ export interface paths {
          *     the account closes at zero. `dry_run` shows the figures first.
          */
         post: operations["dispose_asset_accounts__account_id__dispose_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/accounts/{account_id}/holdings/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Holdings Summary
+         * @description The account's newest holdings set, from the feed or tracked by hand,
+         *     with each line's unrealized gain (amount and percent) and share of the
+         *     account, a cash line and totals. Lines are largest first. ``cost_basis``
+         *     and ``unrealized_gain`` total only the lines whose gain is known, so a
+         *     line without a basis never counts as all gain. Brokerage accounts only.
+         */
+        get: operations["holdings_summary_accounts__account_id__holdings_summary_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -374,6 +433,48 @@ export interface paths {
          */
         post: operations["reopen_account_accounts__account_id__reopen_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/accounts/{account_id}/starting-balance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Set Starting Balance
+         * @description Start a bank-fed checking, savings, cash or credit-card account from
+         *     the balance its bank reported in the latest sync (decision 123).
+         *
+         *     A bank feed delivers about three months of transactions and no balance
+         *     from before them. Purser posts ONE entry for the difference between the
+         *     bank's balance and the account's ledger, against the system account
+         *     ``equity.opening_balances`` (neither income nor spending), dated the day
+         *     before the account's earliest transaction. It chooses the date, the sign
+         *     and the basis; the caller passes none of them.
+         *
+         *     Purser then keeps the entry in step: when older history arrives (an
+         *     import, a backfill), it gives way by exactly those rows, so no balance on
+         *     or after the account's first feed transaction changes. It is not a
+         *     reconciliation: no claim is recorded and ``reconciled_through`` does not
+         *     move.
+         *
+         *     Safe to repeat: an account that has one is answered with it (``status:
+         *     unchanged``). Mapping a new account in the UI does this by default.
+         */
+        post: operations["set_starting_balance_accounts__account_id__starting_balance_post"];
+        /**
+         * Remove Starting Balance
+         * @description Take an account's starting balance out again: the entry is reversed to
+         *     zero and Purser stops keeping it. ``status: none`` when there was none.
+         */
+        delete: operations["remove_starting_balance_accounts__account_id__starting_balance_delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -943,6 +1044,73 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/config/ai/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ai Models
+         * @description The models the provider offers, for picking one (#640). One GET to the
+         *     server's model list; a server without one says so instead of failing.
+         *     The stored key is sent only to the saved provider and base URL (#667).
+         */
+        post: operations["ai_models_config_ai_models_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/config/ai/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Ai Test
+         * @description Test connection (#640): reachable, authenticated, and the model
+         *     answers in the JSON shape Purser parses. At most two requests to the
+         *     provider; messages never contain the key or the provider's reply. The
+         *     stored key is sent only to the saved provider and base URL (#667).
+         */
+        post: operations["ai_test_config_ai_test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/config/network": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Network
+         * @description How Purser is reached, the address agents connect to, and whether the
+         *     address this request used is one agents can use (#632). Admin scope:
+         *     instance configuration, like the rest of /config.
+         */
+        get: operations["get_network_config_network_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/config/{key}": {
         parameters: {
             query?: never;
@@ -1000,6 +1168,49 @@ export interface paths {
         get: operations["feed_inventory_connections_inventory_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/connections/map-accounts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Map Accounts
+         * @description Map the bank accounts SimpleFIN delivers onto ledger accounts, in one
+         *     batch (decision 126; write scope).
+         *
+         *     Without ``accounts`` it answers the **plan** and writes nothing: for each
+         *     delivered account no ledger account takes, a proposed name, type and
+         *     ledger path, derived from what the feed states (its name, its bank, its
+         *     balance and whether it lists holdings; the feed carries no type). A
+         *     duplicate, the same account through a second login at the same bank, is
+         *     proposed as ``ignore``.
+         *
+         *     With ``accounts`` it applies those lines: each names a delivered account
+         *     by its ``ref`` and takes the proposal unless it overrides a field. The
+         *     whole batch is checked first and lands whole or not at all; ``dry_run``
+         *     answers the same without writing. Mapping imports what was already
+         *     fetched and, by default, starts a cash or card account from the bank's
+         *     balance. **An account's type cannot be changed afterwards**, so confirm
+         *     the plan with the person before applying it.
+         *
+         *     A line onto an existing account that already takes a feed is refused,
+         *     naming that feed, unless it says ``replace_feed`` and the token is an
+         *     admin's (decision 134); such a line names the feed it replaces in
+         *     ``replaces``, the dry run included.
+         *
+         *     The bank's account ids and balances are never part of the answer.
+         */
+        post: operations["map_accounts_connections_map_accounts_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1774,7 +1985,9 @@ export interface paths {
          *     the remaining history would go below zero on some date. A trade's cash
          *     goes with it, through the reversal pair every posted correction uses:
          *     Purser's own cash row is corrected to zero, and a linked row gets its
-         *     category back. The body (a `note`) is optional.
+         *     category back. Reversing a split reverses its cash-in-lieu sale too
+         *     (`cash_in_lieu` in the answer); that sale is never reversed alone. The
+         *     body (a `note`) is optional.
          */
         post: operations["reverse_position_event_position_events__event_id__reverse_post"];
         delete?: never;
@@ -1820,7 +2033,17 @@ export interface paths {
         put?: never;
         /**
          * Record Position Event
-         * @description Record a `set_quantity`, `buy`, `sell`, `vest` or `transfer_out`.
+         * @description Record a `set_quantity`, `buy`, `sell`, `vest`, `transfer_out` or
+         *     `split`.
+         *
+         *     A `split` takes `split_numerator` and `split_denominator` (2 and 1 for a
+         *     2:1 forward split, 1 and 10 for a 1:10 reverse one): at the start of
+         *     `occurred_on` every share held the day before becomes that ratio of
+         *     shares (six places), each lot keeping its total basis, acquisition date
+         *     and term. With `cash_in_lieu`, the fractional share left leaves in a
+         *     `sell` whose proceeds are that amount (`cash_in_lieu` in the answer),
+         *     reversed with the split. Reversing the split restores the shares, the
+         *     lots and the cash exactly.
          *
          *     On a position that tracks lots, a `sell` or `transfer_out` names the
          *     lots it draws on (`lot_method` or `lots`; 422 `allocation_required`
@@ -1956,7 +2179,11 @@ export interface paths {
          */
         get: operations["list_rules_rules_get"];
         put?: never;
-        /** Create Rule */
+        /**
+         * Create Rule
+         * @description Create a rule, a draft unless `activate`. `securities_trade` makes a
+         *     categorize rule mark its rows as a securities trade (decision 119).
+         */
         post: operations["create_rule_rules_post"];
         delete?: never;
         options?: never;
@@ -2389,7 +2616,10 @@ export interface paths {
          * @description accept / edit_then_accept apply the draft: a schedule suggestion
          *     creates the schedule (active, materialized); a transfer_link suggestion
          *     creates the rule as a DRAFT and returns `projected_links` — activate it
-         *     through POST /rules/{rule_id}/state with that count confirmed. reject is
+         *     through POST /rules/{rule_id}/state with that count confirmed; a trade_rule
+         *     suggestion creates its categorize rule as a DRAFT and returns
+         *     `projected_matches` (activate it, then apply-history to mark history,
+         *     dry run first). reject is
          *     durable and scoped; snooze hides it until a date. Nothing ever
          *     auto-accepts, and nothing here activates a rule. A match suggestion's
          *     accept confirms the proposal (marking its bank row reviewed) and reject
@@ -2399,7 +2629,10 @@ export interface paths {
          *     /matching/confirm-transfer does: `transfer` names the merged row and the
          *     transfer_link suggestion it proposed) and reject remembers that the pair
          *     is not a transfer — the automatic link paths leave it alone too; nothing
-         *     to edit, and a pair whose rows moved on withdraws it with a 422.
+         *     to edit, and a pair whose rows moved on withdraws it with a 422. A split
+         *     suggestion's accept splits the row with the draft's lines (or the
+         *     edited `lines`, edit_then_accept) through PUT /transactions/{id}/split;
+         *     a row that stopped being splittable answers 422.
          */
         post: operations["decide_suggestions__suggestion_id__decide_post"];
         delete?: never;
@@ -2502,6 +2735,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/transactions/present": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Present
+         * @description Show the person transactions without passing their details through
+         *     the caller (#613; the MCP `present` tool). Returns a link that opens
+         *     those rows, in full detail and in the order given, for the signed-in
+         *     person in Purser's web app; an integration replies with the link instead
+         *     of repeating payees, descriptions or amounts. Up to 50 ids; the note (200
+         *     characters or fewer) is shown above the rows. The link carries only ids
+         *     and the note. A read: nothing changes.
+         */
+        post: operations["present_transactions_present_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/transactions/review-batch": {
         parameters: {
             query?: never;
@@ -2553,10 +2812,11 @@ export interface paths {
         };
         /**
          * Selection
-         * @description The rows an agent showed the user with MCP `present` (#437), in full
-         *     detail and in the order given. A signed-in person's view: the point of
-         *     `present` is that the values reach the user without passing through the
-         *     model, so an API token is refused.
+         * @description The rows an agent showed the person with `present` (MCP tool or
+         *     `POST /transactions/present`; #437, #613), in full detail and in the
+         *     order given. A signed-in person's view: the point of `present` is that
+         *     the values reach the person without passing through the model, so an API
+         *     token is refused.
          */
         get: operations["selection_transactions_selection_get"];
         put?: never;
@@ -2610,7 +2870,9 @@ export interface paths {
          *     expected/pending transfer is the leg of `account` (a schedule instance
          *     defaults to its schedule's account) and moves both legs, never the
          *     direction; a posted or bank-linked transfer is refused with how to
-         *     correct it.
+         *     correct it. securities_trade=true marks a feed-holdings brokerage row a
+         *     securities trade and proposes a rule for rows like it in the inbox
+         *     (`suggestion_id`).
          */
         patch: operations["update_transaction_transactions__tx_id__patch"];
         trace?: never;
@@ -2650,6 +2912,61 @@ export interface paths {
          *     instances of active schedules only.
          */
         post: operations["reset_instance_transactions__tx_id__reset_instance_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/transactions/{tx_id}/split": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Split Transaction
+         * @description Split a row across categories and `[Account]` lines, or replace the
+         *     lines of a split (decision 118). The row keeps its real leg at the
+         *     bank's amount; the lines must sum to it. An account line's
+         *     `backing_ids` merge that account's bank rows into the split, so nothing
+         *     is counted twice; rows that backed it before and are not named again
+         *     come back. A posted row becomes a reversal + replacement; a manual
+         *     pending row changes in place; a bank pending is refused until it posts.
+         *     `dry_run` validates and writes nothing.
+         */
+        put: operations["split_transaction_transactions__tx_id__split_put"];
+        post?: never;
+        /**
+         * Unsplit Transaction
+         * @description Remove a split: the row goes back to one category (the uncategorized
+         *     placeholder unless `category` names one) and every backing row comes
+         *     back exactly as it was.
+         */
+        delete: operations["unsplit_transaction_transactions__tx_id__split_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/transactions/{tx_id}/split/candidates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Split Backing Candidates
+         * @description Bank rows that could back an account line of this row's split: live
+         *     single rows on that account within 7 days of the row, nearest amount
+         *     then nearest date first; the rows already backing it come first.
+         */
+        get: operations["split_backing_candidates_transactions__tx_id__split_candidates_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2899,6 +3216,12 @@ export interface components {
             balance_as_of?: string | null;
             /** Balance Method */
             balance_method?: string | null;
+            /**
+             * Balance True Up
+             * @description Brokerage accounts whose holdings come from the feed: after each sync, post a labelled balance adjustment so cash plus holdings equal the broker's balance. Always false on other accounts.
+             * @default false
+             */
+            balance_true_up: boolean;
             bank_snapshot: components["schemas"]["BankSnapshot"];
             /** Closed At */
             closed_at: string | null;
@@ -2992,6 +3315,12 @@ export interface components {
             balance_as_of?: string | null;
             /** Balance Method */
             balance_method?: string | null;
+            /**
+             * Balance True Up
+             * @description Brokerage accounts whose holdings come from the feed: after each sync, post a labelled balance adjustment so cash plus holdings equal the broker's balance. Always false on other accounts.
+             * @default false
+             */
+            balance_true_up: boolean;
             /** Closed At */
             closed_at: string | null;
             /** Connection Id */
@@ -3093,6 +3422,11 @@ export interface components {
              * @description A hand-valued asset (type property) only: what it is, a label and an icon. Absent leaves it unchanged. Write scope.
              */
             asset_kind?: ("house" | "land" | "car" | "boat" | "rv" | "jewelry" | "art" | "equipment" | "other") | null;
+            /**
+             * Balance True Up
+             * @description A brokerage account whose holdings come from the feed only (422 otherwise): after each sync, Purser compares the balance the broker reported with the account's cash plus the holdings from the same fetch and, when they differ by a cent or more, posts one labelled 'Balance adjustment' against Securities trade (equity.securities) for the difference, so a buy row the broker never sent cannot leave the account overstated. On by default; false stops future adjustments (past ones stay). Absent leaves it unchanged. Write scope.
+             */
+            balance_true_up?: boolean | null;
             /** Description */
             description?: string | null;
             /**
@@ -3172,6 +3506,7 @@ export interface components {
             kind: string;
             /** Outcome */
             outcome: string;
+            privacy: components["schemas"]["PrivacyRecord"] | null;
             /** Request Id */
             request_id: string | null;
             /** Requested Extra */
@@ -3209,6 +3544,120 @@ export interface components {
             /** Transaction Id */
             transaction_id: string;
             variance?: components["schemas"]["VarianceOut"] | null;
+        };
+        /**
+         * AiCheckIn
+         * @description The provider setup to check. Each absent field falls back to the saved
+         *     setting, so the settings card can check what is in its form before it is
+         *     saved. Nothing here is stored.
+         */
+        AiCheckIn: {
+            /**
+             * Api Key
+             * @description A key to use instead of the stored one; never stored by this call.
+             */
+            api_key?: string | null;
+            /** Base Url */
+            base_url?: string | null;
+            /** Model */
+            model?: string | null;
+            /** Provider */
+            provider?: ("openai" | "local" | "anthropic") | null;
+            /** Timeout Seconds */
+            timeout_seconds?: number | null;
+            /**
+             * Use Stored Key
+             * @description With no api_key: send the stored key (true) or no key at all (false). The stored key goes only to the saved provider and base URL: checking any other sends no key, and the answer says so (`key_sent`, `message`).
+             * @default true
+             */
+            use_stored_key: boolean;
+        };
+        /**
+         * AiDisclosureOut
+         * @description What one AI capability sends to the provider, in plain words
+         *     (``ai_providers.DISCLOSURES``, pinned to the prompt builders by a test).
+         */
+        AiDisclosureOut: {
+            /**
+             * Capability
+             * @enum {string}
+             */
+            capability: "categorize" | "review";
+            /**
+             * Sends
+             * @description Each item sent, as a phrase.
+             */
+            sends: string[];
+            /**
+             * When
+             * @description The situation, e.g. 'To categorize a transaction ...'.
+             */
+            when: string;
+        };
+        /** AiModelsOut */
+        AiModelsOut: {
+            /**
+             * Key Sent
+             * @description Whether the request carried an API key.
+             */
+            key_sent: boolean;
+            /**
+             * Listed
+             * @description False when the server offers no model list (HTTP 404/405).
+             */
+            listed: boolean;
+            /** Message */
+            message: string;
+            /**
+             * Models
+             * @description Model ids, sorted; at most 500.
+             */
+            models: string[];
+        };
+        /** AiTestOut */
+        AiTestOut: {
+            /**
+             * Answered
+             * @description The model replied with the JSON Purser asks for.
+             */
+            answered: boolean | null;
+            /**
+             * Authenticated
+             * @description None when the server's answers do not say.
+             */
+            authenticated: boolean | null;
+            /**
+             * Elapsed Ms
+             * @description How long the model took to answer.
+             */
+            elapsed_ms: number | null;
+            /** Key Sent */
+            key_sent: boolean;
+            /**
+             * Message
+             * @description What happened, in one or two sentences; never the key.
+             */
+            message: string;
+            /**
+             * Model Listed
+             * @description None when the server offers no model list.
+             */
+            model_listed: boolean | null;
+            /**
+             * Network
+             * @description Where the server's address resolves; a 'local' provider on the public internet gets a warning.
+             * @enum {string}
+             */
+            network: "this_machine" | "private_network" | "public_internet" | "unknown";
+            /**
+             * Ok
+             * @description Reachable, authenticated, and the model answered as expected.
+             */
+            ok: boolean;
+            /** Reachable */
+            reachable: boolean;
+            /** Warning */
+            warning: string | null;
         };
         /** AmountEvidence */
         AmountEvidence: {
@@ -3373,8 +3822,12 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** Identifiable */
+            identifiable?: string[] | null;
             /** Kind */
             kind: string;
+            /** Privacy Requested */
+            privacy_requested?: string[] | null;
             /** Request Id */
             request_id: string | null;
         };
@@ -3623,6 +4076,51 @@ export interface components {
              */
             windows: number;
         };
+        /** BackingCandidate */
+        BackingCandidate: {
+            /** Amount */
+            amount: string;
+            /**
+             * Backing
+             * @description already backs this split
+             */
+            backing: boolean;
+            /**
+             * Date
+             * Format: date
+             */
+            date: string;
+            /** Description */
+            description: string | null;
+            /**
+             * Exact
+             * @description its amount is exactly the `amount` asked for
+             */
+            exact: boolean;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Payee */
+            payee: string | null;
+            /**
+             * Status
+             * @description pending | posted, or merged for a row backing this split
+             */
+            status: string;
+        };
+        /** BackingCandidates */
+        BackingCandidates: {
+            /** Account */
+            account: string;
+            /** Amount */
+            amount: string | null;
+            /** Candidates */
+            candidates: components["schemas"]["BackingCandidate"][];
+            /** Window Days */
+            window_days: number;
+        };
         /**
          * BalanceAsOf
          * @description Point-in-time balance from the stored running-balance table
@@ -3650,6 +4148,51 @@ export interface components {
             /** Path */
             path: string;
         };
+        /**
+         * BalanceHistoryOut
+         * @description One account's reported end-of-day balance over a window, sampled for
+         *     a chart (#594). Unlike ``/balance/series`` (postings, per change), every
+         *     point here is the overlay-aware balance the account header shows.
+         */
+        BalanceHistoryOut: {
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            /** Change */
+            change: string;
+            /** Change Pct */
+            change_pct: string | null;
+            /** Currency */
+            currency: string;
+            /** Current */
+            current: string;
+            /**
+             * End
+             * Format: date
+             */
+            end: string;
+            /** First Activity */
+            first_activity: string | null;
+            high: components["schemas"]["HistoryPoint"] | null;
+            /** Interval Days */
+            interval_days: number;
+            low: components["schemas"]["HistoryPoint"] | null;
+            /** Method */
+            method: string;
+            /** Path */
+            path: string;
+            /** Points */
+            points: components["schemas"]["HistoryPoint"][];
+            /** Range */
+            range: string | null;
+            /**
+             * Start
+             * Format: date
+             */
+            start: string;
+        };
         /** BalancePoint */
         BalancePoint: {
             /** Balance */
@@ -3660,17 +4203,16 @@ export interface components {
              */
             date: string;
             /** Delta */
-            delta: string;
-            /**
-             * Transaction Id
-             * Format: uuid
-             */
-            transaction_id: string;
+            delta?: string | null;
+            /** Transaction Id */
+            transaction_id?: string | null;
         };
         /**
          * BalanceSeries
          * @description Full-resolution balance history: one point per stored change, which is
-         *     the grain the running-balance store keeps and the register shows.
+         *     the grain the running-balance store keeps and the register shows. It is
+         *     the postings history for every account type (decision 129): ``opening``
+         *     plus every ``delta`` equals the last point.
          */
         BalanceSeries: {
             /**
@@ -3700,6 +4242,8 @@ export interface components {
             start: string;
             /** Truncated */
             truncated: boolean;
+            /** Withheld */
+            withheld?: string[] | null;
         };
         /**
          * BankComparison
@@ -4045,6 +4589,8 @@ export interface components {
         ConfigOut: {
             /** Ai Api Key Set */
             ai_api_key_set: boolean;
+            /** Ai Disclosure */
+            ai_disclosure: components["schemas"]["AiDisclosureOut"][];
             encryption: components["schemas"]["EncryptionStatus"];
             /** Oidc Client Secret Set */
             oidc_client_secret_set: boolean;
@@ -4062,14 +4608,25 @@ export interface components {
          *     for NULLABLE_KEYS (reset a key to its env default with DELETE).
          */
         ConfigUpdate: {
-            /** Ai Api Key */
+            /**
+             * Ai Api Key
+             * @description Write-only. null stores 'no key' (DELETE returns to the env key).
+             */
             ai_api_key?: string | null;
             /** Ai Base Url */
             ai_base_url?: string | null;
             /** Ai Model */
             ai_model?: string | null;
-            /** Ai Provider */
-            ai_provider?: ("none" | "openai" | "anthropic") | null;
+            /**
+             * Ai Provider
+             * @description none (off) · local: a model you run behind an OpenAI-compatible API (needs ai_base_url; the key is optional) · openai: a hosted OpenAI-compatible service · anthropic.
+             */
+            ai_provider?: ("none" | "openai" | "local" | "anthropic") | null;
+            /**
+             * Ai Timeout Seconds
+             * @description Seconds to wait for one provider answer.
+             */
+            ai_timeout_seconds?: number | null;
             /** Audit Retention Days */
             audit_retention_days?: number | null;
             /** Feed Stale Days */
@@ -4090,10 +4647,6 @@ export interface components {
             price_provider?: ("none" | "tiingo") | null;
             /** Price Stale Days */
             price_stale_days?: number | null;
-            /** Privacy Amount */
-            privacy_amount?: boolean | null;
-            /** Privacy Purchase */
-            privacy_purchase?: boolean | null;
             /** Session Idle Hours */
             session_idle_hours?: number | null;
             /** Session Ttl Days */
@@ -4115,6 +4668,8 @@ export interface components {
             ai_model: string | null;
             /** Ai Provider */
             ai_provider: string;
+            /** Ai Timeout Seconds */
+            ai_timeout_seconds: number;
             /** Audit Retention Days */
             audit_retention_days: number;
             /** Feed Stale Days */
@@ -4133,10 +4688,6 @@ export interface components {
             price_provider: string;
             /** Price Stale Days */
             price_stale_days: number;
-            /** Privacy Amount */
-            privacy_amount: boolean;
-            /** Privacy Purchase */
-            privacy_purchase: boolean;
             /** Session Idle Hours */
             session_idle_hours: number;
             /** Session Ttl Days */
@@ -4277,10 +4828,20 @@ export interface components {
              * @description transfer_link accepts: how many historical pairs activating that rule would link now — the count its activation asks you to confirm.
              */
             projected_links?: number | null;
-            /** @description the transfer_link rule an accept produced — a DRAFT. It links nothing until activated with POST /rules/{rule_id}/state {state: active, confirm_links: projected_links}. */
+            /**
+             * Projected Matches
+             * @description trade_rule accepts: how many live rows the rule selects now — what its apply-history dry run would offer to mark as securities trades.
+             */
+            projected_matches?: number | null;
+            /** @description the rule an accept produced — a DRAFT. A transfer_link rule links nothing until activated with POST /rules/{rule_id}/state {state: active, confirm_links: projected_links}; a trade_rule's categorize rule marks nothing until activated (POST /rules/{rule_id}/state {state: active}), and history only through apply-history. */
             rule?: components["schemas"]["RuleOut"] | null;
             /** @description the schedule an accept produced (active, materialized) */
             schedule?: components["schemas"]["ScheduleOut"] | null;
+            /**
+             * Split Transaction Id
+             * @description split accepts: the split row (a posted row's replacement)
+             */
+            split_transaction_id?: string | null;
             suggestion: components["schemas"]["SuggestionOut"];
             /** @description transfer_pair accepts: the transfer the pair merged into and the transfer_link suggestion the confirm proposed */
             transfer?: components["schemas"]["TransferPairDecisionOut"] | null;
@@ -4294,7 +4855,7 @@ export interface components {
             decision: "accept" | "reject" | "snooze" | "edit_then_accept";
             /**
              * Edits
-             * @description draft fields to change before applying (edit_then_accept). A schedule takes any draft field; a transfer_link takes amount_exact (a decimal string), window_days (0 to 14) and effective_from (YYYY-MM-DD) — its pair and payee are what it proposes.
+             * @description draft fields to change before applying (edit_then_accept). A schedule takes any draft field; a transfer_link takes amount_exact (a decimal string), window_days (0 to 14) and effective_from (YYYY-MM-DD) — its pair and payee are what it proposes. A split takes lines (the draft's line shape); a trade_rule takes match_field, match_mode, match_text and direction (debit, credit or null) — its account is what it proposes.
              */
             edits?: {
                 [key: string]: unknown;
@@ -4303,7 +4864,7 @@ export interface components {
             note?: string | null;
             /**
              * Reject Scope
-             * @description exact = just this suggestion. counterparty = never suggest this (account, counterparty/payee) again — for a transfer_link, this account pair with any payee. A match and a transfer_pair reject exactly.
+             * @description exact = just this suggestion. counterparty = never suggest this (account, counterparty/payee) again — for a transfer_link, this account pair with any payee; for a trade_rule, any trade rule for this account. A match and a transfer_pair reject exactly.
              * @default exact
              * @enum {string}
              */
@@ -4412,12 +4973,15 @@ export interface components {
             ledger_balance?: string | null;
             /** Mapped Account Id */
             mapped_account_id: string | null;
+            /** Mapped Account Name */
+            mapped_account_name?: string | null;
             /** Mapped Account Path */
             mapped_account_path: string | null;
             /** Name */
             name: string | null;
             /** Org */
             org: string | null;
+            proposal?: components["schemas"]["ProposalOut"] | null;
         };
         /** DisposalOut */
         DisposalOut: {
@@ -4832,6 +5396,16 @@ export interface components {
             /** Status */
             status: string;
         };
+        /** HistoryPoint */
+        HistoryPoint: {
+            /** Balance */
+            balance: string;
+            /**
+             * Date
+             * Format: date
+             */
+            date: string;
+        };
         /** HoldingOut */
         HoldingOut: {
             /**
@@ -4877,6 +5451,80 @@ export interface components {
              * @default false
              */
             value_out_of_range: boolean;
+        };
+        /** HoldingsSummaryLineOut */
+        HoldingsSummaryLineOut: {
+            /** Cost Basis */
+            cost_basis: string | null;
+            /** Gain Pct */
+            gain_pct: string | null;
+            /** In Transit */
+            in_transit: string | null;
+            /** Market Value */
+            market_value: string | null;
+            /** Name */
+            name: string | null;
+            /** No Price */
+            no_price: boolean;
+            /** Position Id */
+            position_id: string | null;
+            /** Price */
+            price: string | null;
+            /** Price As Of */
+            price_as_of: string | null;
+            /** Price Source */
+            price_source: string | null;
+            /** Quantity */
+            quantity: string | null;
+            /** Source */
+            source: string;
+            /** Stale Price */
+            stale_price: boolean;
+            /** Symbol */
+            symbol: string;
+            /** Unpriceable */
+            unpriceable: boolean;
+            /** Unrealized Gain */
+            unrealized_gain: string | null;
+            /** Value Out Of Range */
+            value_out_of_range: boolean;
+            /** Weight Pct */
+            weight_pct: string | null;
+        };
+        /**
+         * HoldingsSummaryOut
+         * @description One brokerage account's newest holdings as a table (#595). Every
+         *     figure is computed server-side; ``cash`` plus ``market_value`` is
+         *     ``total``, the account's reported balance.
+         */
+        HoldingsSummaryOut: {
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            /** As Of */
+            as_of: string | null;
+            /** Cash */
+            cash: string;
+            /** Cash Weight Pct */
+            cash_weight_pct: string | null;
+            /** Closed */
+            closed: boolean;
+            /** Cost Basis */
+            cost_basis: string | null;
+            /** Gain Pct */
+            gain_pct: string | null;
+            /** Lines */
+            lines: components["schemas"]["HoldingsSummaryLineOut"][];
+            /** Market Value */
+            market_value: string;
+            /** Source */
+            source: string;
+            /** Total */
+            total: string;
+            /** Unrealized Gain */
+            unrealized_gain: string | null;
         };
         /** IgnoreOut */
         IgnoreOut: {
@@ -5451,6 +6099,77 @@ export interface components {
              */
             posted_id: string;
         };
+        /**
+         * MapAccountItem
+         * @description One line of a mapping batch. Everything but ``ref`` is optional: what
+         *     is left out takes the plan's proposal.
+         */
+        MapAccountItem: {
+            /**
+             * Account
+             * @description Map onto this existing open account (path or id) instead of a new one.
+             */
+            account?: string | null;
+            /**
+             * Action
+             * @description Default: the plan's own action (map, or ignore a duplicate).
+             */
+            action?: ("map" | "ignore") | null;
+            /** Name */
+            name?: string | null;
+            /** Path */
+            path?: string | null;
+            /**
+             * Ref
+             * @description The delivered account's `ref` from the plan.
+             */
+            ref: string;
+            /**
+             * Replace Feed
+             * @description With `account`: map onto it although it already takes another bank account's feed, which then waits to be mapped again (decision 134). Admin scope only; without it a line onto an account that has a feed is refused, naming that feed.
+             */
+            replace_feed?: boolean | null;
+            /**
+             * Starting Balance
+             * @description Start the account from the bank's balance (decision 123). Default: yes for a new checking, savings, cash or credit-card account, no for an existing one.
+             */
+            starting_balance?: boolean | null;
+            /**
+             * Type
+             * @description checking, savings, credit_card, cash, brokerage, loan or property. It cannot be changed after mapping.
+             */
+            type?: string | null;
+        };
+        /** MapAccountsOut */
+        MapAccountsOut: {
+            /**
+             * Dry Run
+             * @default false
+             */
+            dry_run: boolean;
+            /** Plan */
+            plan?: {
+                [key: string]: unknown;
+            }[] | null;
+            /** Results */
+            results?: {
+                [key: string]: unknown;
+            }[] | null;
+        };
+        /** MapAccountsRequest */
+        MapAccountsRequest: {
+            /**
+             * Accounts
+             * @description The lines to apply. Omit to get the plan and write nothing.
+             */
+            accounts?: components["schemas"]["MapAccountItem"][] | null;
+            /**
+             * Dry Run
+             * @description Check the lines and answer what they would do, unwritten.
+             * @default false
+             */
+            dry_run: boolean;
+        };
         /** MapRequest */
         MapRequest: {
             /** Account Id */
@@ -5461,6 +6180,11 @@ export interface components {
             } | null;
             /** External Id */
             external_id: string;
+            /**
+             * Starting Balance
+             * @default false
+             */
+            starting_balance: boolean;
         };
         /** MappedAccount */
         MappedAccount: {
@@ -5585,6 +6309,60 @@ export interface components {
             /** Net Worth */
             net_worth: string;
         };
+        /**
+         * NetworkOut
+         * @description How this Purser is reached (#632, decision 117). Instance identity,
+         *     read from the environment at startup: nothing here is editable at
+         *     runtime, and switching is done on the host (the setup guide).
+         */
+        NetworkOut: {
+            /**
+             * Allowed Hosts
+             * @description PURSER_ALLOWED_HOSTS: other names agents may use (#633).
+             */
+            allowed_hosts: string[];
+            /**
+             * Bind Address
+             * @description PURSER_BIND_ADDRESS as the deployment reports it; null when it does not.
+             */
+            bind_address: string | null;
+            /**
+             * Guide Url
+             * @description The setup guide's section on reaching Purser from another machine.
+             */
+            guide_url: string;
+            /**
+             * Mcp Url
+             * @description Where agents connect: the public URL plus /mcp.
+             */
+            mcp_url: string;
+            /**
+             * Public Url
+             * @description PURSER_PUBLIC_URL: the address Purser gives out.
+             */
+            public_url: string;
+            /**
+             * Public Url Is Local
+             * @description PURSER_PUBLIC_URL names localhost, so other machines cannot use it.
+             */
+            public_url_is_local: boolean;
+            /**
+             * Reach
+             * @description this_machine: the port is published on loopback only. home_network: on another address (PURSER_BIND_ADDRESS=0.0.0.0), over plain HTTP. reverse_proxy: PURSER_PUBLIC_URL is https, so something in front of Purser terminates TLS. unknown: the deployment does not report how it publishes the port (Compose passes PURSER_BIND_ADDRESS); not guessed.
+             * @enum {string}
+             */
+            reach: "this_machine" | "home_network" | "reverse_proxy" | "unknown";
+            /**
+             * Request Host
+             * @description The address (Host) this request was sent to.
+             */
+            request_host: string;
+            /**
+             * Request Host Accepted
+             * @description Whether agents can connect at request_host: the public URL's host, an allowed name or a loopback name. False means the web UI is open at an address the MCP endpoint refuses with 421.
+             */
+            request_host_accepted: boolean;
+        };
         /** OriginalOut */
         OriginalOut: {
             /** Amount */
@@ -5652,6 +6430,11 @@ export interface components {
         /** PositionEventCreate */
         PositionEventCreate: {
             /**
+             * Cash In Lieu
+             * @description `split` only: the cash the broker paid for the fractional share the split left. The fraction leaves in a `sell` recorded with the split (its proceeds are this amount) and reversed with it; `settle_on`, `transaction_id`, `force_cash`, `lot_method` and `lots` apply to that sale.
+             */
+            cash_in_lieu?: number | string | null;
+            /**
              * Cost Basis
              * @description `set_quantity` only: the total basis after it. Omitted, a re-count of the count held just before keeps the basis, a changed count makes it unknown, and a count of 0 has a basis of 0.
              */
@@ -5678,10 +6461,10 @@ export interface components {
             gross_quantity?: number | string | null;
             /**
              * Kind
-             * @description `set_quantity` (the absolute share count on that date), `buy` or `sell` (a change by `quantity`), `vest` (the NET shares an award vest delivered; `price` is the fair market value per share) or `transfer_out` (shares that left with no price and no cash).
+             * @description `set_quantity` (the absolute share count on that date), `buy` or `sell` (a change by `quantity`), `vest` (the NET shares an award vest delivered; `price` is the fair market value per share), `transfer_out` (shares that left with no price and no cash) or `split` (every share becomes `split_numerator` / `split_denominator` shares at the start of `occurred_on`, the effective date).
              * @enum {string}
              */
-            kind: "set_quantity" | "buy" | "sell" | "vest" | "transfer_out";
+            kind: "set_quantity" | "buy" | "sell" | "vest" | "transfer_out" | "split";
             /** @description `buy`/`vest`: the lot it opens. A vest always opens one; a buy opens one when this is given or the position already tracks lots. */
             lot?: components["schemas"]["LotOpenIn"] | null;
             /**
@@ -5712,8 +6495,11 @@ export interface components {
              * @description `sell` only. `cash` (the default): the net proceeds (quantity x price - fees, rounded half up to the cent) land on the account, balanced against the system account `equity.securities`, on the trade date (or `settle_on`). `none`: no cash moves, e.g. shares withheld for tax. Refused with 409 when the account already shows that cash.
              */
             proceeds_to?: ("cash" | "none") | null;
-            /** Quantity */
-            quantity: number | string;
+            /**
+             * Quantity
+             * @description Required for every kind but `split`, which takes a ratio instead.
+             */
+            quantity?: number | string | null;
             /**
              * Replaces
              * @description A reversed event of this position, on the same date, that this one corrects. The correction takes that event's place in the day's order; without `replaces` a new event goes after every event already recorded that day.
@@ -5726,6 +6512,16 @@ export interface components {
             settle_on?: string | null;
             /** Source Note */
             source_note?: string | null;
+            /**
+             * Split Denominator
+             * @description `split` only: the old shares that become `split_numerator` new ones.
+             */
+            split_denominator?: number | null;
+            /**
+             * Split Numerator
+             * @description `split` only: new shares for every `split_denominator` old ones (2 for a 2:1 forward split, 1 for a 1:10 reverse split).
+             */
+            split_numerator?: number | null;
             /**
              * Transaction Id
              * @description Link the trade's cash to this posted row on the account (one real leg, one category leg) instead of posting new cash: the row is re-booked to `equity.securities` through the reversal-pair correction. It must hold exactly the trade's cash (its net, to the cent, so the trade needs its `price`), dated from the trade to five days after the next business day (`settle_on` does not widen it), and no row of its correction chain may settle a bill; any other row is a 422.
@@ -5762,11 +6558,13 @@ export interface components {
              * Format: uuid
              */
             id: string;
+            /** In Lieu Of */
+            in_lieu_of?: string | null;
             /**
              * Kind
              * @enum {string}
              */
-            kind: "set_quantity" | "buy" | "sell" | "vest" | "transfer_out";
+            kind: "set_quantity" | "buy" | "sell" | "vest" | "transfer_out" | "split";
             /** Note */
             note: string | null;
             /**
@@ -5800,6 +6598,10 @@ export interface components {
             settle_on?: string | null;
             /** Source Note */
             source_note: string | null;
+            /** Split Denominator */
+            split_denominator?: number | null;
+            /** Split Numerator */
+            split_numerator?: number | null;
             /** Transaction Id */
             transaction_id?: string | null;
             /** Withheld Quantity */
@@ -5810,6 +6612,7 @@ export interface components {
          * @description The event written and the position after it.
          */
         PositionEventResult: {
+            cash_in_lieu?: components["schemas"]["PositionEventOut"] | null;
             event: components["schemas"]["PositionEventOut"];
             position: components["schemas"]["PositionOut"];
         };
@@ -5957,6 +6760,20 @@ export interface components {
             /** Unvested Value */
             unvested_value: string | null;
         };
+        /** PresentIn */
+        PresentIn: {
+            /** Note */
+            note?: string | null;
+            /** Transaction Ids */
+            transaction_ids: string[];
+        };
+        /** PresentOut */
+        PresentOut: {
+            /** Count */
+            count: number;
+            /** Url */
+            url: string;
+        };
         /** PriceCreate */
         PriceCreate: {
             /** Close */
@@ -6021,6 +6838,54 @@ export interface components {
             stale_days: number;
             /** Symbols */
             symbols: components["schemas"]["SymbolPriceOut"][];
+        };
+        /**
+         * PrivacyRecord
+         * @description What a call row says about privacy (#613): the fields the call asked to
+         *     withhold, the fields its answer left out, and the payee, description and
+         *     amount fields it returned with real values.
+         */
+        PrivacyRecord: {
+            /** Identifiable */
+            identifiable: string[];
+            /** Requested */
+            requested: string[];
+            /** Withheld */
+            withheld: string[];
+        };
+        /**
+         * ProposalOut
+         * @description What Purser proposes for a delivered bank account nothing takes yet
+         *     (decision 126), from what the feed states about it. The feed carries no
+         *     account type, so ``type_basis`` says what the type rests on: `name` (the
+         *     bank's own words), `holdings` (the name says nothing and the feed lists
+         *     holdings), `balance` (a debt, with or without credit left) or `default`
+         *     (nothing says; offered as checking). ``confident`` is false when the type
+         *     deserves a second look, and ``note`` says why when the name names a cash
+         *     product but the feed lists holdings for it too.
+         */
+        ProposalOut: {
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "map" | "ignore" | "blocked";
+            /** Confident */
+            confident: boolean;
+            /** Duplicate Of */
+            duplicate_of?: string | null;
+            /** Name */
+            name: string;
+            /** Note */
+            note?: string | null;
+            /** Path */
+            path: string;
+            /** Starting Balance */
+            starting_balance: boolean;
+            /** Type */
+            type: string;
+            /** Type Basis */
+            type_basis: string;
         };
         /** QifImportRequest */
         QifImportRequest: {
@@ -6416,6 +7281,12 @@ export interface components {
              */
             priority: number;
             /**
+             * Securities Trade
+             * @description categorize rules only, in place of category_id: mark matching rows as a securities trade (the system account equity.securities, never spending or income). The rule must name account_ids, every one a brokerage account whose holdings come from the feed (422 otherwise): Purser never decides on its own which rows are trades.
+             * @default false
+             */
+            securities_trade: boolean;
+            /**
              * Type
              * @enum {string}
              */
@@ -6448,6 +7319,12 @@ export interface components {
             predicate: string;
             /** Priority */
             priority: number;
+            /**
+             * Securities Trade
+             * @description categorize rules that mark matching rows as a securities trade (equity.securities) rather than a category.
+             * @default false
+             */
+            securities_trade: boolean;
             /** State */
             state: string;
             /** Type */
@@ -6520,6 +7397,11 @@ export interface components {
             payee_name?: string | null;
             /** Priority */
             priority?: number | null;
+            /**
+             * Securities Trade
+             * @description categorize rules only, in place of category_id: mark matching rows as a securities trade (the system account equity.securities, never spending or income). The rule must name account_ids, every one a brokerage account whose holdings come from the feed (422 otherwise): Purser never decides on its own which rows are trades. true sets that target; to change it back, send a category_id instead.
+             */
+            securities_trade?: boolean | null;
             /**
              * Window Days
              * @description transfer_link rules only: the most days apart the declared pair's two legs may post and still link, 0 to 14. Omit for the standard 3-day window; 0 means same-day legs only. Widening it puts more history in scope at activation, which the activation confirm counts.
@@ -6902,12 +7784,161 @@ export interface components {
              */
             transaction_id: string | null;
         };
+        /** SplitIn */
+        SplitIn: {
+            /**
+             * Dry Run
+             * @default false
+             */
+            dry_run: boolean;
+            /** Lines */
+            lines: components["schemas"]["SplitLineIn"][];
+        };
+        /** SplitLineIn */
+        SplitLineIn: {
+            /**
+             * Amount
+             * @description the line's share of the row's amount, in the flat form's sign (negative = money out); the lines sum to the row's amount
+             */
+            amount: number | string;
+            /**
+             * Backing Ids
+             * @description account line only: bank rows on that account whose amounts sum exactly to the line's leg (its amount, negated); they are merged into the split. At most 50 across the split's lines
+             */
+            backing_ids?: string[];
+            /**
+             * Category
+             * @description category path or id, or '[account path or id]' for an account line
+             */
+            category: string;
+            /** Memo */
+            memo?: string | null;
+        };
+        /**
+         * SplitLineOut
+         * @description One line of a split (decision 118): a category, or an `[Account]`
+         *     line booking a leg on another account, which `backing_ids` — that
+         *     account's bank rows merged into the split — may back.
+         */
+        SplitLineOut: {
+            /**
+             * Amount
+             * @description the line's share of the row's amount (flat-form sign)
+             */
+            amount: string;
+            /**
+             * Backing Ids
+             * @description bank rows backing an account line's leg
+             */
+            backing_ids?: string[];
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "category" | "account";
+            /** Memo */
+            memo?: string | null;
+            /**
+             * Target
+             * @description category path, or [account path] for an account line
+             */
+            target: string;
+        };
+        /** SplitOut */
+        SplitOut: {
+            /** Account Path */
+            account_path: string;
+            /** Lines */
+            lines: components["schemas"]["SplitLineOut"][];
+        };
+        /**
+         * SplitResult
+         * @description What a split write did (or, with `dry_run`, would do).
+         */
+        SplitResult: {
+            /** Account */
+            account: string;
+            /** Amount */
+            amount: string;
+            /** Backing Added */
+            backing_added?: string[];
+            /**
+             * Backing Restored
+             * @description rows that backed the split before and come back
+             */
+            backing_restored?: string[];
+            /** Category */
+            category?: string | null;
+            /**
+             * Dry Run
+             * @default false
+             */
+            dry_run: boolean;
+            /** Lines */
+            lines?: components["schemas"]["SplitLineOut"][];
+            /** Replaces Id */
+            replaces_id?: string | null;
+            /**
+             * Restored Ids
+             * @description the clones those rows came back as
+             */
+            restored_ids?: string[];
+            /** Status */
+            status?: string | null;
+            /**
+             * Transaction Id
+             * Format: uuid
+             * @description the split row now (a posted row's replacement)
+             */
+            transaction_id: string;
+        };
         /** StaleOut */
         StaleOut: {
             /** Price As Of */
             price_as_of: string | null;
             /** Symbol */
             symbol: string;
+        };
+        /** StartingBalanceRequest */
+        StartingBalanceRequest: {
+            /**
+             * Dry Run
+             * @description Return exactly what the call would do, refusals included, without writing anything.
+             * @default false
+             */
+            dry_run: boolean;
+        };
+        /**
+         * StartingBalanceResult
+         * @description An account's starting balance from the bank, after the call (or, with
+         *     ``dry_run``, what it would be). Amounts are in ledger sign: a card is
+         *     negative when money is owed.
+         */
+        StartingBalanceResult: {
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            /** Amount */
+            amount: string;
+            /** Bank Balance */
+            bank_balance: string | null;
+            /** Bank Balance Date */
+            bank_balance_date: string | null;
+            /** Basis */
+            basis: ("posted_only" | "pending_inclusive") | null;
+            /** Dry Run */
+            dry_run: boolean;
+            /** Entry Date */
+            entry_date: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "set" | "unchanged" | "removed" | "none";
+            /** Transaction Id */
+            transaction_id: string | null;
         };
         /** StateChange */
         StateChange: {
@@ -7051,8 +8082,15 @@ export interface components {
             match: number;
             /** Schedule */
             schedule: number;
+            /** Split */
+            split: number;
             /** Total */
             total: number;
+            /**
+             * Trade Rule
+             * @default 0
+             */
+            trade_rule: number;
             /** Transfer Link */
             transfer_link: number;
             /** Transfer Pair */
@@ -7068,7 +8106,7 @@ export interface components {
             decided_at: string | null;
             /**
              * Draft
-             * @description The typed draft accept applies unchanged. schedule: name, account, counterparty_account, rrule, dtstart, amount_type, amount, estimate_basis, payee, category, autopost_policy. transfer_link: from_account, to_account, payee, payee_id, amount_exact, window_days, effective_from. match: expected_id, posted_id, account, label, expected_date, expected_amount, posted_date, posted_amount, variance (posted - expected). transfer_pair: outgoing_id, incoming_id, from_account, to_account, amount (moved, positive), outgoing_date, incoming_date, date_gap_days, outgoing_description, incoming_description.
+             * @description The typed draft accept applies unchanged. schedule: name, account, counterparty_account, rrule, dtstart, amount_type, amount, estimate_basis, payee, category, autopost_policy. transfer_link: from_account, to_account, payee, payee_id, amount_exact, window_days, effective_from. match: expected_id, posted_id, account, label, expected_date, expected_amount, posted_date, posted_amount, variance (posted - expected). transfer_pair: outgoing_id, incoming_id, from_account, to_account, amount (moved, positive), outgoing_date, incoming_date, date_gap_days, outgoing_description, incoming_description. split: transaction_id, template_id, account, date, amount, template_amount, payee, lines ({target, amount, memo, backing_ids}). trade_rule: account, account_id, match_field, match_mode, match_text, direction.
              */
             draft: {
                 [key: string]: unknown;
@@ -7081,7 +8119,10 @@ export interface components {
             evidence_summary: {
                 [key: string]: unknown;
             };
-            /** Headline */
+            /**
+             * Headline
+             * @description One line to show or relay, with accounts by name (#552); the draft keeps their paths, which accept applies and other calls take.
+             */
             headline: string;
             /**
              * Id
@@ -7090,10 +8131,10 @@ export interface components {
             id: string;
             /**
              * Kind
-             * @description schedule: a recurring bill or transfer to expect (draft = a schedule). transfer_link: proposed by a manual transfer confirm (draft = a transfer_link rule for that account pair, scoped to the payee and its aliases). match: an open match proposal pairing an expected row with a bank row (draft = the pair; accept confirms it, reject rejects it for good). transfer_pair: a transfer candidate, two bank rows of exactly opposite amounts on two accounts that nothing links automatically (draft = the pair; accept confirms the transfer, reject remembers it is not one).
+             * @description schedule: a recurring bill or transfer to expect (draft = a schedule). transfer_link: proposed by a manual transfer confirm (draft = a transfer_link rule for that account pair, scoped to the payee and its aliases). match: an open match proposal pairing an expected row with a bank row (draft = the pair; accept confirms it, reject rejects it for good). transfer_pair: a transfer candidate, two bank rows of exactly opposite amounts on two accounts that nothing links automatically (draft = the pair; accept confirms the transfer, reject remembers it is not one). split: split like last time? A new bank row from a payee whose last split a person or an agent made (draft = the row and the lines to apply; accept splits it). trade_rule: proposed by marking a row a securities trade (draft = a categorize rule that marks rows like it on that brokerage account as a securities trade).
              * @enum {string}
              */
-            kind: "schedule" | "transfer_link" | "match" | "transfer_pair";
+            kind: "schedule" | "transfer_link" | "match" | "transfer_pair" | "split" | "trade_rule";
             /** Reject Scope */
             reject_scope: string | null;
             /** Result Entity Id */
@@ -7106,7 +8147,7 @@ export interface components {
             snooze_until: string | null;
             /**
              * Source
-             * @description detected | agent | account_added | confirm
+             * @description detected | agent | account_added | confirm | mark
              */
             source: string;
             /**
@@ -7187,6 +8228,11 @@ export interface components {
         };
         /** SyncOut */
         SyncOut: {
+            /**
+             * Balance True Ups
+             * @default []
+             */
+            balance_true_ups: components["schemas"]["TrueUpOut"][];
             /** Errors */
             errors: string[];
             gap_repair?: components["schemas"]["GapRepairOut"] | null;
@@ -7438,7 +8484,8 @@ export interface components {
         };
         /**
          * TransactionDetail
-         * @description Full detail: postings and provenance links.
+         * @description Full detail: postings and provenance links; `split` lists a split's
+         *     lines with their backing rows.
          */
         TransactionDetail: {
             /** Account Path */
@@ -7447,6 +8494,12 @@ export interface components {
             amount: string | null;
             /** Balance */
             balance?: string | null;
+            /**
+             * Balance Adjustment
+             * @description Purser's post-sync balance true-up of a brokerage account (decision 119): cash put in step with the broker's balance less its holdings, against equity.securities. The register labels it 'Balance adjustment (invested cash)'.
+             * @default false
+             */
+            balance_adjustment: boolean;
             /** Category Path */
             category_path: string | null;
             /** Category Source */
@@ -7512,19 +8565,42 @@ export interface components {
             schedule_pinned: boolean;
             /**
              * Securities Trade
+             * @description The row is a securities trade (a buy or sell: its other leg is the system account equity.securities, never spending or income). See securities_trade_locked.
              * @default false
              */
             securities_trade: boolean;
+            /**
+             * Securities Trade Locked
+             * @description A securities trade whose cash a recorded trade holds (a position event, decision 103): it moves only with that trade — reverse the trade to correct it. false on a row a person, an agent or a rule marked (PATCH it with a category to change it back) and on a balance adjustment.
+             * @default false
+             */
+            securities_trade_locked: boolean;
             /** Source Fetch Id */
             source_fetch_id: string | null;
+            split?: components["schemas"]["SplitOut"] | null;
+            /**
+             * Split Account Path
+             * @description The account a split transaction splits (its real leg keeps the bank's amount); null for every other row.
+             */
+            split_account_path?: string | null;
             /**
              * Split Lines
-             * @description Category legs of a split transaction (one real leg plus two or more category legs, decision 87); 0 for every other row. Split rows are read-only.
+             * @description Lines of a split transaction (category and [Account] lines, decisions 87 and 118); 0 for every other row.
              * @default 0
              */
             split_lines: number;
+            /**
+             * Starting Balance
+             * @default false
+             */
+            starting_balance: boolean;
             /** Status */
             status: string;
+            /**
+             * Suggestion Id
+             * @description PATCH with securities_trade=true: the trade_rule suggestion the mark proposed (or refreshed) in the inbox — a rule that marks rows like this one. Null when it proposed none (no payee or description, or a rule or rejection covers it).
+             */
+            suggestion_id?: string | null;
             /** Superseded By */
             superseded_by: string | null;
             /** Transfer Account Path */
@@ -7548,10 +8624,13 @@ export interface components {
          *     `category_path` is the interest/fee category and `remainder_amount` that
          *     posting's amount. Any other multi-posting row is not a transfer.
          *
-         *     A split transaction (one real leg plus several category legs, such as an
-         *     imported Quicken split; decision 87) has `category_path` null and
-         *     `split_lines` set to its category-leg count; the legs are in the detail's
-         *     `postings`. Split rows are read-only.
+         *     A split transaction (decisions 87 and 118) has `category_path` null,
+         *     `split_lines` set to its line count (category and `[Account]` lines) and
+         *     `split_account_path` set to the account it splits — the real leg that
+         *     keeps the bank's amount. It is never a transfer. Seen from another
+         *     account one of its lines books to, the row shows that line's leg. The
+         *     detail's `split` lists the lines; `PUT /transactions/{id}/split` edits
+         *     them and `DELETE /transactions/{id}/split` removes the split.
          */
         TransactionOut: {
             /** Account Path */
@@ -7560,6 +8639,12 @@ export interface components {
             amount: string | null;
             /** Balance */
             balance?: string | null;
+            /**
+             * Balance Adjustment
+             * @description Purser's post-sync balance true-up of a brokerage account (decision 119): cash put in step with the broker's balance less its holdings, against equity.securities. The register labels it 'Balance adjustment (invested cash)'.
+             * @default false
+             */
+            balance_adjustment: boolean;
             /** Category Path */
             category_path: string | null;
             /** Category Source */
@@ -7617,15 +8702,32 @@ export interface components {
             schedule_pinned: boolean;
             /**
              * Securities Trade
+             * @description The row is a securities trade (a buy or sell: its other leg is the system account equity.securities, never spending or income). See securities_trade_locked.
              * @default false
              */
             securities_trade: boolean;
             /**
+             * Securities Trade Locked
+             * @description A securities trade whose cash a recorded trade holds (a position event, decision 103): it moves only with that trade — reverse the trade to correct it. false on a row a person, an agent or a rule marked (PATCH it with a category to change it back) and on a balance adjustment.
+             * @default false
+             */
+            securities_trade_locked: boolean;
+            /**
+             * Split Account Path
+             * @description The account a split transaction splits (its real leg keeps the bank's amount); null for every other row.
+             */
+            split_account_path?: string | null;
+            /**
              * Split Lines
-             * @description Category legs of a split transaction (one real leg plus two or more category legs, decision 87); 0 for every other row. Split rows are read-only.
+             * @description Lines of a split transaction (category and [Account] lines, decisions 87 and 118); 0 for every other row.
              * @default 0
              */
             split_lines: number;
+            /**
+             * Starting Balance
+             * @default false
+             */
+            starting_balance: boolean;
             /** Status */
             status: string;
             /** Transfer Account Path */
@@ -7656,6 +8758,11 @@ export interface components {
             description?: string | null;
             /** Payee */
             payee?: string | null;
+            /**
+             * Securities Trade
+             * @description true marks a row on a brokerage account whose holdings come from the feed as a securities trade (a buy or sell: booked to the system account equity.securities, never spending or income), in place of `category`; the response's suggestion_id names the rule it proposes in the inbox. To change a marked row back, send the category it should have (false needs that category). Refused (422) on any other account, a transfer, a split, an expected row and a recorded trade's cash.
+             */
+            securities_trade?: boolean | null;
         };
         /** TransferCandidateOut */
         TransferCandidateOut: {
@@ -7718,6 +8825,27 @@ export interface components {
              * @description the payee-scoped transfer_link suggestion the confirm proposed (or refreshed) in the inbox, as POST /matching/confirm-transfer does (decision 67); null when it proposed none (no payee on either row, or a rule or rejection already covers it)
              */
             suggestion_id?: string | null;
+        };
+        /**
+         * TrueUpOut
+         * @description A balance true-up this sync posted (#591, decision 119).
+         */
+        TrueUpOut: {
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            /**
+             * Amount
+             * @description Signed, in ledger sign: the cash the account's postings were short (+) or over (-) against the broker's balance less its holdings.
+             */
+            amount: string;
+            /**
+             * Transaction Id
+             * Format: uuid
+             */
+            transaction_id: string;
         };
         /** UnlinkResult */
         UnlinkResult: {
@@ -8293,6 +9421,8 @@ export interface operations {
             query?: {
                 symbol?: string | null;
                 include_vests?: boolean;
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
             };
             header?: never;
             path: {
@@ -8356,6 +9486,44 @@ export interface operations {
             };
         };
     };
+    balance_history_accounts__account_id__balance_history_get: {
+        parameters: {
+            query?: {
+                /** @description named window ending today; start/end override it */
+                range?: "1m" | "3m" | "6m" | "ytd" | "1y" | "5y" | "all";
+                start?: string | null;
+                /** @description defaults to the ledger day */
+                end?: string | null;
+                max_points?: number;
+            };
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BalanceHistoryOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     balance_series_accounts__account_id__balance_series_get: {
         parameters: {
             query?: {
@@ -8363,6 +9531,8 @@ export interface operations {
                 start?: string | null;
                 /** @description defaults to the ledger day */
                 end?: string | null;
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
             };
             header?: never;
             path: {
@@ -8483,6 +9653,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["DisposalOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    holdings_summary_accounts__account_id__holdings_summary_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HoldingsSummaryOut"];
                 };
             };
             /** @description Validation Error */
@@ -8746,6 +9947,72 @@ export interface operations {
             };
         };
     };
+    set_starting_balance_accounts__account_id__starting_balance_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["StartingBalanceRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StartingBalanceResult"];
+                };
+            };
+            /** @description The bank's balance cannot be used. `detail.code` names why: `account_type` (not a checking, savings, cash or credit-card account), `not_connected`, `connection_disabled`, `account_closed`, `no_snapshot`, `account_missing`, `ambiguous_account`, `no_bank_balance`, `currency_unknown`, `currency_mismatch`, `stale_balance` (sync the connection first) or `reconciled` (the account is reconciled to a statement and differs from the bank; reconcile a later statement instead). */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    remove_starting_balance_accounts__account_id__starting_balance_delete: {
+        parameters: {
+            query?: {
+                dry_run?: boolean;
+            };
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StartingBalanceResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_valuations_accounts__account_id__valuations_get: {
         parameters: {
             query?: never;
@@ -8866,8 +10133,12 @@ export interface operations {
                 request_id?: string | null;
                 since?: string | null;
                 until?: string | null;
-                /** @description only calls that disclosed fields beyond the privacy defaults */
+                /** @description only calls that asked for external identifiers and got them */
                 disclosed?: boolean;
+                /** @description only calls that asked to withhold fields (privacy used) */
+                privacy_requested?: boolean;
+                /** @description only calls whose answer returned payees, descriptions or amounts */
+                identifiable?: boolean;
                 order?: string;
                 cursor?: string | null;
                 limit?: number;
@@ -8908,6 +10179,7 @@ export interface operations {
                 data_type?: string | null;
                 outcome?: ("shared" | "empty" | "denied" | "failed" | "uncertain" | "legacy" | "changed") | null;
                 extra?: boolean;
+                privacy?: ("requested" | "identifiable") | null;
                 since?: string | null;
                 until?: string | null;
                 request_id?: string | null;
@@ -8950,6 +10222,7 @@ export interface operations {
                 data_type?: string | null;
                 outcome?: ("shared" | "empty" | "denied" | "failed" | "uncertain" | "legacy" | "changed") | null;
                 extra?: boolean;
+                privacy?: ("requested" | "identifiable") | null;
                 since?: string | null;
                 until?: string | null;
                 request_id?: string | null;
@@ -9331,7 +10604,10 @@ export interface operations {
     };
     get_award_awards__award_id__get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
+            };
             header?: never;
             path: {
                 award_id: string;
@@ -9705,6 +10981,92 @@ export interface operations {
             };
         };
     };
+    ai_models_config_ai_models_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AiCheckIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AiModelsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    ai_test_config_ai_test_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AiCheckIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AiTestOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_network_config_network_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NetworkOut"];
+                };
+            };
+        };
+    };
     reset_config_config__key__delete: {
         parameters: {
             query?: never;
@@ -9805,6 +11167,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["InventoryConnectionOut"][];
+                };
+            };
+        };
+    };
+    map_accounts_connections_map_accounts_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MapAccountsRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MapAccountsOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -10020,6 +11415,8 @@ export interface operations {
                 since?: string | null;
                 type?: string | null;
                 limit?: number;
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
             };
             header?: never;
             path?: never;
@@ -10053,6 +11450,8 @@ export interface operations {
                 /** @description account id or path */
                 account: string;
                 days?: number;
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
             };
             header?: never;
             path?: never;
@@ -10287,7 +11686,10 @@ export interface operations {
     };
     get_lot_lots__lot_id__get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
+            };
             header?: never;
             path: {
                 lot_id: string;
@@ -10456,7 +11858,10 @@ export interface operations {
     };
     list_proposed_matching_proposed_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -10470,6 +11875,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MatchOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -10501,6 +11915,8 @@ export interface operations {
             query?: {
                 /** @description only pairs whose newer leg is at most this many days old (0 = dated today, at most 36500); omit for the whole history */
                 lookback_days?: number | null;
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
             };
             header?: never;
             path?: never;
@@ -10565,6 +11981,8 @@ export interface operations {
         parameters: {
             query?: {
                 direction?: "expected" | "posted";
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
             };
             header?: never;
             path?: never;
@@ -10692,6 +12110,8 @@ export interface operations {
             query?: {
                 include_drafts?: boolean;
                 include_archived?: boolean;
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
             };
             header?: never;
             path?: never;
@@ -11109,7 +12529,10 @@ export interface operations {
     };
     list_position_events_positions__position_id__events_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
+            };
             header?: never;
             path: {
                 position_id: string;
@@ -11186,6 +12609,8 @@ export interface operations {
                 status?: "open" | "closed" | "voided" | "reversed" | "all";
                 limit?: number;
                 cursor?: string | null;
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
             };
             header?: never;
             path: {
@@ -11327,6 +12752,8 @@ export interface operations {
             query?: {
                 state?: string | null;
                 type?: string | null;
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
             };
             header?: never;
             path?: never;
@@ -11564,6 +12991,8 @@ export interface operations {
         parameters: {
             query?: {
                 status?: string[] | null;
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
             };
             header?: never;
             path?: never;
@@ -11646,7 +13075,10 @@ export interface operations {
     };
     get_occurrence_certainty_schedules_instances__transaction_id__certainty_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
+            };
             header?: never;
             path: {
                 transaction_id: string;
@@ -11767,7 +13199,10 @@ export interface operations {
     };
     get_schedule_schedules__schedule_id__get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
+            };
             header?: never;
             path: {
                 schedule_id: string;
@@ -11864,7 +13299,10 @@ export interface operations {
     };
     get_slot_certainty_schedules__schedule_id__occurrences__occurrence_date__certainty_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
+            };
             header?: never;
             path: {
                 schedule_id: string;
@@ -12014,7 +13452,7 @@ export interface operations {
         parameters: {
             query?: {
                 status?: "open" | "accepted" | "rejected" | "withdrawn" | "all";
-                kind?: ("schedule" | "transfer_link" | "match" | "transfer_pair") | null;
+                kind?: ("schedule" | "transfer_link" | "match" | "transfer_pair" | "split" | "trade_rule") | null;
                 /** @description account id or path (either side) */
                 account?: string | null;
                 include_snoozed?: boolean;
@@ -12022,6 +13460,8 @@ export interface operations {
                 limit?: number;
                 /** @description rows of earlier pages to skip, for the next page */
                 offset?: number;
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
             };
             header?: never;
             path?: never;
@@ -12082,7 +13522,10 @@ export interface operations {
     };
     get_suggestion_suggestions__suggestion_id__get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
+            };
             header?: never;
             path: {
                 suggestion_id: string;
@@ -12250,7 +13693,7 @@ export interface operations {
                 /** @description category subtree, e.g. expenses.dining */
                 category?: string | null;
                 payee?: string | null;
-                /** @description substring match on description */
+                /** @description search: words all found in payee, description or memo ("a phrase", -word excludes; payee:, desc:, memo: scope one; payee:py_... is that payee), plus account:, category:, amount:>100 (magnitude; is:debit or is:credit for direction), amount:10..20, date:2026-10, date:2026-01..2026-03, status:pending,posted, is:unreviewed. A malformed clause is a 422. */
                 q?: string | null;
                 start?: string | null;
                 end?: string | null;
@@ -12262,6 +13705,8 @@ export interface operations {
                 reviewed?: boolean | null;
                 limit?: number;
                 offset?: number;
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
             };
             header?: never;
             path?: never;
@@ -12357,12 +13802,47 @@ export interface operations {
             };
         };
     };
+    present_transactions_present_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PresentIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PresentOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     review_batch_transactions_review_batch_get: {
         parameters: {
             query?: {
                 limit?: number;
                 account?: string | null;
                 include_guidance?: boolean;
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
             };
             header?: never;
             path?: never;
@@ -12478,7 +13958,10 @@ export interface operations {
     };
     get_transaction_transactions__tx_id__get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
+            };
             header?: never;
             path: {
                 tx_id: string;
@@ -12591,6 +14074,114 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TransactionDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    split_transaction_transactions__tx_id__split_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tx_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SplitIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SplitResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    unsplit_transaction_transactions__tx_id__split_delete: {
+        parameters: {
+            query?: {
+                /** @description the row's category afterwards; default the uncategorized placeholder */
+                category?: string | null;
+                dry_run?: boolean;
+            };
+            header?: never;
+            path: {
+                tx_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SplitResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    split_backing_candidates_transactions__tx_id__split_candidates_get: {
+        parameters: {
+            query: {
+                /** @description the account line's account (path or id) */
+                account: string;
+                /** @description the leg the line books on that account (its amount, negated) */
+                amount?: number | string | null;
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
+            };
+            header?: never;
+            path: {
+                tx_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BackingCandidates"];
                 };
             };
             /** @description Validation Error */

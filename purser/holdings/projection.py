@@ -34,7 +34,7 @@ lock, §3.7, made the same choice for the same reason).
 
 import uuid
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, localcontext
@@ -44,7 +44,7 @@ from sqlalchemy.orm import Session, load_only
 
 from purser import audit, balances, clock, locks
 from purser.core import holdings as core
-from purser.holdings import lotbook
+from purser.holdings import lotbook, overlay
 from purser.ledger import LedgerError, NotFoundError
 from purser.logging import get_logger
 from purser.models import (
@@ -53,7 +53,6 @@ from purser.models import (
     Position,
     PositionEvent,
     Posting,
-    SecurityPrice,
     Transaction,
 )
 
@@ -125,6 +124,11 @@ def event_fact(row: PositionEvent) -> core.Event:
         cost_basis=Decimal(row.cost_basis) if row.cost_basis is not None else None,
         reverses_id=row.reverses_id,
         replaces_id=row.replaces_id,
+        split=(
+            (row.split_numerator, row.split_denominator)
+            if row.split_numerator is not None and row.split_denominator is not None
+            else None
+        ),
     )
 
 
@@ -151,7 +155,11 @@ def position_events(
                 PositionEvent.fees,
                 PositionEvent.cost_basis,
                 PositionEvent.reverses_id,
+                PositionEvent.replaces_id,
                 PositionEvent.transaction_id,
+                PositionEvent.split_numerator,
+                PositionEvent.split_denominator,
+                PositionEvent.in_lieu_of,
             )
         )
         .where(PositionEvent.position_id.in_(position_ids))
@@ -256,6 +264,7 @@ SELECT DISTINCT ON (symbol, as_of) symbol, as_of, market_value, quantity
 FROM holdings_snapshots
 WHERE source = 'feed'
   AND symbol = ANY(CAST(:symbols AS text[]))
+  AND as_of >= :lower
   AND as_of <= :upper
   AND quantity > 0
   AND market_value > 0
@@ -263,41 +272,130 @@ ORDER BY symbol, as_of, quantity DESC, id
 """
 )
 
+# The same feed-implied closes walking BACK from :before, a batch per symbol
+# (the holdings_feed_symbol index, newest first): what a bounded book needs
+# from before its window (``_feed_carry``).
+_FEED_IMPLIED_BEFORE = text(
+    """
+SELECT s.symbol, f.as_of, f.market_value, f.quantity
+FROM unnest(CAST(:symbols AS text[])) AS s(symbol)
+CROSS JOIN LATERAL (
+  SELECT DISTINCT ON (h.as_of) h.as_of, h.market_value, h.quantity
+  FROM holdings_snapshots h
+  WHERE h.source = 'feed'
+    AND h.symbol = s.symbol
+    AND h.as_of < :before
+    AND h.quantity > 0
+    AND h.market_value > 0
+  ORDER BY h.as_of DESC, h.quantity DESC, h.id
+  LIMIT :batch
+) f
+ORDER BY s.symbol, f.as_of DESC
+"""
+)
+_CARRY_BATCH = 32
+
+
+def _implied(market: Decimal, quantity: Decimal) -> Decimal:
+    with localcontext() as ctx:
+        ctx.prec = 60
+        return (Decimal(market) / Decimal(quantity)).quantize(core.PRICE_QUANT)
+
+
+def _feed_carry(session: Session, symbols: list[str], start: date) -> dict[str, core.PricePoint]:
+    """Per symbol, the feed-implied close a FULL book would have in effect
+    on the day before ``start``: the newest one that fits a price, dated the
+    day its value FIRST appeared in that unbroken run of equal closes
+    (``core.PriceBook`` keeps an unchanged feed close on its first day, and
+    the next close is compared with it). A bounded book seeded with it
+    answers like the full one from ``start`` on (#404). Walks back only as
+    far as the run reaches: one batch per symbol, usually."""
+    out: dict[str, core.PricePoint] = {}
+    pending = {symbol: start for symbol in symbols}
+    found: dict[str, tuple[Decimal, date]] = {}  # symbol -> (run close, its earliest day)
+    while pending:
+        rows: dict[str, list[tuple[date, Decimal, Decimal]]] = defaultdict(list)
+        for before in sorted(set(pending.values())):
+            group = sorted(s for s, b in pending.items() if b == before)
+            for symbol, as_of, market, quantity in session.execute(
+                _FEED_IMPLIED_BEFORE, {"symbols": group, "before": before, "batch": _CARRY_BATCH}
+            ):
+                rows[symbol].append((as_of, Decimal(market), Decimal(quantity)))
+        nxt: dict[str, date] = {}
+        for symbol in pending:
+            batch = rows.get(symbol, [])
+            done = len(batch) < _CARRY_BATCH
+            for as_of, market, quantity in batch:
+                close = _implied(market, quantity)
+                if not 0 < close < core.MAX_PRICE:
+                    continue  # never enters a book
+                run = found.get(symbol)
+                if run is None or run[0] == close:
+                    found[symbol] = (close, as_of)
+                else:
+                    done = True
+                    break
+            if not done:
+                nxt[symbol] = batch[-1][0]
+        pending = nxt
+    for symbol, (close, first_day) in found.items():
+        out[symbol] = core.PricePoint(first_day, close, core.SOURCE_FEED)
+    return out
+
 
 def price_points(
-    session: Session, symbols: Iterable[str], *, upper: date
+    session: Session, symbols: Iterable[str], *, upper: date, start: date | None = None
 ) -> dict[str, list[core.PricePoint]]:
     """Every close of these symbols dated on or before ``upper``: the stored
     ones (manual and provider) plus the feed-implied ones, computed here and
-    never stored (decision 89)."""
+    never stored (decision 89).
+
+    With ``start`` (#404): only what a book needs to answer exactly as the
+    full one does on every day from the day before ``start`` on — the
+    closes dated ``start`` or later, the newest stored date before it
+    (``overlay.stored_points``) and the feed-implied close in effect then
+    (``_feed_carry``). Resolution is newest date first, so the history
+    before that cannot change an answer, and the window's own feed closes
+    are compared with the same predecessor as in the full book."""
     wanted = sorted(set(symbols))
     out: dict[str, list[core.PricePoint]] = defaultdict(list)
     if not wanted:
         return out
-    for row in session.execute(
-        select(SecurityPrice).where(
-            SecurityPrice.symbol.in_(wanted), SecurityPrice.price_date <= upper
-        )
-    ).scalars():
-        out[row.symbol].append(core.PricePoint(row.price_date, Decimal(row.close), row.source))
+    for symbol, points in overlay.stored_points(session, wanted, upper=upper, start=start).items():
+        out[symbol].extend(points)
+    if start is not None:
+        for symbol, point in _feed_carry(session, wanted, start).items():
+            out[symbol].append(point)
     for symbol, as_of, market, quantity in session.execute(
-        _FEED_IMPLIED, {"symbols": wanted, "upper": upper}
+        _FEED_IMPLIED,
+        {"symbols": wanted, "lower": start or date.min, "upper": upper},
     ):
-        with localcontext() as ctx:
-            ctx.prec = 60
-            close = (Decimal(market) / Decimal(quantity)).quantize(core.PRICE_QUANT)
+        close = _implied(market, quantity)
         if close > 0:
             out[symbol].append(core.PricePoint(as_of, close, core.SOURCE_FEED))
     return out
 
 
 def price_books(
-    session: Session, symbols: Iterable[str], *, upper: date
+    session: Session, symbols: Iterable[str], *, upper: date, start: date | None = None
 ) -> dict[str, core.PriceBook]:
+    """A ``core.PriceBook`` per symbol with a close (``price_points``). With
+    ``start``, the book answers like the full one on every day from the day
+    before ``start`` on, and lists the same close dates from ``start``."""
     return {
         symbol: core.PriceBook(points)
-        for symbol, points in price_points(session, symbols, upper=upper).items()
+        for symbol, points in price_points(session, symbols, upper=upper, start=start).items()
     }
+
+
+def latest_books(
+    session: Session, symbols: Iterable[str], *, today: date
+) -> dict[str, core.PriceBook]:
+    """Books that answer for ``today`` (``book.on(today)``) and nothing
+    earlier: the newest stored date at or before it and the feed-implied
+    close in effect, a few rows per symbol however long its history (#404).
+    Position states, the price status and staleness read only today."""
+    return price_books(session, symbols, upper=today, start=today + timedelta(days=1))
 
 
 def upper_bound(account: Account, today: date) -> date:
@@ -369,10 +467,22 @@ def manual_spans(session: Session, account_id: uuid.UUID) -> ManualSpans:
 
 
 def computed_rows(
-    session: Session, account: Account, *, today: date
+    session: Session,
+    account: Account,
+    *,
+    today: date,
+    start: date | None = None,
+    books: Mapping[str, core.PriceBook] | None = None,
 ) -> tuple[list[core.Row], ManualSpans]:
     """The account's manual rows as the facts give them now (one projection
-    per manual period, so each starts with a full set), and those periods."""
+    per manual period, so each starts with a full set), and those periods.
+
+    ``start`` (#404) computes only the rows dated ``start`` or later — the
+    same rows the full computation gives there (``core.projection_rows``) —
+    from the closes a book needs from then on (``price_books``), so a write
+    dated near today costs its window, not the account's history. ``books``
+    are closes a caller already loaded for several accounts (``record_price``):
+    full books, or books loaded with a start no later than ``start``."""
     spans = manual_spans(session, account.id)
     positions = position_facts(session, account.id)
     first = core.first_event_date(positions)
@@ -380,7 +490,9 @@ def computed_rows(
         return [], spans
     upper = upper_bound(account, today)
     ranges = spans.ranges(lower=first, upper=upper)
-    books = price_books(session, {p.symbol for p in positions}, upper=upper)
+    window = start if start is not None and start > first else None
+    if books is None:
+        books = price_books(session, {p.symbol for p in positions}, upper=upper, start=window)
     rows: list[core.Row] = []
     try:
         for lo, hi in ranges:
@@ -388,8 +500,12 @@ def computed_rows(
             # an earlier period ends where a feed run begins, and a closed
             # account takes no cash after it closed.
             current = hi == upper == today
+            if window is not None and hi < window and not current:
+                continue  # wholly before the window
             rows.extend(
-                core.projection_rows(positions, books, lower=lo, upper=hi, settle_after=current)
+                core.projection_rows(
+                    positions, books, lower=lo, upper=hi, settle_after=current, start=window
+                )
             )
     except core.NegativeQuantity as exc:
         raise LedgerError(str(exc)) from exc
@@ -416,6 +532,8 @@ def project_account(
     *,
     from_date: date | None = None,
     today: date | None = None,
+    books: Mapping[str, core.PriceBook] | None = None,
+    mark_dirty: bool = True,
 ) -> ProjectionResult:
     """Bring ``account``'s manual snapshot rows dated on or after
     ``from_date`` in line with its events and prices, outside the feed's
@@ -423,14 +541,18 @@ def project_account(
 
     The caller holds the account's lock (``lock_accounts``). A feed-sourced
     account is left alone: its positions are read-only history until it is
-    switched back. Rows are compared on (date, position) and only the ones
-    that differ are deleted and inserted; ``networth_dirty_from`` is lowered
-    to the first changed date, so ``consume_watermark`` heals
-    ``net_worth_daily`` from there (decision 38)."""
+    switched back. Only the rows from ``from_date`` on are computed and read
+    (``computed_rows``, #404). Rows are compared on (date, position) and only
+    the ones that differ are deleted and inserted; ``networth_dirty_from`` is
+    lowered to the first changed date, so ``consume_watermark`` heals
+    ``net_worth_daily`` from there (decision 38). ``mark_dirty=False`` leaves
+    that to a caller projecting several accounts, which marks once after the
+    last (``record_price``): the watermark row lock is then held for one
+    statement, not across the projections. ``books``: ``computed_rows``."""
     if account.holdings_source != "manual":
         return ProjectionResult(None, 0, 0)
     today = today or clock.ledger_today()
-    rows, spans = computed_rows(session, account, today=today)
+    rows, spans = computed_rows(session, account, today=today, start=from_date, books=books)
 
     write_from = from_date
     if write_from is not None:
@@ -525,7 +647,7 @@ def project_account(
             first=min(r.as_of for r in starts).isoformat(),
         )
     changed_from = min(changed) if changed else None
-    if changed_from is not None:
+    if changed_from is not None and mark_dirty:
         balances.mark_dirty(session, changed_from, networth_only=True)
     return ProjectionResult(changed_from, len(fresh), len(stale_ids))
 
@@ -540,6 +662,18 @@ def manual_accounts_holding(session: Session, symbol: str) -> list[uuid.UUID]:
             .where(Position.symbol == symbol, Account.holdings_source == "manual")
             .distinct()
         ).scalars()
+    )
+
+
+def symbols_of(session: Session, account_ids: Iterable[uuid.UUID]) -> set[str]:
+    """Every symbol a position on these accounts holds or held."""
+    ids = list(set(account_ids))
+    if not ids:
+        return set()
+    return set(
+        session.execute(select(Position.symbol).where(Position.account_id.in_(ids)).distinct())
+        .scalars()
+        .all()
     )
 
 

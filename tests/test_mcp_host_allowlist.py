@@ -1,8 +1,9 @@
 """The MCP Host/Origin guard (DNS-rebinding protection, purser/mcp/mount.py).
 
 The allowlist admits the instance's public host — PURSER_PUBLIC_URL, which is
-what a reverse proxy forwards — plus the local dev hosts. FastMCP answers 421
-for any other Host and 403 for an Origin outside the list.
+what a reverse proxy forwards — the exact names in PURSER_ALLOWED_HOSTS (#633)
+and the local dev hosts. FastMCP answers 421 for any other Host and 403 for an
+Origin outside the list.
 
 Two facts shape the integration tests:
 - FastMCP also admits the server's own host, and TestClient's default Host
@@ -38,30 +39,51 @@ INITIALIZE = {
 MCP_HEADERS = {"Accept": "application/json, text/event-stream"}
 
 
+# A home server (decision 117): its address is the public URL, and its other
+# names are listed (#633). RFC 5737 documentation addresses only.
+HOME_URL = "http://192.0.2.10:8000"
+HOME_NAMES = "homeserver,homeserver.local"
+
+
 @contextmanager
-def _public_url(url: str) -> Iterator[None]:
-    """PURSER_PUBLIC_URL set and the cached Settings dropped on both sides, so
-    neither this value nor a stale one leaks into neighbouring tests."""
-    previous = os.environ.get("PURSER_PUBLIC_URL")
-    os.environ["PURSER_PUBLIC_URL"] = url
+def _env(**variables: str) -> Iterator[None]:
+    """PURSER_* variables set and the cached Settings dropped on both sides,
+    so neither these values nor stale ones leak into neighbouring tests."""
+    names = {f"PURSER_{key.upper()}": value for key, value in variables.items()}
+    previous = {name: os.environ.get(name) for name in names}
+    os.environ.update(names)
     purser.config.get_settings.cache_clear()
     try:
         yield
     finally:
-        if previous is None:
-            os.environ.pop("PURSER_PUBLIC_URL", None)
-        else:
-            os.environ["PURSER_PUBLIC_URL"] = previous
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
         purser.config.get_settings.cache_clear()
 
 
 def test_allowlist_admits_the_public_host_and_local_dev_hosts() -> None:
-    with _public_url(PUBLIC_URL):
+    with _env(public_url=PUBLIC_URL):
         hosts, origins = _host_origin_allowlist()
     assert {PUBLIC_HOST, f"{PUBLIC_HOST}:*", "localhost", "localhost:*"} <= set(hosts)
     assert PUBLIC_URL in origins
     assert "*" not in hosts
     assert "*" not in origins
+
+
+def test_allowlist_adds_the_allowed_names_exactly() -> None:
+    """Each allowed name on any port, or on the one port written with it; its
+    origins on the public URL's port. No entry is a pattern (#633)."""
+    with _env(public_url=HOME_URL, allowed_hosts=f"{HOME_NAMES},192.0.2.11:8010"):
+        hosts, origins = _host_origin_allowlist()
+    assert {"homeserver", "homeserver:*", "homeserver.local", "homeserver.local:*"} <= set(hosts)
+    assert "192.0.2.11:8010" in hosts
+    assert "192.0.2.11" not in hosts and "192.0.2.11:*" not in hosts
+    assert {"http://homeserver:8000", "http://homeserver.local:8000"} <= set(origins)
+    assert "http://192.0.2.11:8010" in origins
+    assert not [h for h in hosts if any(c in h.removesuffix(":*") for c in "*?[")]
 
 
 @pytest.fixture
@@ -79,7 +101,16 @@ def mcp_client(read_token: str) -> Iterator[TestClient]:
     allowlist once, at create_app()."""
     from purser.api.app import create_app
 
-    with _public_url(PUBLIC_URL), TestClient(create_app()) as c:
+    with _env(public_url=PUBLIC_URL), TestClient(create_app()) as c:
+        yield c
+
+
+@pytest.fixture
+def home_client(read_token: str) -> Iterator[TestClient]:
+    """A home server reached by its address and its listed names (#633)."""
+    from purser.api.app import create_app
+
+    with _env(public_url=HOME_URL, allowed_hosts=HOME_NAMES), TestClient(create_app()) as c:
         yield c
 
 
@@ -104,6 +135,23 @@ class TestHostOriginGuard:
     def test_foreign_host_is_misdirected(self, mcp_client: TestClient, read_token: str) -> None:
         resp = _initialize(mcp_client, host=FOREIGN_HOST, token=read_token)
         assert resp.status_code == 421
+
+    def test_misdirected_answer_names_the_address_and_the_setting(
+        self, mcp_client: TestClient, read_token: str
+    ) -> None:
+        """An agent that connects by the wrong name is told which one works
+        and which setting changes it (#581), instead of a bare status."""
+        resp = _initialize(mcp_client, host="192.0.2.10:8000", token=read_token)
+        assert resp.status_code == 421
+        detail = resp.json()["detail"]
+        assert f"{PUBLIC_URL}/mcp" in detail
+        assert "'192.0.2.10:8000'" in detail
+        assert "PURSER_PUBLIC_URL" in detail
+
+    def test_misdirected_answer_is_not_given_without_a_token(self, mcp_client: TestClient) -> None:
+        resp = _initialize(mcp_client, host=FOREIGN_HOST, token=None)
+        assert resp.status_code == 401
+        assert PUBLIC_URL not in resp.text
 
     def test_public_host_is_served(self, mcp_client: TestClient, read_token: str) -> None:
         resp = _initialize(mcp_client, host=PUBLIC_HOST, token=read_token)
@@ -130,3 +178,55 @@ class TestHostOriginGuard:
         resp = _initialize(mcp_client, host=FOREIGN_HOST, token=None)
         assert resp.status_code == 401
         assert resp.json() == {"error": "invalid or missing bearer token"}
+
+
+class TestAllowedHosts:
+    """#633: the machine's other names reach the MCP endpoint; any other name
+    still gets 421, so DNS rebinding stays blocked."""
+
+    @pytest.mark.parametrize(
+        "host", ["homeserver:8000", "homeserver.local:8000", "HomeServer.Local:8000"]
+    )
+    def test_an_allowed_name_is_served(
+        self, home_client: TestClient, read_token: str, host: str
+    ) -> None:
+        resp = _initialize(home_client, host=host, token=read_token)
+        assert resp.status_code == 200, resp.text
+
+    @pytest.mark.parametrize("host", ["192.0.2.10:8000", "localhost:8000", "127.0.0.1:8000"])
+    def test_the_public_url_and_localhost_keep_working(
+        self, home_client: TestClient, read_token: str, host: str
+    ) -> None:
+        resp = _initialize(home_client, host=host, token=read_token)
+        assert resp.status_code == 200, resp.text
+
+    def test_an_allowed_name_as_origin_is_served(
+        self, home_client: TestClient, read_token: str
+    ) -> None:
+        resp = _initialize(
+            home_client,
+            host="192.0.2.10:8000",
+            token=read_token,
+            origin="http://homeserver.local:8000",
+        )
+        assert resp.status_code == 200, resp.text
+
+    @pytest.mark.parametrize(
+        "host", ["otherbox:8000", "homeserver.example.net:8000", "evil-homeserver.local:8000"]
+    )
+    def test_an_unlisted_name_is_still_misdirected(
+        self, home_client: TestClient, read_token: str, host: str
+    ) -> None:
+        resp = _initialize(home_client, host=host, token=read_token)
+        assert resp.status_code == 421
+
+    def test_the_421_says_how_to_allow_another_name(
+        self, home_client: TestClient, read_token: str
+    ) -> None:
+        resp = _initialize(home_client, host="otherbox:8000", token=read_token)
+        assert resp.status_code == 421
+        detail = resp.json()["detail"]
+        assert f"{HOME_URL}/mcp" in detail
+        assert "homeserver, homeserver.local" in detail
+        assert "add it to PURSER_ALLOWED_HOSTS" in detail
+        assert "'otherbox'" in detail

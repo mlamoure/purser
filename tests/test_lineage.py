@@ -19,6 +19,7 @@ from sqlalchemy import Engine, select
 import purser.db
 from purser import lineage
 from purser.models import Transaction
+from tests.conftest import today
 from tests.test_matching import _imported
 from tests.test_transfer_pair_suggestions import (  # noqa: F401 (fixture re-export)
     CHECKING,
@@ -29,7 +30,7 @@ from tests.test_transfer_pair_suggestions import (  # noqa: F401 (fixture re-exp
 
 
 def _ago(days: int) -> date:
-    return date.today() - timedelta(days=days)
+    return today() - timedelta(days=days)
 
 
 def _recategorize(tx_id: str) -> str:

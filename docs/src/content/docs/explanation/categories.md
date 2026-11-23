@@ -20,8 +20,12 @@ application code.
 One virtual account is not a category: `equity.securities`, the other side of
 a securities trade's cash (see [Track holdings by hand](../../how-to/manual-holdings/)).
 Like a category it is virtual, so it stays out of net worth; unlike one it is
-never offered as a category, never counted as income or spending, and no rule,
-schedule or classifier can book to it. The `equity` subtree belongs to it:
+never offered as a category, never counted as income or spending, and no
+schedule or classifier can book to it. On a brokerage account whose holdings
+come from the feed you can mark a buy or sell row as a **Securities trade**, and
+a rule scoped to such accounts can do the same (see
+[Mark brokerage buys and sells](../../how-to/brokerage-trades/)); that is an
+explicit choice, never a category in a picker. The `equity` subtree belongs to it:
 no category or account can be created at `equity` or under it (a 422 says
 so), and a rollup or spending summary of that subtree counts nothing.
 
@@ -42,10 +46,13 @@ trail, not an editable sticky note.
 
 ## A curated, described default set
 
-Purser ships 100 categories whose structure is adapted from the Plaid
+Purser ships 102 categories whose structure is adapted from the Plaid
 Personal Finance Categories taxonomy, with the transfer and loan-payment groups
 deliberately removed — those are structural transfers here, not spending. The
-set is seeded once and merges additively on upgrade, so your deletions stick.
+set is seeded once and merges additively on upgrade, so your deletions stick;
+a category added to the shipped set in a later release (such as **Gifts
+received** and **Employer contributions** under Income) is added once by that
+release's upgrade.
 Every category carries a one-line **description**, in Purser's own words,
 written for the AI classifier and surfaced in **Settings -> Categories**.
 

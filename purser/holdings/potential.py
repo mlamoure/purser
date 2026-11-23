@@ -40,7 +40,7 @@ def overview(session: Session, today: date) -> dict[str, Any]:
                 continue
             if view.unvested > 0:
                 units[view.award.symbol] = units.get(view.award.symbol, Decimal(0)) + view.unvested
-    books = projection.price_books(session, set(units), upper=today)
+    books = projection.latest_books(session, set(units), today=today)
     known = Decimal(0)
     missing: list[str] = []
     stale: list[str] = []

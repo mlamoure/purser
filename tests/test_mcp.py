@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -18,8 +18,8 @@ import uvicorn
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 
-# UTC, not local — see the note in tests/test_networth.py (issue #140).
-TODAY = datetime.now(UTC).date()
+from tests.conftest import today
+
 # A fixed past day for rows whose date only orders them (#262: never let a
 # seed depend on where today falls in the month).
 SPLIT_DAY = date(2026, 7, 15)
@@ -60,6 +60,7 @@ EXPECTED_TOOLS = {
     "record_position",
     "record_price",
     "record_sale",
+    "record_split",
     "reverse_position_event",
     "reopen_position",
     # tools_lots (#393)
@@ -102,9 +103,13 @@ EXPECTED_TOOLS = {
     "update_occurrence_certainty",
     "match",
     "confirm_transfer",
+    "split_transaction",
+    "unsplit_transaction",
     "reconcile_account",
+    "set_starting_balance",
     "record_valuation",
     "update_account",
+    "map_feed_accounts",
     "trigger_sync",
     "refetch_feed",
 }
@@ -169,7 +174,7 @@ def seeded_tokens(admin_client: TestClient, migrated_engine: Engine) -> dict[str
     )
     # Restaurant spending across three months + groceries noise.
     for months_back, amount in [(2, "-120.00"), (1, "-180.00"), (0, "-95.00")]:
-        on = (TODAY.replace(day=15) - timedelta(days=30 * months_back)).isoformat()
+        on = (today().replace(day=15) - timedelta(days=30 * months_back)).isoformat()
         admin_client.post(
             "/transactions",
             json={
@@ -187,7 +192,7 @@ def seeded_tokens(admin_client: TestClient, migrated_engine: Engine) -> dict[str
             "account": "assets.checking",
             "category": "expenses.groceries",
             "amount": "-300.00",
-            "date": TODAY.isoformat(),
+            "date": today().isoformat(),
             "status": "posted",
         },
     )
@@ -258,14 +263,14 @@ class TestScopeDecorator:
 
     def test_a_tool_cannot_register_without_declaring_a_scope(self) -> None:
         from purser.mcp._registry import audited_tool
-        from purser.mcp.privacy import NOTHING
+        from purser.privacy import NOTHING
 
         with pytest.raises(TypeError, match="scope"):
             audited_tool(kind="read", entity="system", emits=NOTHING)  # type: ignore[call-arg]
 
     def test_an_unknown_scope_fails_at_import_not_at_call_time(self) -> None:
         from purser.mcp._registry import audited_tool
-        from purser.mcp.privacy import NOTHING
+        from purser.privacy import NOTHING
 
         with pytest.raises(ValueError, match="unknown scope"):
             audited_tool(kind="read", entity="system", scope="reed", emits=NOTHING)
@@ -410,7 +415,7 @@ class TestMcpServer:
         retry into an error carrying the difference. It uses its own account
         and past dates, so the fixture's day-of-month seeding cannot reach it
         (#262)."""
-        opened, statement = TODAY - timedelta(days=20), TODAY - timedelta(days=10)
+        opened, statement = today() - timedelta(days=20), today() - timedelta(days=10)
         assert (
             client.post(
                 "/accounts", json={"name": "Wallet", "type": "cash", "path": "assets.wallet"}
@@ -481,7 +486,7 @@ class TestMcpServer:
     ) -> None:
         args = {
             "account": "assets.checking",
-            "as_of": (TODAY - timedelta(days=1)).isoformat(),
+            "as_of": (today() - timedelta(days=1)).isoformat(),
             "statement_balance": "1.00",
             "dry_run": True,
         }
@@ -504,7 +509,7 @@ class TestMcpServer:
         )
         assert resp.status_code == 201, resp.text
         loan_id = resp.json()["id"]
-        as_of = (TODAY - timedelta(days=3)).isoformat()
+        as_of = (today() - timedelta(days=3)).isoformat()
         loan = {"account": "liabilities.mortgage", "as_of": as_of}
 
         refused, recorded = _mcp_call(
@@ -548,7 +553,7 @@ class TestMcpServer:
         )
         assert resp.status_code == 201, resp.text
         loan_id = resp.json()["id"]
-        as_of = (TODAY - timedelta(days=3)).isoformat()
+        as_of = (today() - timedelta(days=3)).isoformat()
         rest = client.post(
             f"/accounts/{loan_id}/valuations", json={"as_of": as_of, "value": "250000.00"}
         )
@@ -584,7 +589,7 @@ class TestMcpServer:
             json={"name": "Brokerage", "type": "brokerage", "path": "assets.brokerage"},
         )
         assert resp.status_code == 201, resp.text
-        as_of = (TODAY - timedelta(days=3)).isoformat()
+        as_of = (today() - timedelta(days=3)).isoformat()
         listed = {a["path"]: a["id"] for a in client.get("/accounts").json()}
         paths = ("assets.checking", "assets.brokerage")
         rest = [
@@ -616,7 +621,7 @@ class TestMcpServer:
     ) -> None:
         args = {
             "account": "assets.checking",
-            "as_of": (TODAY - timedelta(days=1)).isoformat(),
+            "as_of": (today() - timedelta(days=1)).isoformat(),
             "value": "1.00",
         }
         for profile in ("reader",):
@@ -961,9 +966,11 @@ class TestMcpServer:
         client: TestClient,
         migrated_engine: Engine,
     ) -> None:
-        """Decision 87: a split transaction (one real leg, several category
-        legs) carries `split: n` and no category; other rows never carry the
-        key."""
+        """Decisions 87 and 118: a split transaction (it carries the split
+        marker) carries `split: n` and no category; other rows never carry
+        the key."""
+        from sqlalchemy import text
+
         from tests.test_split_loan_payment import _insert
 
         tx_id = _insert(
@@ -973,7 +980,16 @@ class TestMcpServer:
                 ("expenses.dining", "70.00"),
                 ("expenses.groceries", "30.00"),
             ],
+            status="pending",
         )
+        with migrated_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE transactions SET split_account_id = "
+                    "(SELECT id FROM accounts WHERE path = 'assets.checking') WHERE id = :id"
+                ),
+                {"id": tx_id},
+            )
         (page,) = _mcp_call(
             live_server.url,
             seeded_tokens["reader"],
@@ -1120,6 +1136,8 @@ class TestMcpServer:
         assert "requires scope: read" in denied["error"]
         (allowed,) = _mcp_call(live_server.url, seeded_tokens["reader"], [("describe", {})])
         assert "accounts" in allowed and "categories" in allowed
+        # One word on how Purser is reached (#632); nothing reported here.
+        assert allowed["reach"] in ("this_machine", "home_network", "reverse_proxy", "unknown")
 
     def test_spending_summary_grand_total_survives_truncation(
         self, seeded_tokens: dict[str, str], live_server: LiveServer, client: TestClient
@@ -1138,7 +1156,7 @@ class TestMcpServer:
                     "account": "assets.checking",
                     "category": path,
                     "amount": "-10.00",
-                    "date": TODAY.isoformat(),
+                    "date": today().isoformat(),
                     "status": "posted",
                 },
             )
@@ -1185,7 +1203,7 @@ class TestMcpServer:
                         "account": "assets.checking",
                         "category": "expenses.dining",
                         "amount": "-25.00",
-                        "date_": TODAY.isoformat(),
+                        "date_": today().isoformat(),
                         "payee": "Chipotle",
                         "status": "posted",  # honoured: the agent acts for the user (#436)
                     },
@@ -1209,7 +1227,7 @@ class TestMcpServer:
                         "account": "assets.checking",
                         "category": "expenses.dining",
                         "amount": "-25.00",
-                        "date_": TODAY.isoformat(),
+                        "date_": today().isoformat(),
                     },
                 )
             ],
@@ -1273,7 +1291,7 @@ class TestMcpServer:
     ) -> None:
         """create_schedule (dtstart persisted) -> override/skip instances ->
         update/end the rule, all over MCP (#231)."""
-        anchor = (TODAY - timedelta(days=3)).isoformat()
+        anchor = (today() - timedelta(days=3)).isoformat()
         (created,) = _mcp_call(
             live_server.url,
             seeded_tokens["operator"],
@@ -1373,7 +1391,7 @@ class TestMcpServer:
                 "account": "liabilities.amex",
                 "category": "expenses.dining",
                 "amount": "-412.00",
-                "date": TODAY.isoformat(),
+                "date": today().isoformat(),
                 "status": "posted",
             },
         )
@@ -1384,7 +1402,7 @@ class TestMcpServer:
                 "account": "assets.checking",
                 "counterparty_account": "liabilities.amex",
                 "rrule": "FREQ=WEEKLY",
-                "dtstart": (TODAY - timedelta(days=3)).isoformat(),
+                "dtstart": (today() - timedelta(days=3)).isoformat(),
                 "amount_type": "estimated",
                 "estimate_basis": "counterparty_balance",
             },
@@ -1444,7 +1462,7 @@ class TestMcpServer:
                 "name": "Gym",
                 "account": "assets.checking",
                 "rrule": "FREQ=WEEKLY",
-                "dtstart": (TODAY - timedelta(days=3)).isoformat(),
+                "dtstart": (today() - timedelta(days=3)).isoformat(),
                 "amount": "-60.00",
                 "category": "expenses.dining",
             },
@@ -1548,7 +1566,7 @@ class TestMcpServer:
                     {
                         "suggestion_id": sid,
                         "decision": "snooze",
-                        "snooze_until": (TODAY + timedelta(days=7)).isoformat(),
+                        "snooze_until": (today() + timedelta(days=7)).isoformat(),
                     },
                 ),
                 ("list_suggestions", {}),
@@ -1837,7 +1855,7 @@ class TestHoldingsTools:
             session.add(
                 HoldingsSnapshot(
                     account_id=uuid.UUID(account_id),
-                    as_of=TODAY - timedelta(days=1),
+                    as_of=today() - timedelta(days=1),
                     symbol="ACME",
                     quantity=Decimal("3"),
                     market_value=Decimal("30.00"),
@@ -1868,7 +1886,7 @@ class TestHoldingsTools:
         with db.get_sessionmaker()() as session:
             session.add(
                 SecurityPrice(
-                    symbol=symbol, price_date=TODAY, source="manual", close=Decimal("25000")
+                    symbol=symbol, price_date=today(), source="manual", close=Decimal("25000")
                 )
             )
             session.commit()
@@ -1880,7 +1898,7 @@ class TestHoldingsTools:
                 "account": "assets.broker",
                 "symbol": symbol,
                 "quantity": "1000000000000",
-                "as_of": TODAY.isoformat(),
+                "as_of": today().isoformat(),
             },
         )
         assert not result.is_error
@@ -1908,7 +1926,7 @@ class TestHoldingsTools:
             "account": "assets.broker",
             "symbol": symbol,
             "quantity": "412.5",
-            "as_of": TODAY.isoformat(),
+            "as_of": today().isoformat(),
             "source_note": "broker holdings page",
         }
         (denied,) = _mcp_call(live_server.url, seeded_tokens["reader"], [("record_position", args)])
@@ -1926,7 +1944,7 @@ class TestHoldingsTools:
             [
                 (
                     "record_price",
-                    {"symbol": symbol.lower(), "date": TODAY.isoformat(), "close": "10"},
+                    {"symbol": symbol.lower(), "date": today().isoformat(), "close": "10"},
                 )
             ],
         )
@@ -1940,7 +1958,7 @@ class TestHoldingsTools:
                 "quantity": "412.5",
                 "market_value": "4125.00",
                 "price": "10",
-                "price_as_of": TODAY.isoformat(),
+                "price_as_of": today().isoformat(),
             }
         ]
 
@@ -1950,7 +1968,7 @@ class TestHoldingsTools:
         """Zero shares are valued on nothing: their old close is not stale,
         and the answer does not say it is."""
         symbol = f"Z{uuid.uuid4().hex[:6].upper()}"
-        old = (TODAY - timedelta(days=30)).isoformat()
+        old = (today() - timedelta(days=30)).isoformat()
         _mcp_call(
             live_server.url,
             seeded_tokens["operator"],
@@ -1970,7 +1988,7 @@ class TestHoldingsTools:
                 "account": "assets.broker",
                 "symbol": symbol,
                 "quantity": "0",
-                "as_of": TODAY.isoformat(),
+                "as_of": today().isoformat(),
             },
         )
         assert not result.is_error
@@ -1992,14 +2010,14 @@ class TestHoldingsTools:
                     account_ref="assets.broker",
                     symbol=symbol,
                     quantity=Decimal(f"{n + 1}.123456"),
-                    as_of=TODAY,
+                    as_of=today(),
                     cost_basis=Decimal("100.00"),
                     token=None,
                 )
                 price_service.record_price(
                     session,
                     symbol=symbol,
-                    price_date=TODAY - timedelta(days=n % 12),
+                    price_date=today() - timedelta(days=n % 12),
                     close=Decimal(f"{n + 10}.654321"),
                     token=None,
                 )
@@ -2040,7 +2058,7 @@ class TestHoldingsTools:
                     price_service.record_price(
                         session,
                         symbol=entry["top"][0]["symbol"],
-                        price_date=TODAY,
+                        price_date=today(),
                         close=Decimal("99999.5"),
                         token=None,
                     )
@@ -2096,7 +2114,7 @@ class TestHoldingsTools:
             session.add(
                 HoldingsSnapshot(
                     account_id=uuid.UUID(account_id),
-                    as_of=TODAY - timedelta(days=3),
+                    as_of=today() - timedelta(days=3),
                     symbol="ACME",
                     quantity=Decimal("10"),
                     market_value=Decimal("1234.5600"),
@@ -2133,11 +2151,11 @@ class TestHoldingsTools:
             json={
                 "symbol": "ACME",
                 "quantity": "5",
-                "as_of": (TODAY - timedelta(days=30)).isoformat(),
+                "as_of": (today() - timedelta(days=30)).isoformat(),
             },
         )
         assert resp.status_code == 201, resp.text
-        sale_day = TODAY - timedelta(days=10)
+        sale_day = today() - timedelta(days=10)
         while sale_day.weekday() >= 4:
             sale_day -= timedelta(days=1)
         resp = client.post(
@@ -2171,7 +2189,7 @@ class TestRecordSale:
     @staticmethod
     def _trade_day(days: int) -> date:
         """A Monday-to-Thursday date about ``days`` ago, so T+1 is the next day."""
-        day = TODAY - timedelta(days=days)
+        day = today() - timedelta(days=days)
         while day.weekday() >= 4:
             day -= timedelta(days=1)
         return day
@@ -2190,7 +2208,7 @@ class TestRecordSale:
             json={
                 "symbol": self.SYMBOL,
                 "quantity": "40",
-                "as_of": (TODAY - timedelta(days=60)).isoformat(),
+                "as_of": (today() - timedelta(days=60)).isoformat(),
             },
         )
         assert resp.status_code == 201, resp.text

@@ -43,6 +43,7 @@ const entry = {
     partial: false,
     response_has_more: false,
   },
+  privacy: null,
   extra_fields: [],
   requested_extra: [],
   before_after: null,
@@ -72,7 +73,9 @@ describe("Audit Log", () => {
     await user.click(
       screen.getByText("Budget Assistant", { selector: "span" }),
     );
-    expect(screen.getByText("Withheld: Merchant names")).toBeVisible();
+    expect(
+      screen.getByText("Withheld from this answer: Merchant names"),
+    ).toBeVisible();
     expect(
       screen.getByText("Original access grant was not recorded."),
     ).toBeVisible();
@@ -150,7 +153,7 @@ describe("Audit Log", () => {
       "integration-two",
     );
     await user.click(
-      screen.getByLabelText("Only fields returned beyond privacy defaults"),
+      screen.getByLabelText("Only calls that included external identifiers"),
     );
     await user.click(
       screen.getByRole("button", { name: "Access & permissions" }),
@@ -164,6 +167,76 @@ describe("Audit Log", () => {
             extra: true,
           }),
         },
+      }),
+    );
+  });
+
+  it("says when a call used privacy and when it returned identifiable data (#613)", async () => {
+    mockApi({
+      "GET /audit/options": ok(options),
+      "GET /audit/activity": ok(
+        page([
+          {
+            ...entry,
+            id: "private-call",
+            privacy: {
+              requested: ["amount", "payee"],
+              withheld: ["amount", "payee"],
+              identifiable: [],
+            },
+          },
+          {
+            ...entry,
+            id: "identifiable-call",
+            action: "GET /transactions",
+            channel: "rest",
+            identity: { ...entry.identity, name: "Planner" },
+            privacy: {
+              requested: [],
+              withheld: [],
+              identifiable: ["amount", "payee"],
+            },
+          },
+        ]),
+      ),
+    });
+    const { user } = renderWithProviders(<AuditLog />);
+    expect(await screen.findByText("Privacy used")).toBeVisible();
+    expect(screen.getByText("Identifiable")).toBeVisible();
+
+    await user.click(screen.getByText("Budget Assistant", { selector: "span" }));
+    expect(
+      screen.getByText(
+        "Privacy requested: the caller asked to leave out individual amounts, merchant names.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText("Withheld from this answer: Individual amounts, Merchant names"),
+    ).toBeVisible();
+
+    await user.click(screen.getByText("Planner", { selector: "span" }));
+    expect(
+      screen.getByText("Identifiable data returned: Individual amounts, Merchant names"),
+    ).toBeVisible();
+  });
+
+  it("filters on privacy used and identifiable data server-side (#613)", async () => {
+    mockApi({
+      "GET /audit/options": ok(options),
+      "GET /audit/activity": ok(page([])),
+    });
+    const { user } = renderWithProviders(<AuditLog />);
+    await screen.findByText("No recorded activity matches these filters.");
+    await user.selectOptions(screen.getByLabelText("Privacy use"), "identifiable");
+    await waitFor(() =>
+      expect(apiMock.GET).toHaveBeenCalledWith("/audit/activity", {
+        params: { query: expect.objectContaining({ privacy: "identifiable" }) },
+      }),
+    );
+    await user.selectOptions(screen.getByLabelText("Privacy use"), "requested");
+    await waitFor(() =>
+      expect(apiMock.GET).toHaveBeenCalledWith("/audit/activity", {
+        params: { query: expect.objectContaining({ privacy: "requested" }) },
       }),
     );
   });

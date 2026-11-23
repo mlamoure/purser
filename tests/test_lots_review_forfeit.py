@@ -8,7 +8,11 @@ import pytest
 from purser.holdings import awards
 from purser.ledger import LedgerError
 from tests.test_lots_review import _grant
-from tests.test_lots_service import AS_OF, _broker, _symbol
+from tests.test_lots_service import (
+    _as_of,
+    _broker,
+    _symbol,
+)
 
 
 def test_review_forfeit_is_not_unscheduled_entitlement(db_session):
@@ -19,8 +23,8 @@ def test_review_forfeit_is_not_unscheduled_entitlement(db_session):
         symbol,
         vested="0",
         schedule=(
-            awards.VestIn(AS_OF + timedelta(days=100), Decimal(10)),
-            awards.VestIn(AS_OF + timedelta(days=200), Decimal(90)),
+            awards.VestIn(_as_of() + timedelta(days=100), Decimal(10)),
+            awards.VestIn(_as_of() + timedelta(days=200), Decimal(90)),
         ),
     )
     [view] = awards.award_views(db_session, account)
@@ -47,8 +51,8 @@ def test_forfeit_and_broker_cancelled_count_once(db_session):
         symbol,
         vested="0",
         schedule=(
-            awards.VestIn(AS_OF + timedelta(days=100), Decimal(10)),
-            awards.VestIn(AS_OF + timedelta(days=200), Decimal(90)),
+            awards.VestIn(_as_of() + timedelta(days=100), Decimal(10)),
+            awards.VestIn(_as_of() + timedelta(days=200), Decimal(90)),
         ),
     )
     [view] = awards.award_views(db_session, account)

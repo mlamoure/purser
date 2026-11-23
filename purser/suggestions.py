@@ -26,6 +26,12 @@ type and its own apply:
   and reject is remembered as "not a transfer", which the automatic link
   paths honour too. A card whose pair stops being a candidate, or that the
   auto-linker links, is ``withdrawn``.
+- ``split`` (#590, decision 118) — a :class:`SplitDraft`: "split like last
+  time?" for a new bank row from a payee whose most recent split a person or
+  an agent made. Accept applies the copied lines through
+  ``splits.split_transaction`` (``edit_then_accept`` with edited ``lines``);
+  reject is remembered. A card whose row stopped being a plain bank row (split,
+  linked, voided) is ``withdrawn``.
 
 Three rules keep the inbox from becoming noise:
 
@@ -47,6 +53,7 @@ one row.
 """
 
 import hashlib
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -77,12 +84,29 @@ from purser.models import (
     Suggestion,
     Transaction,
 )
+from purser.privacy import MINUS_SIGN
 
 KIND_SCHEDULE = "schedule"
 KIND_TRANSFER_LINK = "transfer_link"
 KIND_MATCH = "match"
 KIND_TRANSFER_PAIR = "transfer_pair"
-KINDS = (KIND_SCHEDULE, KIND_TRANSFER_LINK, KIND_MATCH, KIND_TRANSFER_PAIR)
+KIND_SPLIT = "split"
+KIND_TRADE_RULE = "trade_rule"
+KINDS = (
+    KIND_SCHEDULE,
+    KIND_TRANSFER_LINK,
+    KIND_MATCH,
+    KIND_TRANSFER_PAIR,
+    KIND_SPLIT,
+    KIND_TRADE_RULE,
+)
+SOURCE_MARK = "mark"
+TRADE_RULE_DETECTOR = "securities_trade_mark"
+# The words of a marked row's payee (or description) a trade rule's draft
+# starts with: brokers word a buy "YOU BOUGHT <fund>", "Buy <fund>",
+# "Reinvestment <fund>", so the first words name the kind of row and the
+# rest the security. The person edits the draft before accepting it.
+TRADE_RULE_PREFIX_WORDS = 2
 SOURCE_CONFIRM = "confirm"
 SOURCE_DETECTED = "detected"
 STATUS_OPEN = "open"
@@ -97,6 +121,8 @@ TRANSFER_PAIR_DETECTOR = "transfer_pairing"
 # Without a bound, the first pass over an imported history floods the inbox.
 TRANSFER_PAIR_LOOKBACK_DAYS = 60
 TRANSFER_PAIR_PREFIX = "transfer_pair:"
+SPLIT_PREFIX = "split:"
+SPLIT_DETECTOR = "split_like_last_time"
 DECISIONS = ("accept", "reject", "snooze", "edit_then_accept")
 REJECT_SCOPES = ("exact", "counterparty")
 DEFAULT_SNOOZE_DAYS = 30
@@ -200,6 +226,41 @@ class TransferLinkDraft(BaseModel):
 TRANSFER_LINK_EDITABLE = frozenset({"amount_exact", "window_days", "effective_from"})
 
 
+class TradeRuleDraft(BaseModel):
+    """The typed draft a trade_rule suggestion carries (#591, decision 119):
+    exactly the categorize rule accepting it creates, as a DRAFT, that marks
+    rows like one a person marked as a securities trade. Scoped to the
+    marked row's account (a feed-holdings brokerage account, the only kind a
+    securities-trade rule may name) and drafted from its payee or
+    description; the text predicate and the direction are editable, the
+    account is the suggestion's identity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = 1
+    account: str
+    account_id: uuid.UUID
+    match_field: Literal["payee", "description", "payee_or_description"] = "payee_or_description"
+    match_mode: Literal["equals", "prefix", "contains"] = "prefix"
+    match_text: str = Field(min_length=1, max_length=200)
+    direction: Literal["debit", "credit"] | None = None
+
+    @field_validator("match_text")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("match_text must not be blank")
+        return value.strip()
+
+    def stored(self) -> dict[str, Any]:
+        data = self.model_dump()
+        data["account_id"] = str(self.account_id)
+        return data
+
+
+TRADE_RULE_EDITABLE = frozenset({"match_field", "match_mode", "match_text", "direction"})
+
+
 class MatchDraft(BaseModel):
     """The typed draft a match card carries (decision 86): the proposal's
     two rows as the card shows them, money as decimal strings when stored.
@@ -277,6 +338,71 @@ class TransferPairDraft(BaseModel):
             "outgoing_description": self.outgoing_description,
             "incoming_description": self.incoming_description,
         }
+
+
+class SplitDraftLine(BaseModel):
+    """One copied line of a :class:`SplitDraft`: the target (a category path
+    or ``[account path]``), its amount in the flat form's sign, its memo, and
+    for an account line the one exact backing row found, if any."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    target: str
+    amount: Decimal
+    memo: str | None = None
+    backing_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class SplitDraft(BaseModel):
+    """The typed draft a split card carries (#590, decision 118): the new
+    bank row (``transaction_id``, its account, date and amount), the split it
+    copies (``template_id``) and the lines to apply — the template's lines,
+    with the amount difference on its largest category line. Only ``lines``
+    is editable (the row is the suggestion's identity)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = 1
+    transaction_id: uuid.UUID
+    template_id: uuid.UUID
+    account: str
+    date: date_value_type
+    amount: Decimal
+    template_amount: Decimal
+    payee: str | None = None
+    lines: list[SplitDraftLine]
+
+    def stored(self) -> dict[str, Any]:
+        """JSON-safe form for the encrypted column (money as strings)."""
+        return {
+            "version": self.version,
+            "transaction_id": str(self.transaction_id),
+            "template_id": str(self.template_id),
+            "account": self.account,
+            "date": self.date.isoformat(),
+            "amount": str(self.amount),
+            "template_amount": str(self.template_amount),
+            "payee": self.payee,
+            "lines": [
+                {
+                    "target": line.target,
+                    "amount": str(line.amount),
+                    "memo": line.memo,
+                    "backing_ids": [str(i) for i in line.backing_ids],
+                }
+                for line in self.lines
+            ],
+        }
+
+
+SPLIT_EDITABLE = frozenset({"lines"})
+
+
+def split_fingerprint(root_id: uuid.UUID) -> str:
+    """A split card names its bank row by the first row of the row's
+    correction chain, in plain text: the categorize pass correcting the row
+    keeps the card, and a rejection outlives it."""
+    return f"{SPLIT_PREFIX}{root_id}"
 
 
 @dataclass(frozen=True)
@@ -854,6 +980,155 @@ def _add_confirmed_pair(
         evidence={"occurrences": occurrences[-EVIDENCE_OCCURRENCES_CAP:]},
         confidence=None,
         detector=CONFIRM_DETECTOR,
+        detector_version=1,
+        actor_token_id=token.id,
+    )
+
+
+# --------------------------------------------------------------------------
+# trade_rule — proposed by marking a row a securities trade (#591, decision 119)
+# --------------------------------------------------------------------------
+
+
+def trade_rule_fingerprint(account_id: uuid.UUID, match_text: str, direction: str | None) -> str:
+    """Stable identity of a trade_rule suggestion: the account, the text
+    (by its blind index, so no narrative reaches the plaintext column) and
+    the direction."""
+    text_key = rules_service.blind_index_for(match_text)
+    return hashlib.sha256(
+        f"trade_rule:{account_id}:{text_key}:{direction or 'any'}".encode()
+    ).hexdigest()
+
+
+def draft_trade_rule(tx: Transaction) -> TradeRuleDraft | None:
+    """The rule a mark suggests: the row's account, the first words of its
+    payee (else its description) as a prefix over payee or description, and
+    its direction. None for a row with no text to match on."""
+    real = _real_leg(tx)
+    if real is None:
+        return None
+    text = (tx.payee.name if tx.payee else None) or tx.description
+    words = (text or "").split()
+    if not words:
+        return None
+    return TradeRuleDraft(
+        account=real.account.path,
+        account_id=real.account_id,
+        match_text=" ".join(words[:TRADE_RULE_PREFIX_WORDS])[:200],
+        direction="debit" if Decimal(real.amount) < 0 else "credit",
+    )
+
+
+def _trade_rule_covers(session: Session, tx: Transaction, account_id: uuid.UUID) -> bool:
+    """A securities-trade rule on this account (draft, active or disabled;
+    archived is deleted) already matches the marked row."""
+    from purser.core import rules as core_rules
+
+    securities = ledger_service.securities_account(session)
+    real = _real_leg(tx)
+    assert real is not None
+    candidate = core_rules.Candidate(
+        account_id=str(account_id),
+        amount=Decimal(real.amount),
+        date=tx.date,
+        payee=tx.payee.name if tx.payee else None,
+        description=tx.description,
+    )
+    rows = session.execute(
+        select(Rule).where(
+            Rule.type == rules_service.TYPE_CATEGORIZE,
+            Rule.state != rules_service.STATE_ARCHIVED,
+            Rule.category_id == securities.id,
+        )
+    ).scalars()
+    return any(
+        row.account_ids
+        and account_id in row.account_ids
+        and core_rules.matches(rules_service._predicate_of(row), candidate)
+        for row in rows
+    )
+
+
+def propose_trade_rule(session: Session, *, tx: Transaction, token: ApiToken) -> Suggestion | None:
+    """After a person or an agent marked ``tx`` a securities trade: upsert
+    the trade_rule suggestion for a rule that marks rows like it, or return
+    None when there is nothing to propose (decision 67's shape). It writes
+    no rule: accepting creates one as a DRAFT, which marks nothing until it
+    is activated; its projected count comes back with the accept.
+
+    Nothing is proposed when the row has no payee or description, a
+    securities-trade rule on the account already matches it, the account's
+    trade rules were rejected with ``reject_scope='counterparty'``, or this
+    draft was rejected or accepted before. A repeat mark of a row the same
+    draft covers refreshes the open card (``seen_count``, its evidence)."""
+    draft = draft_trade_rule(tx)
+    if draft is None:
+        return None
+    account_id = draft.account_id
+    if _trade_rule_covers(session, tx, account_id):
+        return None
+    rows = list(
+        session.execute(
+            select(Suggestion).where(
+                Suggestion.kind == KIND_TRADE_RULE, Suggestion.subject_account_id == account_id
+            )
+        ).scalars()
+    )
+    if any(r.status == STATUS_REJECTED and r.reject_scope == "counterparty" for r in rows):
+        return None
+    fingerprint = trade_rule_fingerprint(account_id, draft.match_text, draft.direction)
+    same = next((r for r in rows if r.fingerprint == fingerprint), None)
+    real = _real_leg(tx)
+    assert real is not None
+    occurrence = {
+        "date": tx.date.isoformat(),
+        "amount": str(abs(Decimal(real.amount))),
+        "transaction_id": str(tx.id),
+    }
+    if same is not None:
+        if same.status != STATUS_OPEN:
+            return None  # rejected (remembered) or accepted (its rule covers it)
+        _add_marked_row(session, same, occurrence, token)
+        return same
+    row, created = _create_once(
+        session,
+        kind=KIND_TRADE_RULE,
+        draft=draft.stored(),
+        source=SOURCE_MARK,
+        fingerprint=fingerprint,
+        subject_account_id=account_id,
+        subject_payee_id=tx.payee_id,
+        counterparty_account_id=None,
+        evidence={"occurrences": [occurrence]},
+        confidence=None,
+        detector=TRADE_RULE_DETECTOR,
+        detector_version=1,
+        actor_token_id=token.id,
+        event_payload={"account": draft.account},
+    )
+    if not created:
+        if row.status != STATUS_OPEN:
+            return None
+        _add_marked_row(session, row, occurrence, token)
+    return row
+
+
+def _add_marked_row(
+    session: Session, row: Suggestion, occurrence: dict[str, Any], token: ApiToken
+) -> None:
+    """One more marked row on an open trade_rule card: its evidence, capped."""
+    evidence = dict(row.evidence or {})
+    seen = [o for o in evidence.get("occurrences") or [] if o.get("transaction_id")]
+    if all(o["transaction_id"] != occurrence["transaction_id"] for o in seen):
+        seen.append(occurrence)
+    evidence["occurrences"] = seen[-EVIDENCE_OCCURRENCES_CAP:]
+    _refresh(
+        session,
+        row,
+        draft=row.draft,
+        evidence=evidence,
+        confidence=None,
+        detector=TRADE_RULE_DETECTOR,
         detector_version=1,
         actor_token_id=token.id,
     )
@@ -1833,6 +2108,43 @@ def _apply_transfer_link_draft(
         raise SuggestionError(f"invalid transfer_link draft: {exc}") from exc
 
 
+def _accept_trade_rule(
+    session: Session,
+    row: Suggestion,
+    *,
+    decision: str,
+    edits: dict[str, Any] | None,
+    token: ApiToken,
+) -> tuple[Rule, dict[str, Any]]:
+    """The categorize rule the draft describes, targeting "Securities trade"
+    (``equity.securities``), created as a DRAFT: it marks nothing until it
+    is activated, and history only through apply-history's dry run first
+    (decision 46), exactly like any categorize rule."""
+    stored = _edited_draft(row, decision, edits, TRADE_RULE_EDITABLE)
+    try:
+        draft = TradeRuleDraft.model_validate(stored)
+    except ValidationError as exc:
+        error = exc.errors()[0]
+        where = ".".join(str(part) for part in error["loc"])
+        raise SuggestionError(f"invalid trade_rule draft: {where}: {error['msg']}") from exc
+    fields: dict[str, object] = {
+        "type": rules_service.TYPE_CATEGORIZE,
+        "account_ids": [draft.account_id],
+        "match_field": draft.match_field,
+        "match_mode": draft.match_mode,
+        "match_text": draft.match_text,
+        "category_id": ledger_service.securities_account(session).id,
+        "note": f"Accepted from trade-rule suggestion {row.id}",
+    }
+    if draft.direction is not None:
+        fields["direction"] = draft.direction
+    try:
+        created = rules_service.create(session, fields=fields, token=token, activate=False)
+    except rules_service.RuleError as exc:
+        raise SuggestionError(f"invalid trade_rule draft: {exc}") from exc
+    return created, draft.stored()
+
+
 def _edited_draft(
     row: Suggestion, decision: str, edits: dict[str, Any] | None, editable: frozenset[str]
 ) -> dict[str, Any]:
@@ -1847,6 +2159,9 @@ def _edited_draft(
             f" (a transfer_link suggestion edits only {', '.join(sorted(editable))};"
             " its pair and payee are what it proposes)"
             if row.kind == KIND_TRANSFER_LINK
+            else f" (a trade_rule suggestion edits only {', '.join(sorted(editable))};"
+            " its account is what it proposes)"
+            if row.kind == KIND_TRADE_RULE
             else ""
         )
         raise SuggestionError(f"unknown draft fields: {', '.join(sorted(unknown))}{hint}")
@@ -1931,7 +2246,39 @@ def decide(
     now = datetime.now(UTC)
     created: Schedule | Rule | Match | TransferPairConfirmed | None = None
 
-    if row.kind == KIND_TRANSFER_PAIR and decision != "snooze":
+    if row.kind == KIND_SPLIT and decision in ("accept", "edit_then_accept"):
+        from purser import splits  # function-local: splits imports this module
+
+        draft = SplitDraft.model_validate(row.draft)
+        if decision == "edit_then_accept":
+            unknown = set(edits or {}) - SPLIT_EDITABLE
+            if unknown or not edits:
+                raise SuggestionError("a split suggestion takes edits to lines only")
+            try:
+                draft = SplitDraft.model_validate({**draft.stored(), "lines": edits["lines"]})
+            except ValidationError as exc:
+                raise SuggestionError(f"invalid lines: {exc.errors()[0]['msg']}") from exc
+        head = bank_lineage.current_rows(session, [draft.transaction_id])[draft.transaction_id]
+        result = splits.split_transaction(
+            session,
+            tx_id=head,
+            lines=[
+                splits.LineInput(
+                    target=line.target,
+                    amount=line.amount,
+                    memo=line.memo,
+                    backing_ids=tuple(line.backing_ids),
+                )
+                for line in draft.lines
+            ],
+            token=token,
+            via_suggestion=row.id,
+        )
+        row.status = STATUS_ACCEPTED
+        row.result_entity_type = "transaction"
+        row.result_entity_id = uuid.UUID(result["transaction_id"])
+        row.draft = draft.stored()
+    elif row.kind == KIND_TRANSFER_PAIR and decision != "snooze":
         if decision == "edit_then_accept":
             raise SuggestionError(
                 "a transfer_pair suggestion has nothing to edit — use confirm_transfer to link"
@@ -2007,6 +2354,11 @@ def decide(
     elif decision in ("accept", "edit_then_accept"):
         if row.kind == KIND_TRANSFER_LINK:
             created, applied = _accept_transfer_link(
+                session, row, decision=decision, edits=edits, token=token
+            )
+            row.result_entity_type = "rule"
+        elif row.kind == KIND_TRADE_RULE:
+            created, applied = _accept_trade_rule(
                 session, row, decision=decision, edits=edits, token=token
             )
             row.result_entity_type = "rule"
@@ -2270,17 +2622,75 @@ def open_count(
     return int(session.execute(stmt).scalar_one())
 
 
-def headline(row: Suggestion, *, draft: dict[str, Any] | None = None) -> str:
+def path_leaf_label(path: str) -> str:
+    """A path no account carries any more (a deleted category, a system
+    account such as ``equity.securities``) as words: its last label,
+    humanized — the admin UI's ``pathLeafLabel``, so both read alike."""
+    leaf = next((label for label in reversed(path.split(".")) if label), path)
+    words = re.sub(r"\s+", " ", re.sub(r"[_-]+", " ", leaf)).strip()
+    return words[:1].upper() + words[1:] if words else path
+
+
+class AccountNames:
+    """Path -> the name a person knows an account or category by (#552). A
+    headline reads accounts by name ("on Checking", never "on
+    assets.checking"); the draft keeps the paths accept applies and tool
+    calls take. Loaded on first use, once per response: build one and pass
+    it to every row of a page."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+        self._by_path: dict[str, str] | None = None
+
+    def __call__(self, path: object) -> str:
+        text = str(path) if path else ""
+        if not text:
+            return ""
+        if self._by_path is None:
+            rows = self._session.execute(select(Account.path, Account.name))
+            self._by_path = {str(path): name for path, name in rows}
+        return self._by_path.get(text) or path_leaf_label(text)
+
+
+ESTIMATE_MARK = "\u2248"
+
+
+def estimate_text(amount: Decimal) -> str:
+    """An estimated amount in text (#556): "≈ 1200.00" — U+2248, a space,
+    then the amount to the cent, a negative one with a real minus sign
+    (U+2212): the mark the admin SPA and the widgets show too.
+    ``privacy.amount_forms`` knows the U+2212 spelling, so a withheld amount
+    is still removed."""
+    cents = amount.quantize(Decimal("0.01"))
+    text = str(abs(cents) if cents.is_zero() else cents)
+    if text.startswith("-"):
+        text = MINUS_SIGN + text[1:]
+    return f"{ESTIMATE_MARK} {text}"
+
+
+def headline(row: Suggestion, names: AccountNames, *, draft: dict[str, Any] | None = None) -> str:
     """One line an agent (or a card) can show — for a schedule who, cadence
     and how much; for a transfer link the pair and the payee it is scoped
     to; for a match the bill against the bank row and the variance; for a
-    transfer pair the amount, where it left and arrived, and when."""
+    transfer pair the amount, where it left and arrived, and when.
+
+    Accounts read by name (#552): people read what an agent relays, and they
+    know "Checking", not ``assets.checking``. The draft beside it keeps the
+    paths. Amounts stay plain decimal strings, the spellings the privacy
+    scrubber removes when a call withholds amounts (``privacy.amount_forms``);
+    an estimated schedule amount is marked as one (:func:`estimate_text`)."""
     draft = row.draft if draft is None else draft
+    if row.kind == KIND_SPLIT:
+        row_amount = Decimal(str(draft.get("amount"))).quantize(Decimal("0.01"))
+        return (
+            f"Split the {row_amount} row of {draft.get('date')} on {names(draft.get('account'))}"
+            f" like last time ({len(draft.get('lines') or [])} lines)"
+        )
     if row.kind == KIND_TRANSFER_PAIR:
         moved = Decimal(str(draft.get("amount"))).quantize(Decimal("0.01"))
         return (
-            f"Link {moved} from {draft.get('from_account')} ({draft.get('outgoing_date')})"
-            f" to {draft.get('to_account')} ({draft.get('incoming_date')}) as one transfer"
+            f"Link {moved} from {names(draft.get('from_account'))} ({draft.get('outgoing_date')})"
+            f" to {names(draft.get('to_account'))} ({draft.get('incoming_date')}) as one transfer"
         )
     if row.kind == KIND_MATCH:
         cents = Decimal("0.01")
@@ -2289,31 +2699,56 @@ def headline(row: Suggestion, *, draft: dict[str, Any] | None = None) -> str:
         variance = Decimal(str(draft.get("variance"))).quantize(cents)
         return (
             f"Match {draft.get('label')} ({expected} due {draft.get('expected_date')}) to the "
-            f"{posted} bank row of {draft.get('posted_date')} on {draft.get('account')}"
+            f"{posted} bank row of {draft.get('posted_date')} on {names(draft.get('account'))}"
             f" — variance {variance}"
+        )
+    if row.kind == KIND_TRADE_RULE:
+        # The text predicate stays in the draft (withheld like other bank
+        # text), never in the headline.
+        which = {"debit": "buy (money out)", "credit": "sell (money in)"}.get(
+            str(draft.get("direction")), "buy or sell"
+        )
+        return (
+            f"Mark {which} rows like the one you marked on {names(draft.get('account'))} as a"
+            " securities trade, with a rule"
         )
     if row.kind == KIND_TRANSFER_LINK:
         return (
-            f"Link transfers between {draft.get('from_account')} and {draft.get('to_account')}"
-            f" when the payee is {draft.get('payee')} (or an alias)"
+            f"Link transfers between {names(draft.get('from_account'))} and"
+            f" {names(draft.get('to_account'))} when the payee is {draft.get('payee')}"
+            " (or an alias)"
         )
     from purser.core import forecasting as core_forecasting
 
     cadence = core_forecasting.cadence_label(str(draft.get("rrule", "")))
     amount = draft.get("amount")
-    how_much = (
-        f"~{Decimal(str(amount)).quantize(Decimal('0.01'))}" if amount else "amount from history"
+    if not amount:
+        how_much = "amount from history"
+    elif draft.get("amount_type") == "estimated":
+        how_much = estimate_text(Decimal(str(amount)))
+    else:
+        how_much = str(Decimal(str(amount)).quantize(Decimal("0.01")))
+    counterparty = draft.get("counterparty_account")
+    with_whom = names(counterparty) if counterparty else draft.get("payee") or draft.get("name")
+    return (
+        f"{draft.get('name')}: {cadence} {how_much} on {names(draft.get('account'))}"
+        f" with {with_whom}"
     )
-    with_whom = draft.get("counterparty_account") or draft.get("payee") or draft.get("name")
-    return f"{draft.get('name')}: {cadence} {how_much} on {draft.get('account')} with {with_whom}"
 
 
-def serialize(session: Session, row: Suggestion, *, with_evidence: bool = False) -> dict[str, Any]:
+def serialize(
+    session: Session,
+    row: Suggestion,
+    *,
+    with_evidence: bool = False,
+    names: AccountNames | None = None,
+) -> dict[str, Any]:
     """The compact shape shared by REST and MCP (guardrail 6: evidence is
     summarized unless asked for). Every kind keeps its evidence as
     ``occurrences`` — detected rows for a schedule, confirmed pairs for a
     transfer link, the bank row for a match, the candidate pair for a
-    transfer pair — so the summary reads the same way for each."""
+    transfer pair — so the summary reads the same way for each. A page of
+    rows shares one ``names`` (one account query for the page)."""
     draft = row.draft
     evidence = row.evidence or {}
     if row.kind == KIND_MATCH and row.status == STATUS_OPEN:
@@ -2353,7 +2788,7 @@ def serialize(session: Session, row: Suggestion, *, with_evidence: bool = False)
         "status": row.status,
         "source": row.source,
         "confidence": str(row.confidence) if row.confidence is not None else None,
-        "headline": headline(row, draft=draft),
+        "headline": headline(row, names or AccountNames(session), draft=draft),
         "draft": draft,
         "evidence_summary": summary,
         "snooze_until": row.snooze_until.isoformat() if row.snooze_until else None,

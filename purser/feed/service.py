@@ -284,6 +284,24 @@ def sync_connection(
     gap_repair = _repair_outages(
         session, connection, feed_health, access_url=access_url, window_start=start, client=client
     )
+    # After every import of this sync (gap repair included), so the postings
+    # it compares are complete: a feed-holdings brokerage account's cash is
+    # put in step with its broker's balance (decision 119). Never raises.
+    from purser.feed import trueup
+
+    true_ups = trueup.run_after_sync(
+        session,
+        connection=connection,
+        payload=payload,
+        raw_fetch=raw,
+        stale_days=appsettings.effective().feed_stale_days,
+    )
+    # Rows that arrived before an account's horizon (a gap window, an outage
+    # repair, a backdated entry since the last pass), or a basis the drift
+    # check has learned since: the starting balance follows (decision 123).
+    from purser import starting_balance
+
+    reseated = starting_balance.reseat_all(session, connection_id=connection.id)
     connection.last_fetch_at = datetime.now(UTC)
     connection.status = "warning" if envelope.needs_attention(payload) else "active"
     issues = [issue.as_dict() for issue in envelope.issues(payload)]
@@ -325,6 +343,8 @@ def sync_connection(
             "balance_drift": drift_obs,
             health.BLOCK_KEY: feed_health,
             **({"gap_repair": gap_repair} if gap_repair else {}),
+            **({"balance_true_up": true_ups} if true_ups else {}),
+            **({"starting_balances": reseated} if reseated else {}),
         },
     )
     result: dict[str, Any] = {
@@ -338,6 +358,9 @@ def sync_connection(
         result["gap_stats"] = gap_stats
     if gap_repair:
         result["gap_repair"] = gap_repair
+    adjusted = [t for t in true_ups if t["status"] == trueup.ADJUSTED]
+    if adjusted:
+        result["balance_true_ups"] = adjusted
     return result
 
 
@@ -564,6 +587,9 @@ def refetch_connection(
             )
         },
     }
+    from purser import starting_balance
+
+    reseated = starting_balance.reseat_all(session, connection_id=connection.id)
     audit.record(
         session,
         actor_token_id=actor_token_id,
@@ -575,6 +601,7 @@ def refetch_connection(
             "raw_fetch_id": str(raw.id),
             "start": start.isoformat(),
             "end": end.isoformat(),
+            **({"starting_balances": reseated} if reseated else {}),
         },
     )
     return result
@@ -795,6 +822,11 @@ def backfill_connection(
         "stopped_because": stopped_because,
         "qif_overlap": qif_overlap,
     }
+    # A backfill is older history by definition: every account's starting
+    # balance gives way by the rows it brought in (decision 123).
+    from purser import starting_balance
+
+    reseated = starting_balance.reseat_all(session, connection_id=connection.id)
     audit.record(
         session,
         actor_token_id=actor_token_id,
@@ -805,6 +837,7 @@ def backfill_connection(
             **result,
             "coverage_start": coverage_start.isoformat() if coverage_start else None,
             "coverage_end": coverage_end.isoformat() if coverage_end else None,
+            **({"starting_balances": reseated} if reseated else {}),
         },
     )
     return result
@@ -865,6 +898,36 @@ def sync_all_active() -> None:
     from purser import networth
 
     networth.consume_watermark()
+
+
+def sync_owed_since(slot: datetime, session: Session | None = None) -> bool:
+    """True when a connection the scheduled sync covers has seen no sync
+    attempt since ``slot``: no fetch (``last_fetch_at``) and no recorded
+    failure (its ``sync.failed`` events), and it existed before then. What
+    the scheduler asks at startup about a slot that passed while Purser was
+    not running (#584). ``session`` is for a caller that already holds one."""
+    from purser.db import get_sessionmaker
+    from purser.models import Event
+
+    failed_at = (
+        select(func.max(Event.at))
+        .where(Event.type == "sync.failed", Event.entity_id == Connection.id)
+        .correlate(Connection)
+        .scalar_subquery()
+    )
+    query = select(Connection.last_fetch_at, Connection.created_at, failed_at).where(
+        Connection.status != "disabled"
+    )
+    if session is not None:
+        rows = session.execute(query).all()
+    else:
+        with get_sessionmaker()() as own:
+            rows = own.execute(query).all()
+    for last_fetch_at, created_at, last_failure in rows:
+        seen = [t for t in (last_fetch_at, created_at, last_failure) if t is not None]
+        if seen and max(seen) < slot:
+            return True
+    return False
 
 
 def _latest_sync_after(session: Session, connection_id: uuid.UUID) -> dict[str, Any]:
@@ -950,6 +1013,15 @@ def discover_accounts(session: Session, connection_id: uuid.UUID) -> list[dict[s
     payload = crypto.decrypt_json(latest.payload_enc)
     ambiguous = envelope.duplicate_account_ids(payload)
     ignored = ignored_external_ids(session, connection.id)
+    # What the map form starts from (decision 126): one proposal per account
+    # still waiting, unique across the whole plan.
+    from purser.feed import proposals
+
+    proposed = {
+        p.external_id: p
+        for p in proposals.plan(session)
+        if p.connection_id == connection.id and p.action != "blocked"
+    }
     discovered = []
     for sf_account in payload.get("accounts", []):
         institution = envelope.institution_of(payload, sf_account)
@@ -972,12 +1044,14 @@ def discover_accounts(session: Session, connection_id: uuid.UUID) -> list[dict[s
                 "conn_id": institution.conn_id if institution else None,
                 "ambiguous": sf_account["id"] in ambiguous,
                 "ignored": mapped is None and sf_account["id"] in ignored,
+                "proposal": _proposal_fields(proposed.get(str(sf_account["id"]))),
                 "currency": sf_account.get("currency", "USD"),
                 "balance": sf_account.get("balance"),
                 "available_balance": _available(sf_account, mapped),
                 "balance_date": drift.parse_balance_date(sf_account.get("balance-date")),
                 "mapped_account_id": mapped.id if mapped else None,
                 "mapped_account_path": mapped.path if mapped else None,
+                "mapped_account_name": mapped.name if mapped else None,
                 "ledger_balance": drift.canonical(comp.pending) if comp else None,
                 "drift": drift.canonical(comp.delta) if comp and comp.delta != 0 else None,
                 "drift_basis": comp.basis if comp else None,
@@ -986,6 +1060,22 @@ def discover_accounts(session: Session, connection_id: uuid.UUID) -> list[dict[s
             }
         )
     return discovered
+
+
+def _proposal_fields(proposal: Any) -> dict[str, Any] | None:
+    if proposal is None:
+        return None
+    return {
+        "action": proposal.action,
+        "name": proposal.name,
+        "type": proposal.type,
+        "type_basis": proposal.type_basis,
+        "confident": proposal.confident,
+        "path": proposal.path,
+        "starting_balance": proposal.starting_balance,
+        "duplicate_of": proposal.duplicate_of,
+        "note": proposal.as_dict().get("note"),
+    }
 
 
 def ignored_external_ids(session: Session, connection_id: uuid.UUID) -> set[str]:
@@ -1071,10 +1161,17 @@ def map_account(
     external_id: str,
     account_id: uuid.UUID | None = None,
     create: dict[str, str] | None = None,
+    starting_balance: bool = False,
     actor_token_id: uuid.UUID | None,
 ) -> Account:
     """Map a feed account onto a Purser account (existing or new), then re-import
-    the archived fetch(es) for it — the archive makes this free."""
+    the archived fetch(es) for it — the archive makes this free.
+
+    ``starting_balance`` (decision 123): start the account from the bank's
+    reported balance once its rows are in. The mapping form asks for it by
+    default; the API does only what it is asked. It is skipped, never an
+    error, where it does not apply: an account type whose balance is not its
+    postings, or a bank that reported no usable balance."""
     connection = get_connection(session, connection_id)
     if (account_id is None) == (create is None):
         raise FeedError("provide exactly one of account_id or create")
@@ -1148,6 +1245,12 @@ def map_account(
         )
     session.flush()  # release the old mapping before claiming it below
 
+    # The feed this account took until now, on the row that replaces it
+    # (guardrail 5; #648 M1): a replaced mapping is otherwise lost.
+    before = {
+        "external_id": account.external_id,
+        "connection_id": str(account.connection_id) if account.connection_id else None,
+    }
     account.external_id = external_id
     account.connection_id = connection.id
     # A mapped account is tracked: an earlier "ignore" no longer applies.
@@ -1164,6 +1267,7 @@ def map_account(
         action="account.map",
         entity_type="account",
         entity_id=account.id,
+        before=before,
         after={"external_id": external_id, "connection_id": str(connection.id)},
     )
 
@@ -1180,6 +1284,19 @@ def map_account(
     from purser import schedules as schedules_service
 
     schedules_service.detect_for_new_liability(session, account, actor_token_id=actor_token_id)
+    from purser import starting_balance as starting_balance_service
+
+    if starting_balance and account.type in drift.ELIGIBLE_TYPES:
+        try:
+            with session.begin_nested():
+                starting_balance_service.set_from_bank(
+                    session, account_id=account.id, actor_token_id=actor_token_id
+                )
+        except starting_balance_service.StartingBalanceError as exc:
+            log.info("no starting balance at mapping", account_id=str(account.id), why=exc.code)
+    # The re-import may have put rows before another account's horizon (a
+    # transfer's other leg): those starting balances follow. Never raises.
+    starting_balance_service.reseat_all(session, connection_id=connection.id)
     return account
 
 

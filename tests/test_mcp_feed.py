@@ -6,7 +6,7 @@ The SimpleFIN client is stubbed at its own boundary (``fetch_accounts``,
 feed harness does: the MCP test client speaks HTTP through httpx too."""
 
 from collections.abc import Iterator
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -15,6 +15,7 @@ from sqlalchemy import Engine, select, text
 
 from purser.feed import simplefin
 from tests import test_mcp
+from tests.conftest import now, today
 from tests.test_feed import ACCESS_URL, SETUP_TOKEN, account_of
 from tests.test_feed_v2 import as_v2
 from tests.test_mcp import LiveServer, _mcp_call
@@ -26,7 +27,7 @@ PATH = "assets.mcp_checking"
 
 
 def _row(days_ago: int, amount: str, desc: str) -> dict[str, Any]:
-    posted = int((datetime.now(UTC) - timedelta(days=days_ago)).timestamp())
+    posted = int((now() - timedelta(days=days_ago)).timestamp())
     return {"id": f"m-{days_ago}", "posted": posted, "amount": amount, "description": desc}
 
 
@@ -55,7 +56,7 @@ def _day(row: dict[str, Any]) -> date:
 
 
 def _now() -> int:
-    return int(datetime.now(UTC).timestamp())
+    return int(now().timestamp())
 
 
 @pytest.fixture
@@ -115,8 +116,8 @@ class TestFeedToolsOverMcp:
         migrated_engine: Engine,
     ) -> None:
         bridge.rows = [_row(30, "-30.00", "Missed row")]
-        start = (date.today() - timedelta(days=40)).isoformat()
-        end = (date.today() - timedelta(days=20)).isoformat()
+        start = (today() - timedelta(days=40)).isoformat()
+        end = (today() - timedelta(days=20)).isoformat()
         args = {"start": start, "end": end, "accounts": [PATH]}
 
         reader = _token(admin_client, "reader2", ["read"])

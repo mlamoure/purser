@@ -14,6 +14,7 @@ import {
   linear,
   money,
   moneyCompact,
+  moneySign,
   monthYear,
   num,
   s,
@@ -103,7 +104,7 @@ function renderSeries(data: NetWorthSeriesResult, host: WidgetHost): void {
   clear(root);
 
   const change = data.change;
-  const up = Number(change.delta) >= 0;
+  const up = moneySign(change.delta) >= 0;
   const pills = PERIODS.map((period) =>
     h(
       "button",
@@ -114,7 +115,7 @@ function renderSeries(data: NetWorthSeriesResult, host: WidgetHost): void {
           if (next && isSeries(next)) {
             renderSeries(next, host);
             host.tellModel(
-              `Viewing net worth over ${period}: ${money(next.current)} (${Number(next.change.delta) >= 0 ? "+" : ""}${money(next.change.delta)}).`,
+              `Viewing net worth over ${period}: ${money(next.current)} (${money(next.change.delta, { sign: true })}).`,
             );
           }
         },
@@ -142,7 +143,7 @@ function renderSeries(data: NetWorthSeriesResult, host: WidgetHost): void {
           },
           change.pct
             ? `${up ? "+" : ""}${change.pct}% ${change.period === "1y" ? "YoY" : `over ${change.period}`}`
-            : `${up ? "+" : ""}${money(change.delta)} over ${change.period}`,
+            : `${money(change.delta, { sign: true })} over ${change.period}`,
         ),
       ),
     ),
@@ -162,7 +163,7 @@ function renderSeries(data: NetWorthSeriesResult, host: WidgetHost): void {
   for (const tick of ticks(lo, hi, 3)) {
     svg.append(
       s("line", { x1: PAD_L, y1: y(tick), x2: W - PAD_R, y2: y(tick), stroke: "var(--border)", "stroke-width": 0.5 }),
-      s("text", { x: PAD_L - 6, y: y(tick) + 4, "text-anchor": "end", "font-size": 11, fill: "var(--text-muted)" }, moneyCompact(tick)),
+      s("text", { x: PAD_L - 6, y: y(tick) + 4, "text-anchor": "end", "font-size": 11, fill: "var(--text-muted)" }, moneyCompact(String(tick))),
     );
   }
   const netPts: [number, number][] = nets.map((v, i) => [x(i), y(v)]);
@@ -180,7 +181,7 @@ function renderSeries(data: NetWorthSeriesResult, host: WidgetHost): void {
     s(
       "text",
       { x: W - PAD_R - 4, y: y(liabs[liabs.length - 1]) - 6, "text-anchor": "end", "font-size": 11, fill: CHART.liabilities },
-      `liabilities ${moneyCompact(liabs[liabs.length - 1])}`,
+      `liabilities ${moneyCompact(data.series[data.series.length - 1].liabilities)}`,
     ),
     s("circle", { cx: netPts[netPts.length - 1][0], cy: netPts[netPts.length - 1][1], r: 4, fill: CHART.positive }),
   );
@@ -219,7 +220,7 @@ function renderSeries(data: NetWorthSeriesResult, host: WidgetHost): void {
     h(
       "span",
       { style: "font-size:13px;color:var(--text-secondary);" },
-      `This period ${up ? "+" : ""}${money(change.delta)}:`,
+      `This period ${money(change.delta, { sign: true })}:`,
     ),
     ...data.attribution.map((entry) =>
       h(
@@ -229,14 +230,14 @@ function renderSeries(data: NetWorthSeriesResult, host: WidgetHost): void {
           style: "border:none;cursor:pointer;font-family:inherit;",
           onclick: async () => {
             host.tellModel(
-              `Drilling into the ${humanBucket(entry.bucket)} bucket: ${Number(entry.delta) >= 0 ? "+" : ""}${money(entry.delta)} over ${change.period}.`,
+              `Drilling into the ${humanBucket(entry.bucket)} bucket: ${money(entry.delta, { sign: true })} over ${change.period}.`,
             );
             if (entry.bucket === "market") {
               await host.callTool("list_holdings", {});
             }
           },
         },
-        `${humanBucket(entry.bucket)} ${Number(entry.delta) >= 0 ? "+" : ""}${money(entry.delta)}`,
+        `${humanBucket(entry.bucket)} ${money(entry.delta, { sign: true })}`,
       ),
     ),
   );

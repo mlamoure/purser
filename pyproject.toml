@@ -1,6 +1,6 @@
 [project]
 name = "purser"
-version = "2026.11.5"
+version = "2026.11.6"
 description = "The privately hosted finance back-end, designed for use by your personal AI Agent"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -40,6 +40,7 @@ dev = [
     "types-python-dateutil",
     "python-multipart>=0.0.32",
     "types-jsonschema>=4.26.0.20260518",
+    "pytest-xdist>=3.6",
 ]
 e2e = [
     "playwright>=1.64.1",

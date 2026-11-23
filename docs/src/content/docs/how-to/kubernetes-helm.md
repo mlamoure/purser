@@ -154,8 +154,14 @@ ingress:
 With an ingress, the chart sets `PURSER_PUBLIC_URL` to `https://` plus
 `ingress.host`. That URL drives secure cookies, the OIDC redirect URI, and the
 host allowlist of the MCP endpoint, which rejects requests for any other host
-(HTTP 421). Set `env.PURSER_PUBLIC_URL` yourself when users reach Purser at
-another URL or through something other than this ingress.
+(HTTP 421) unless `env.PURSER_ALLOWED_HOSTS` lists it. Set
+`env.PURSER_PUBLIC_URL` yourself when users reach Purser at another URL or
+through something other than this ingress. **Settings**, **Agents & API**
+reports Purser as reached through a reverse proxy when the public URL is
+`https://`; without an ingress the chart reports nothing, because the Service
+and your network decide who can reach Purser, so the page says "not reported"
+rather than guess. Set `env.PURSER_BIND_ADDRESS` to `0.0.0.0` when a
+LoadBalancer or NodePort Service publishes Purser on your home network.
 
 App settings go under `env`, which feeds both Deployments; a variable you set
 there always replaces the value the chart would derive. Every `PURSER_*`

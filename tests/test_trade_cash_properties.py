@@ -26,7 +26,7 @@ Synthetic data only: made-up symbols, prices and amounts.
 
 import uuid
 from collections import Counter
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 from hypothesis import HealthCheck, event, given, settings
@@ -41,9 +41,8 @@ from purser.holdings import cash as trade_cash
 from purser.holdings import projection, service
 from purser.ledger import LedgerError
 from purser.models import Account, Position, PositionEvent, Posting, Transaction
+from tests.conftest import today
 from tests.test_holdings_projection import _feed_snapshot, _manual_rows, histories
-
-TODAY = datetime.now(UTC).date()
 
 _SETTINGS = settings(
     max_examples=40,
@@ -53,7 +52,7 @@ _SETTINGS = settings(
 
 
 def _weekday_before(days: int) -> date:
-    day = TODAY - timedelta(days=days)
+    day = today() - timedelta(days=days)
     while day.weekday() >= 4:
         day -= timedelta(days=1)
     return day
@@ -292,7 +291,7 @@ def _assert_ledger_invariants(
     assert every_row == trade_heads + other_heads == model.cash()
     assert ledger.account_balances(session, [account.id]).get(account.id, Decimal(0)) == every_row
     balances.recompute_running(session)
-    assert balances.balance_asof(session, account.id, TODAY + timedelta(days=30)) == every_row
+    assert balances.balance_asof(session, account.id, today() + timedelta(days=30)) == every_row
 
 
 @_SETTINGS
@@ -314,7 +313,7 @@ def test_trade_cash_keeps_the_ledger_invariants(migrated_engine: Engine, ops: li
             account_ref=str(account.id),
             symbol=f"P{uuid.uuid4().hex[:8].upper()}",
             quantity=Decimal("150"),  # small enough that some sales oversell
-            as_of=TODAY - timedelta(days=60),
+            as_of=today() - timedelta(days=60),
             token=None,
         ).position
         model = _run(session, account, position, ops)
@@ -366,7 +365,12 @@ def test_cash_moving_sells_keep_the_projection_regenerable_and_the_cash_exact(
         )
         if spec["feed"] is not None:
             _feed_snapshot(
-                session, account.id, TODAY - timedelta(days=spec["feed"]), symbols[0], "1", "10.00"
+                session,
+                account.id,
+                today() - timedelta(days=spec["feed"]),
+                symbols[0],
+                "1",
+                "10.00",
             )
         ledger.update_account(
             session, account_id=account.id, holdings_source="manual", actor_token_id=None
@@ -375,7 +379,7 @@ def test_cash_moving_sells_keep_the_projection_regenerable_and_the_cash_exact(
             session.merge(
                 SecurityPrice(
                     symbol=symbols[index],
-                    price_date=TODAY - timedelta(days=days_ago),
+                    price_date=today() - timedelta(days=days_ago),
                     source=source,
                     close=close,
                 )
@@ -386,7 +390,7 @@ def test_cash_moving_sells_keep_the_projection_regenerable_and_the_cash_exact(
                 session,
                 account_ref=str(account.id),
                 symbol=s,
-                opened_on=TODAY - timedelta(days=30),
+                opened_on=today() - timedelta(days=30),
                 token=None,
             )
             for s in symbols
@@ -400,7 +404,7 @@ def test_cash_moving_sells_keep_the_projection_regenerable_and_the_cash_exact(
                         session,
                         position_id=positions[index].id,
                         kind=kind,
-                        occurred_on=TODAY - timedelta(days=days_ago),
+                        occurred_on=today() - timedelta(days=days_ago),
                         quantity=quantity,
                         price=price,
                         token=None,
@@ -455,7 +459,7 @@ def test_cash_moving_sells_keep_the_projection_regenerable_and_the_cash_exact(
         }
         dates = sorted({row[0] for row in first})
         if dates:
-            for offset in range((TODAY - dates[0]).days + 1):
+            for offset in range((today() - dates[0]).days + 1):
                 day = dates[0] + timedelta(days=offset)
                 newest = max(d for d in dates if d <= day)
                 latest = {row[1]: row[2] for row in first if row[0] == newest}

@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from purser import networth, qif_import
 from purser.admin.auth import ReadToken, WriteToken
+from purser.api.disclosure import NOTHING, disclose
 from purser.api.import_models import (
     AccountOptions,
     ImportPreviewResponse,
@@ -74,7 +75,9 @@ def _layout_error(exc: CsvLayoutError) -> HTTPException:
     )
 
 
-@router.post("/preview")
+# A read: the caller's own file as account names, categories, counts and
+# per-account sign totals, no payee, narrative or single amount (#648 M3).
+@router.post("/preview", dependencies=[disclose(NOTHING)])
 def preview(body: CsvPreviewRequest, token: ReadToken, session: DbSession) -> ImportPreviewResponse:
     """DB-aware, read-only CSV mapping preview — identical contract to QIF's.
     A layout that can't be auto-detected returns 422 with a

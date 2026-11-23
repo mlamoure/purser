@@ -6,7 +6,8 @@
   amount of memory before its 401.
 - A session cookie is ambient, so a write a page on another site (or a
   sibling subdomain) triggers is refused; reads, bearer tokens and
-  non-browser clients are unaffected.
+  non-browser clients are unaffected. Purser's own pages include the
+  machine's other names in PURSER_ALLOWED_HOSTS (#633).
 """
 
 from collections.abc import Iterator
@@ -111,3 +112,52 @@ class TestCrossSiteSessionWrites:
             "/matching/run", headers={**cross, "Authorization": f"Bearer {token}"}
         )
         assert resp.status_code == 200, resp.text
+
+
+@pytest.fixture
+def home_names(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """A home server at its address, also known by two names (#633). The
+    origin check reads Settings per request, so no new app is needed."""
+    from purser.config import get_settings
+
+    monkeypatch.setenv("PURSER_PUBLIC_URL", "http://192.0.2.10:8000")
+    monkeypatch.setenv("PURSER_ALLOWED_HOSTS", "homeserver,homeserver.local,192.0.2.11:8010")
+    get_settings.cache_clear()
+    yield
+    monkeypatch.undo()
+    get_settings.cache_clear()
+
+
+class TestAllowedHostOrigins:
+    @pytest.mark.parametrize(
+        "origin",
+        [
+            "http://homeserver:8000",
+            "http://HomeServer.local:8000",
+            "http://192.0.2.10:8000",  # the public URL
+            "http://192.0.2.11:8010",  # an allowed name on its own port
+            "http://testserver",  # the address the request was sent to
+        ],
+    )
+    def test_a_cookie_write_from_an_allowed_name_passes(
+        self, admin_client: TestClient, home_names: None, origin: str
+    ) -> None:
+        resp = admin_client.post("/matching/run", headers={"Origin": origin})
+        assert resp.status_code == 200, resp.text
+
+    @pytest.mark.parametrize(
+        "origin",
+        [
+            "http://otherbox:8000",  # not listed
+            "http://homeserver:9000",  # a listed name, another program's port
+            "http://192.0.2.11:8000",  # pinned to 8010
+            "http://homeserver.local.example.net:8000",
+            "null",
+        ],
+    )
+    def test_a_cookie_write_from_any_other_origin_is_refused(
+        self, admin_client: TestClient, home_names: None, origin: str
+    ) -> None:
+        resp = admin_client.post("/matching/run", headers={"Origin": origin})
+        assert resp.status_code == 403
+        assert "cross-site" in resp.json()["detail"]

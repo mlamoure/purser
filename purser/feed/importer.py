@@ -267,8 +267,40 @@ def import_fetch(
     # What it left unlinked becomes the inbox's transfer_pair cards and the
     # transfer.candidate events (#386); its counts stay out of the import's.
     transfers.sync_candidate_suggestions(session)
+    # "Split like last time?" cards for new rows from a payee a person split
+    # (decision 118); never a ledger write.
+    from purser import splits
+
+    splits.sync_split_suggestions(session)
     stats["redescribed"] = redescribed  # rows, not a count: callers summing counts skip it
     return stats
+
+
+@dataclass(frozen=True)
+class FeedHolding:
+    """One holding of a fetch as the importer stores it in
+    ``holdings_snapshots``. The balance true-up reads a fetch's holdings
+    through the same function, so it compares a stored set with exactly what
+    the importer would have stored (decision 130)."""
+
+    symbol: str
+    quantity: Decimal | None
+    cost_basis: Decimal | None
+    market_value: Decimal | None
+
+
+def holding_symbol(holding: dict[str, Any]) -> str:
+    return str(holding.get("symbol") or holding.get("description") or "UNKNOWN")
+
+
+def feed_holding(holding: dict[str, Any]) -> FeedHolding:
+    """A missing, empty or zero-like (falsy) figure is stored as NULL."""
+    return FeedHolding(
+        symbol=holding_symbol(holding),
+        quantity=Decimal(str(holding["shares"])) if holding.get("shares") else None,
+        cost_basis=Decimal(str(holding["cost_basis"])) if holding.get("cost_basis") else None,
+        market_value=Decimal(str(holding["market_value"])) if holding.get("market_value") else None,
+    )
 
 
 @dataclass
@@ -321,10 +353,7 @@ def _import_holdings(
         result.skipped_manual = len(holdings)
         return result
     as_of = raw_fetch.fetched_at.date()
-    symbols = [
-        str(holding.get("symbol") or holding.get("description") or "UNKNOWN")
-        for holding in holdings
-    ]
+    symbols = [holding_symbol(holding) for holding in holdings]
     switched_at = account.holdings_source_changed_at
     taken_before_switch = switched_at is not None and raw_fetch.fetched_at <= switched_at
     if taken_before_switch:
@@ -353,18 +382,15 @@ def _import_holdings(
             session.delete(tombstone)
             changed = True
         session.flush()
+        stored = feed_holding(holding)
         session.add(
             HoldingsSnapshot(
                 account_id=account.id,
                 as_of=as_of,
                 symbol=symbol,
-                quantity=Decimal(str(holding["shares"])) if holding.get("shares") else None,
-                cost_basis=Decimal(str(holding["cost_basis"]))
-                if holding.get("cost_basis")
-                else None,
-                market_value=Decimal(str(holding["market_value"]))
-                if holding.get("market_value")
-                else None,
+                quantity=stored.quantity,
+                cost_basis=stored.cost_basis,
+                market_value=stored.market_value,
                 raw_fetch_id=raw_fetch.id,
             )
         )
@@ -597,9 +623,25 @@ def _import_account(
         rule_category = shaped.category_id
 
         from_memory = False
+        system_leg = False
         if rule_category is not None:
             category = ledger.resolve_account(session, str(rule_category))
-        else:
+            if category.path == ledger.SECURITIES_PATH:
+                # A rule marks the row a securities trade (decision 119): only
+                # on a feed-holdings brokerage account, which the rule's scope
+                # names; an account switched to hand-tracked holdings since
+                # takes no answer, and the row is categorized as if no rule
+                # matched.
+                if ledger.securities_trade_refusal(account) is None:
+                    system_leg = True
+                else:
+                    rule_category = None
+                    shaped = rules_service.Shaped(
+                        payee_name=shaped.payee_name,
+                        category_id=None,
+                        applied=[r for r in shaped.applied if r != shaped.categorize_rule_id],
+                    )
+        if rule_category is None:
             category, from_memory = category_for_new_row(
                 session, payee_name=payee_name, income=amount > 0
             )
@@ -616,6 +658,7 @@ def _import_account(
             token=None,
             source_fetch_id=raw_fetch.id,
             content_hash=tx_hash,
+            system_leg=system_leg,
         )
         if shaped.applied:
             rules_service.mark_applied(session, shaped.applied)
@@ -858,6 +901,18 @@ def _reconcile_vanished_pendings(
     for external_id, account in mapped.items():
         still_pending = _current_pending_hashes(payload, external_id)
         voided += reconcile.reconcile_vanished_pendings(
+            session,
+            account=account,
+            still_pending_hashes=still_pending,
+            window_start=window_start,
+        )
+        # A bank pending merged into a split as a backing row that posted
+        # under a new identity hands its place to the posted row, so the
+        # money is counted once (decision 118). Function-local, like every
+        # service import of the feed layer.
+        from purser import splits
+
+        splits.carry_posted_backers(
             session,
             account=account,
             still_pending_hashes=still_pending,

@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { mockApi, ok } from "../test/api";
 import { accountOut } from "../test/fixtures";
 import { renderWithProviders } from "../test/render";
-import CategorySelect, { groupCategories } from "./CategorySelect";
+import CategorySelect, { SECURITIES_TRADE_VALUE, groupCategories } from "./CategorySelect";
 
 const category = (path: string, name: string) =>
   accountOut({ id: `c-${path}`, path, name, type: "category_expense", is_virtual: true });
@@ -23,10 +23,15 @@ const ACCOUNTS = [
   accountOut({ id: "a-2", name: "Rainy Day", path: "assets.savings", type: "savings" }),
 ];
 
-function renderSelect(value: string, onChange = vi.fn()) {
+function renderSelect(value: string, onChange = vi.fn(), direction?: "credit" | "debit") {
   mockApi({ "GET /categories": ok(CATEGORIES), "GET /accounts": ok(ACCOUNTS) });
   const view = renderWithProviders(
-    <CategorySelect value={value} currentAccountPath="assets.checking" onChange={onChange} />,
+    <CategorySelect
+      value={value}
+      currentAccountPath="assets.checking"
+      direction={direction}
+      onChange={onChange}
+    />,
   );
   return { ...view, onChange };
 }
@@ -84,11 +89,55 @@ describe("CategorySelect (#541)", () => {
     expect(onChange).toHaveBeenLastCalledWith("[assets.savings]");
   });
 
+  it("reads money in as a transfer from the other account (#589)", async () => {
+    const { user, onChange } = renderSelect("expenses.food.groceries", vi.fn(), "credit");
+    const select = screen.getByRole("combobox", { name: "Category" });
+    const transfers = await within(select).findByRole("group", { name: "Transfers" });
+    expect(await within(transfers).findByRole("option", { name: "Transfer from Rainy Day" })).toBeInTheDocument();
+    expect(within(transfers).queryByRole("option", { name: "Transfer to Rainy Day" })).not.toBeInTheDocument();
+    // The value sent is the same bracket path either way.
+    await user.selectOptions(select, "Transfer from Rainy Day");
+    expect(onChange).toHaveBeenLastCalledWith("[assets.savings]");
+  });
+
+  it("names an unlisted transfer target by direction too (#589)", async () => {
+    renderSelect("[liabilities.old_card]", vi.fn(), "credit");
+    const select = screen.getByRole("combobox", { name: "Category" });
+    await within(select).findByRole("option", { name: "Groceries" });
+    expect(within(select).getByRole("option", { name: "Transfer from Old card" })).toBeInTheDocument();
+  });
+
   it("keeps a value neither list offers, named rather than raw", async () => {
     renderSelect("[liabilities.old_card]");
     const select = screen.getByRole("combobox", { name: "Category" });
     await within(select).findByRole("option", { name: "Groceries" });
     expect(within(select).getByRole("option", { name: "Transfer to Old card" })).toBeInTheDocument();
     expect(select).toHaveValue("[liabilities.old_card]");
+  });
+});
+
+describe("CategorySelect: Securities trade (#591)", () => {
+  it("offers Securities trade only when the register asks for it", async () => {
+    mockApi({ "GET /categories": ok(CATEGORIES), "GET /accounts": ok(ACCOUNTS) });
+    const onChange = vi.fn();
+    const { user } = renderWithProviders(
+      <CategorySelect
+        value="expenses.fitness"
+        currentAccountPath="assets.broker"
+        onChange={onChange}
+        securitiesTrade
+      />,
+    );
+    const select = screen.getByRole("combobox", { name: "Category" });
+    const group = await within(select).findByRole("group", { name: "Investments" });
+    await user.selectOptions(select, within(group).getByRole("option", { name: "Securities trade" }));
+    expect(onChange).toHaveBeenCalledWith(SECURITIES_TRADE_VALUE);
+  });
+
+  it("never lists it in a generic picker", async () => {
+    renderSelect("expenses.fitness");
+    const select = screen.getByRole("combobox", { name: "Category" });
+    await within(select).findByRole("option", { name: "Fitness" });
+    expect(within(select).queryByRole("option", { name: "Securities trade" })).not.toBeInTheDocument();
   });
 });

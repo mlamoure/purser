@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from purser import networth, qif_import
 from purser.admin.auth import ReadToken, WriteToken
+from purser.api.disclosure import NOTHING, disclose
 from purser.api.import_models import (
     AccountOptions,
     ImportPreviewResponse,
@@ -50,7 +51,9 @@ class QifImportRequest(BaseModel):
     account_options: dict[str, AccountOptions] = {}
 
 
-@router.post("/preview")
+# A read: the caller's own file as account names, categories, counts and
+# per-account sign totals, no payee, narrative or single amount (#648 M3).
+@router.post("/preview", dependencies=[disclose(NOTHING)])
 def preview(body: QifPreviewRequest, token: ReadToken, session: DbSession) -> ImportPreviewResponse:
     """DB-aware, read-only mapping preview: per-file-account target, suggested
     cutoff (feed earliest minus 3d), sign diagnostic, and REAL dedup/cutoff

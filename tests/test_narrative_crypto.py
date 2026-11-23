@@ -21,6 +21,7 @@ import purser.config
 from purser import crypto
 from purser import ledger as ledger_service
 from purser.core import ledger as core
+from purser.core.search_query import fold, parse, text_matches
 from purser.models import Payee, Schedule, Transaction
 from tests.conftest import TEST_ENCRYPTION_KEY
 
@@ -269,8 +270,8 @@ def search_corpus(clean_db: None, db_session: Session) -> uuid.UUID:
 
 
 class TestTwoPhaseSearch:
-    """#141's interim: the q path decrypts only (id, description) of the
-    narrowed set and loads full rows for the returned page alone. Same match,
+    """The cold q path (no search text cache): it decrypts only the narrowed
+    set's text and loads full rows for the returned page alone. Same match,
     same order, same exact total as filtering the q=None listing."""
 
     @settings(
@@ -290,10 +291,18 @@ class TestTwoPhaseSearch:
         listing, _ = ledger_service.search_transactions(
             db_session, account_ref=str(search_corpus), limit=10_000
         )
+        # The grammar's reference semantics (#141 phase 1b): folded text,
+        # words across payee, description and memos.
+        clauses = parse(needle).text
         expected = [
             t.id
             for t in listing
-            if t.description is not None and needle.casefold() in t.description.casefold()
+            if text_matches(
+                clauses,
+                payee=fold(t.payee.name) if t.payee else "",
+                description=fold(t.description) if t.description else "",
+                memos=[fold(p.memo) for p in t.postings if p.memo],
+            )
         ]
         page, total = ledger_service.search_transactions(
             db_session, account_ref=str(search_corpus), q=needle, limit=limit, offset=offset

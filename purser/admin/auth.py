@@ -8,11 +8,11 @@ actor mechanism.
 
 from collections.abc import Callable
 from typing import Annotated
-from urllib.parse import urlsplit
 
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
+from purser import network
 from purser.admin import security, service
 from purser.config import get_settings
 from purser.db import get_session
@@ -23,11 +23,6 @@ SESSION_COOKIE = "purser_session"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
-def _origin_of(url: str) -> str:
-    parts = urlsplit(url)
-    return f"{parts.scheme}://{parts.netloc}".lower()
-
-
 def cross_site(request: Request) -> bool:
     """Whether a browser sent this request from another site's page (#429).
 
@@ -36,15 +31,24 @@ def cross_site(request: Request) -> bool:
     stops other SITES). Browsers say where a request came from:
     ``Sec-Fetch-Site`` (``same-origin``, or ``none`` for a typed URL) and,
     on unsafe methods, ``Origin``. A request carrying neither is not from a
-    browser page (a script, the test client) and is not cross-site."""
+    browser page (a script, the test client) and is not cross-site.
+
+    Purser's own pages are at the address the request was sent to, at
+    PURSER_PUBLIC_URL, and at the names in PURSER_ALLOWED_HOSTS on their port
+    (#633): one machine reached by its IP and by its name is one Purser."""
     fetch_site = request.headers.get("sec-fetch-site")
     if fetch_site is not None:
         return fetch_site not in ("same-origin", "none")
     origin = request.headers.get("origin")
     if origin is None:
         return False
-    own = {_origin_of(str(request.base_url)), _origin_of(get_settings().public_url)}
-    return origin.lower() not in own
+    settings = get_settings()
+    own = {
+        network.normalize_origin(str(request.base_url)),
+        network.normalize_origin(settings.public_url),
+        *network.allowed_origins(settings.public_url, settings.allowed_hosts),
+    }
+    return network.normalize_origin(origin) not in own
 
 
 def get_current_token(

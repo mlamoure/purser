@@ -7,7 +7,11 @@
  * grouping and the sign are done on the digit string instead.
  *
  * The only Intl call reads a currency's symbol and minor-unit count from a
- * formatter of the literal 0, never of a monetary value. */
+ * formatter of the literal 0, never of a monetary value.
+ *
+ * The MCP widgets share this module (frontend/widgets/lib/kit.ts, #550): Vite
+ * inlines it into each self-contained widget bundle (guardrail 8), so it must
+ * stay free of imports. */
 
 export type SignDisplay =
   /** "-$5.00" for a negative value, "$5.00" otherwise (the default). */
@@ -22,6 +26,9 @@ export type MoneyOptions = {
    * one). Missing means USD, the ledger's default currency. */
   currency?: string | null;
   signDisplay?: SignDisplay;
+  /** Fraction digits to show instead of the currency's minor units (0 for
+   * whole units in a compact display), rounded half-up the same way. */
+  places?: number;
 };
 
 /** A parsed decimal string: sign, integer digits (no leading zeros, at least
@@ -105,7 +112,9 @@ export function formatMoney(value: string | null | undefined, options: MoneyOpti
   if (value == null || value.trim() === "") return "—";
   const parsed = parse(value);
   if (!parsed) return value;
-  const { symbol, places } = currencyStyle((options.currency || "USD").toUpperCase());
+  const style = currencyStyle((options.currency || "USD").toUpperCase());
+  const { symbol } = style;
+  const places = options.places ?? style.places;
   const rounded = roundHalfUp(parsed, places);
   const zero = isZero(rounded);
   const digits = group(rounded.int) + (places > 0 ? `.${rounded.frac}` : "");
@@ -113,6 +122,28 @@ export function formatMoney(value: string | null | undefined, options: MoneyOpti
   const prefix =
     sign === "never" || zero ? "" : rounded.negative ? "-" : sign === "always" ? "+" : "";
   return `${prefix}${symbol}${digits}`;
+}
+
+/** A real minus sign (U+2212): the widgets' amounts and every estimate. */
+export const MINUS_SIGN = "\u2212";
+
+/** The mark an estimated amount carries (#556): U+2248. */
+export const ESTIMATE_MARK = "\u2248";
+
+/** Formatted money with its leading hyphen as a real minus sign:
+ * "-$142.00" -> "−$142.00". */
+export function typographicMinus(text: string): string {
+  return text.startsWith("-") ? `${MINUS_SIGN}${text.slice(1)}` : text;
+}
+
+/** An estimated amount as text (#556): "≈ −$95.00" — the mark, a space, then
+ * the amount as formatMoney renders it with a real minus sign. For text-only
+ * places (a tooltip, a chart label); on the page, <EstimatedAmount> shows the
+ * same and tells a screen reader "estimated", where the bare mark reads
+ * "approximately equal to". A missing amount is "—", unmarked. */
+export function formatEstimate(value: string | null | undefined, options: MoneyOptions = {}): string {
+  const text = formatMoney(value, options);
+  return text === "—" ? text : `${ESTIMATE_MARK} ${typographicMinus(text)}`;
 }
 
 /** -1, 0 or 1 by the decimal string's sign, without parsing it into a
@@ -158,4 +189,62 @@ export function moneyEditText(stored: string): string {
   if (!m) return stored;
   const places = (m[2] ?? "").replace(/0+$/, "").padEnd(2, "0");
   return `${m[1]}.${places}`;
+}
+
+/** A short money label for a chart axis (#594): "$950", "$12.3k", "-$1.25M",
+ * "$4B". Like formatMoney it works on the digit string — the scale shift is a
+ * move of the decimal point — so the label is exact to its rounding. Values
+ * under 1,000 show whole currency units; larger ones keep up to one decimal
+ * (two in millions and up) with trailing zeros dropped. */
+export function formatMoneyCompact(value: string | null | undefined, options: MoneyOptions = {}): string {
+  if (value == null || value.trim() === "") return "—";
+  const parsed = parse(value);
+  if (!parsed) return value;
+  const { symbol } = currencyStyle((options.currency || "USD").toUpperCase());
+  const scales: [number, string, number][] = [
+    [9, "B", 2],
+    [6, "M", 2],
+    [3, "k", 1],
+  ];
+  const digits = parsed.int.replace(/^0+(?=\d)/, "");
+  const shift = ([power, unit, places]: [number, string, number]): [Decimal, string] => [
+    roundHalfUp(
+      {
+        negative: parsed.negative,
+        int: digits.slice(0, digits.length - power) || "0",
+        frac: digits.slice(Math.max(0, digits.length - power)).padStart(power, "0") + parsed.frac,
+      },
+      places,
+    ),
+    unit,
+  ];
+  const at = scales.findIndex(([power]) => digits.length > power);
+  let [shown, suffix] = at >= 0 ? shift(scales[at]) : [roundHalfUp(parsed, 0), ""];
+  // 999,999 rounds to "1,000k": say "1M" instead (and 999.6 -> "$1k").
+  const bigger = at >= 0 ? at - 1 : scales.length - 1;
+  if (shown.int.length > 3 && bigger >= 0) [shown, suffix] = shift(scales[bigger]);
+  const frac = shown.frac.replace(/0+$/, "");
+  const zero = isZero(shown);
+  const prefix = zero || !shown.negative ? "" : "-";
+  return `${prefix}${symbol}${group(shown.int)}${frac ? `.${frac}` : ""}${suffix}`;
+}
+
+/** The exact sum of decimal strings ("12.50" + "-0.0001" -> "12.4999"), for
+ * subtotals the API does not send (#593). Each value is scaled to an integer
+ * at the widest fraction among them and added as a BigInt, so no amount ever
+ * passes through a binary float. The result keeps that widest fraction;
+ * an empty list sums to "0". Malformed strings count as zero. */
+export function sumMoney(values: readonly (string | null | undefined)[]): string {
+  const parsed = values.map((v) => (v == null ? null : parse(v))).filter((d): d is Decimal => d !== null);
+  const places = Math.max(0, ...parsed.map((d) => d.frac.length));
+  let total = 0n;
+  for (const d of parsed) {
+    const scaled = BigInt(d.int + d.frac.padEnd(places, "0"));
+    total += d.negative ? -scaled : scaled;
+  }
+  const negative = total < 0n;
+  const digits = (negative ? -total : total).toString().padStart(places + 1, "0");
+  const int = digits.slice(0, digits.length - places);
+  const frac = digits.slice(digits.length - places);
+  return `${negative ? "-" : ""}${int}${places > 0 ? `.${frac}` : ""}`;
 }

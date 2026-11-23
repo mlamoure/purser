@@ -18,7 +18,8 @@ export function fmtQuantity(value: string | null | undefined): string {
 
 /** The Positions tab of a brokerage account whose holdings are tracked by
  * hand (issue #390, decision 88): each position valued at the newest close,
- * an inline quantity editor (a `set_quantity` event), and "+ position". */
+ * an inline quantity editor (a `set_quantity` event), "Record split" (a
+ * `split` event, #624) and "+ position". */
 export default function PositionsPanel({
   accountId,
   currency,
@@ -42,6 +43,9 @@ export default function PositionsPanel({
   const refresh = () => {
     qc.invalidateQueries({ queryKey: ["positions", accountId] });
     qc.invalidateQueries({ queryKey: ["account", accountId] });
+    // The holdings table and the balance chart read the same positions (#595).
+    qc.invalidateQueries({ queryKey: ["holdings-summary", accountId] });
+    qc.invalidateQueries({ queryKey: ["balance-history", accountId] });
   };
 
   return (
@@ -109,6 +113,7 @@ function PositionRow({
   onChange: () => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const [splitting, setSplitting] = useState(false);
   const [quantity, setQuantity] = useState(fmtQuantity(p.quantity));
   const today = useLedgerToday();
   // Empty means "today": the ledger day may arrive after the form opens.
@@ -248,11 +253,26 @@ function PositionRow({
                   setQuantity(fmtQuantity(p.quantity));
                   setAsOf("");
                   setCostBasis("");
+                  setSplitting(false);
                   setEditing(true);
                 }}
               >
                 Set quantity
               </Button>
+              {p.closed_at == null && !holdsNothing && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  aria-label={`Record split of ${p.symbol}`}
+                  title="Record a stock split: every share becomes a ratio of shares on its effective date"
+                  onClick={() => {
+                    setEditing(false);
+                    setSplitting(true);
+                  }}
+                >
+                  Record split
+                </Button>
+              )}
               {holdsNothing && (
                 <Button
                   size="sm"
@@ -269,6 +289,20 @@ function PositionRow({
           )}
         </Td>
       </tr>
+      {splitting && (
+        <tr>
+          <Td colSpan={6}>
+            <RecordSplit
+              p={p}
+              onDone={() => {
+                setSplitting(false);
+                onChange();
+              }}
+              onCancel={() => setSplitting(false)}
+            />
+          </Td>
+        </tr>
+      )}
       {error && (
         <tr>
           <Td colSpan={6}>
@@ -277,6 +311,121 @@ function PositionRow({
         </tr>
       )}
     </>
+  );
+}
+
+const selectClass = "h-9 rounded-md border border-border bg-card px-2 text-sm";
+
+/** A stock split (#624, decision 127): new shares for old, effective on the
+ * first day the shares trade split. Every share held the day before becomes
+ * that ratio; each lot keeps its total basis and term. The broker's cash for
+ * a fractional share, when it paid any, is recorded with the split. */
+function RecordSplit({
+  p,
+  onDone,
+  onCancel,
+}: {
+  p: PositionOut;
+  onDone: () => void;
+  onCancel: () => void;
+}) {
+  const today = useLedgerToday();
+  const [numerator, setNumerator] = useState("");
+  const [denominator, setDenominator] = useState("1");
+  const [effective, setEffective] = useState(""); // empty means "today"
+  const [cashInLieu, setCashInLieu] = useState("");
+  const [lotMethod, setLotMethod] = useState("fifo");
+  const [error, setError] = useState<string | null>(null);
+  const whole = (v: string) => /^[1-9][0-9]*$/.test(v.trim());
+  const record = useMutation({
+    mutationFn: async () => {
+      const lieu = cashInLieu.trim();
+      const { error: err } = await api.POST("/positions/{position_id}/events", {
+        params: { path: { position_id: p.id } },
+        body: {
+          kind: "split",
+          occurred_on: effective || today,
+          split_numerator: Number(numerator.trim()),
+          split_denominator: Number(denominator.trim()),
+          ...(lieu ? { cash_in_lieu: lieu } : {}),
+          ...(lieu && p.tracks_lots ? { lot_method: lotMethod as "fifo" | "lifo" | "hifo" } : {}),
+        },
+      });
+      if (err) throw new Error(errorDetail(err));
+    },
+    onSuccess: () => {
+      setError(null);
+      onDone();
+    },
+    onError: (e) => setError(e.message),
+  });
+
+  return (
+    <div className="space-y-2 rounded-md border border-border p-3">
+      <div className="flex flex-wrap items-end gap-2">
+        <Input
+          aria-label={`New shares for ${p.symbol}`}
+          className="w-24"
+          inputMode="numeric"
+          placeholder="New"
+          value={numerator}
+          onChange={(e) => setNumerator(e.target.value)}
+        />
+        <span className="pb-2 text-sm text-muted-foreground">for</span>
+        <Input
+          aria-label={`Old shares for ${p.symbol}`}
+          className="w-24"
+          inputMode="numeric"
+          placeholder="Old"
+          value={denominator}
+          onChange={(e) => setDenominator(e.target.value)}
+        />
+        <Input
+          aria-label={`Split effective date for ${p.symbol}`}
+          type="date"
+          className="w-40"
+          max={today}
+          value={effective || today}
+          onChange={(e) => setEffective(e.target.value)}
+        />
+        <Input
+          aria-label={`Cash in lieu for ${p.symbol} (optional)`}
+          title="The cash the broker paid for the fractional share the split left, if any"
+          className="w-40"
+          placeholder="Cash in lieu (optional)"
+          value={cashInLieu}
+          onChange={(e) => setCashInLieu(e.target.value)}
+        />
+        {p.tracks_lots && cashInLieu.trim() && (
+          <select
+            aria-label="Lots the fractional share comes from"
+            className={selectClass}
+            value={lotMethod}
+            onChange={(e) => setLotMethod(e.target.value)}
+          >
+            <option value="fifo">First in, first out</option>
+            <option value="lifo">Last in, first out</option>
+            <option value="hifo">Highest basis first</option>
+          </select>
+        )}
+        <Button
+          size="sm"
+          disabled={record.isPending || !whole(numerator) || !whole(denominator)}
+          onClick={() => record.mutate()}
+        >
+          Record split
+        </Button>
+        <Button size="sm" variant="ghost" onClick={onCancel}>
+          Cancel
+        </Button>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        2 new for 1 old is a 2-for-1 split; 1 new for 10 old is a reverse split. The effective
+        date is the first day the shares trade split. Each lot keeps its total cost basis and
+        holding period; a wrong split is undone by reversing it.
+      </p>
+      <ErrorText>{error}</ErrorText>
+    </div>
   );
 }
 

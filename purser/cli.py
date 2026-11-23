@@ -28,8 +28,22 @@ log = get_logger(__name__)
 MIGRATION_LOCK_KEY = 0x7075727365720001  # ASCII "purser", then 0x0001
 
 
+def _require_settings() -> None:
+    """Every role fails fast, pre-bind, on a setting it cannot use (#633): one
+    ``error:`` line per bad variable instead of a validation traceback."""
+    from pydantic import ValidationError
+
+    try:
+        get_settings()
+    except ValidationError as exc:
+        for error in exc.errors():
+            typer.echo(f"error: {str(error['msg']).removeprefix('Value error, ')}", err=True)
+        raise typer.Exit(1) from exc
+
+
 def _require_encryption_key() -> None:
     """Every role fails fast, pre-bind, without a usable key (issue #93)."""
+    _require_settings()
     try:
         crypto.ensure_key()
     except (crypto.EncryptionKeyMissing, crypto.EncryptionKeyInvalid) as exc:
@@ -169,6 +183,11 @@ def serve() -> None:
 
         scheduler = build_scheduler()
         scheduler.start()
+    # Searchable text in memory (#141, DESIGN §9), built in the background:
+    # searches decrypt per row until it is ready, so serving never waits.
+    from purser.search import textcache
+
+    textcache.start_background()
     try:
         uvicorn.run(
             "purser.api.app:create_app",

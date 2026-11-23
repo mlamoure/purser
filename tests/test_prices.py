@@ -10,7 +10,7 @@ import json
 import logging
 import uuid
 from collections.abc import Callable
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 import httpx
@@ -23,8 +23,8 @@ from purser.digest import whats_new
 from purser.holdings import prices, service
 from purser.holdings.providers import PriceFetchError, TiingoProvider
 from purser.models import AuditLog, Event, HoldingsSnapshot, Position, SecurityPrice
+from tests.conftest import today
 
-TODAY = datetime.now(UTC).date()
 FAKE_KEY = "test-key-not-real-0123456789abcdef"
 
 
@@ -55,48 +55,51 @@ class TestTiingoProvider:
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen.append(request)
-            return httpx.Response(200, text=_closes((TODAY, "123.456789")))
+            return httpx.Response(200, text=_closes((today(), "123.456789")))
 
         provider = TiingoProvider(FAKE_KEY, client=_client(handler))
-        closes = provider.closes("BRK.B", TODAY - timedelta(days=3), TODAY)
+        closes = provider.closes("BRK.B", today() - timedelta(days=3), today())
         (request,) = seen
         assert request.url.host == "api.tiingo.com"
         assert request.url.path == "/tiingo/daily/brk-b/prices"
         assert dict(request.url.params) == {
-            "startDate": (TODAY - timedelta(days=3)).isoformat(),
-            "endDate": TODAY.isoformat(),
+            "startDate": (today() - timedelta(days=3)).isoformat(),
+            "endDate": today().isoformat(),
         }
         assert request.headers["Authorization"] == f"Token {FAKE_KEY}"
         assert request.content == b""  # nothing but the ticker leaves Purser
-        assert closes == [(TODAY, Decimal("123.456789"))]
+        assert closes == [(today(), Decimal("123.456789"))]
         assert type(closes[0][1]) is Decimal
 
     def test_numbers_parse_as_decimal_never_float(self) -> None:
         """0.1 + 0.2 style artefacts would appear if the body went through
         float: 1234567.123456 is not representable in binary."""
-        body = _closes((TODAY, "1234567.123456"), (TODAY - timedelta(days=1), "7"))
+        body = _closes((today(), "1234567.123456"), (today() - timedelta(days=1), "7"))
         provider = TiingoProvider(
             FAKE_KEY, client=_client(lambda r: httpx.Response(200, text=body))
         )
-        assert dict(provider.closes("ACME", TODAY - timedelta(days=5), TODAY)) == {
-            TODAY: Decimal("1234567.123456"),
-            TODAY - timedelta(days=1): Decimal("7"),
+        assert dict(provider.closes("ACME", today() - timedelta(days=5), today())) == {
+            today(): Decimal("1234567.123456"),
+            today() - timedelta(days=1): Decimal("7"),
         }
 
     def test_bad_rows_are_dropped(self) -> None:
         body = json.dumps(
             [
-                {"date": TODAY.isoformat(), "close": "12.5"},  # a string, not a number
+                {"date": today().isoformat(), "close": "12.5"},  # a string, not a number
                 {"date": "nonsense", "close": 1},
-                {"date": TODAY.isoformat(), "close": 0},
-                {"date": (TODAY + timedelta(days=9)).isoformat(), "close": 3},  # outside the range
-                {"date": TODAY.isoformat(), "close": True},
+                {"date": today().isoformat(), "close": 0},
+                {
+                    "date": (today() + timedelta(days=9)).isoformat(),
+                    "close": 3,
+                },  # outside the range
+                {"date": today().isoformat(), "close": True},
             ]
         )
         provider = TiingoProvider(
             FAKE_KEY, client=_client(lambda r: httpx.Response(200, text=body))
         )
-        assert provider.closes("ACME", TODAY - timedelta(days=1), TODAY) == []
+        assert provider.closes("ACME", today() - timedelta(days=1), today()) == []
 
     @pytest.mark.parametrize(
         ("response", "status"),
@@ -112,7 +115,7 @@ class TestTiingoProvider:
     ) -> None:
         provider = TiingoProvider(FAKE_KEY, client=_client(lambda r: response))
         with pytest.raises(PriceFetchError) as raised:
-            provider.closes("ACME", TODAY, TODAY)
+            provider.closes("ACME", today(), today())
         assert raised.value.status == status
         assert FAKE_KEY not in str(raised.value)
         assert FAKE_KEY not in repr(provider)
@@ -130,21 +133,21 @@ class TestTiingoProvider:
         """One absurd row costs that row, never the response: the others are
         returned and the drop is counted (decision 89). The range is checked
         after rounding to six places."""
-        body = _closes((TODAY - timedelta(days=1), "10.5"), (TODAY, raw))
+        body = _closes((today() - timedelta(days=1), "10.5"), (today(), raw))
         provider = TiingoProvider(
             FAKE_KEY, client=_client(lambda r: httpx.Response(200, text=body))
         )
-        closes = provider.closes("ACME", TODAY - timedelta(days=1), TODAY)
-        assert closes == [(TODAY - timedelta(days=1), Decimal("10.5"))]
+        closes = provider.closes("ACME", today() - timedelta(days=1), today())
+        assert closes == [(today() - timedelta(days=1), Decimal("10.5"))]
         assert closes.dropped == 1
 
     def test_the_largest_close_that_fits_is_kept(self) -> None:
-        body = _closes((TODAY, "99999999999999.9999994"))
+        body = _closes((today(), "99999999999999.9999994"))
         provider = TiingoProvider(
             FAKE_KEY, client=_client(lambda r: httpx.Response(200, text=body))
         )
-        closes = provider.closes("ACME", TODAY, TODAY)
-        assert closes == [(TODAY, Decimal("99999999999999.999999"))] and closes.dropped == 0
+        closes = provider.closes("ACME", today(), today())
+        assert closes == [(today(), Decimal("99999999999999.999999"))] and closes.dropped == 0
 
     def test_transport_errors_do_not_chain(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -152,7 +155,7 @@ class TestTiingoProvider:
 
         provider = TiingoProvider(FAKE_KEY, client=_client(handler))
         with pytest.raises(PriceFetchError) as raised:
-            provider.closes("ACME", TODAY, TODAY)
+            provider.closes("ACME", today(), today())
         assert raised.value.status is None and raised.value.reason == "ConnectError"
         assert raised.value.__cause__ is None and raised.value.__suppress_context__
         assert FAKE_KEY not in str(raised.value)
@@ -188,7 +191,7 @@ def _hold(account_id: str, symbol: str, quantity: str, days_ago: int) -> None:
             account_ref=account_id,
             symbol=symbol,
             quantity=Decimal(quantity),
-            as_of=TODAY - timedelta(days=days_ago),
+            as_of=today() - timedelta(days=days_ago),
             token=None,
         )
         session.commit()
@@ -222,12 +225,12 @@ class TestFetch:
             days = [start + timedelta(days=n) for n in range((end - start).days + 1)]
             return httpx.Response(200, text=_closes(*[(d, "10.5") for d in days]))
 
-        first = prices.run_fetch(today=TODAY, client=_client(handler))
+        first = prices.run_fetch(today=today(), client=_client(handler))
         # From a week before the first day: the close in effect on a weekend
         # or holiday first day is dated before it.
         assert first.fetched == 12 and first.failed == []
-        assert windows == [((TODAY - timedelta(days=11)).isoformat(), TODAY.isoformat())]
-        second = prices.run_fetch(today=TODAY, client=_client(handler))
+        assert windows == [((today() - timedelta(days=11)).isoformat(), today().isoformat())]
+        second = prices.run_fetch(today=today(), client=_client(handler))
         assert second.fetched == 0 and len(windows) == 1  # nothing left to ask for
         assert [s for _d, _c, s in _stored(symbol)] == ["tiingo"] * 12
 
@@ -259,14 +262,14 @@ class TestFetch:
         _hold(broker, symbol, "2", days_ago=1)
 
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, text=_closes((TODAY, "10.5")))
+            return httpx.Response(200, text=_closes((today(), "10.5")))
 
         def die(*_args: object, **_kwargs: object) -> list[uuid.UUID]:
             raise RuntimeError("worker killed after the closes committed")
 
         monkeypatch.setattr(projection, "manual_accounts_with_positions", die)
         with pytest.raises(RuntimeError):
-            prices.run_fetch(today=TODAY, client=_client(handler))
+            prices.run_fetch(today=today(), client=_client(handler))
         assert [s for _d, _c, s in _stored(symbol)] == ["tiingo"]
         with db.get_sessionmaker()() as session:
             (row,) = session.execute(
@@ -275,8 +278,97 @@ class TestFetch:
         after = row.before_after["after"]
         assert after["provider"] == "tiingo"
         assert after["symbols"] == {
-            symbol: {"inserted": 1, "first": TODAY.isoformat(), "last": TODAY.isoformat()}
+            symbol: {"inserted": 1, "first": today().isoformat(), "last": today().isoformat()}
         }
+
+    def test_the_provider_is_asked_with_no_transaction_open(
+        self, broker: str, admin_client: TestClient, migrated_engine: Engine
+    ) -> None:
+        """#404: the fetch reads what it needs and ends that transaction, so
+        no connection sits idle in a transaction while the provider answers,
+        and the balance watermark is free during every call. One HTTP client
+        serves every symbol."""
+        _tiingo(admin_client)
+        symbols = sorted(_symbol() for _ in range(3))
+        for symbol in symbols:
+            _hold(broker, symbol, "2", days_ago=2)
+        seen: list[tuple[int, bool]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            with migrated_engine.connect() as probe:
+                idle = probe.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity"
+                        " WHERE datname = current_database() AND pid <> pg_backend_pid()"
+                        " AND state LIKE 'idle in transaction%'"
+                    )
+                ).scalar_one()
+                free = probe.execute(
+                    text("SELECT 1 FROM balance_watermark FOR UPDATE SKIP LOCKED")
+                ).first()
+                probe.rollback()
+            seen.append((idle, free is not None))
+            return httpx.Response(200, text=_closes((today() - timedelta(days=1), "4.5")))
+
+        clients: list[httpx.Client] = []
+        real = prices.configured_provider
+
+        def counting(*, client: httpx.Client | None = None):  # type: ignore[no-untyped-def]
+            assert client is not None
+            clients.append(client)
+            return real(client=client)
+
+        transport = _client(handler)
+        result = prices.run_fetch(today=today(), client=transport)
+        assert result.failed == [] and result.fetched == 3
+        assert seen and all(entry == (0, True) for entry in seen), seen
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(prices, "configured_provider", counting)
+            prices.run_fetch(today=today() + timedelta(days=1), client=transport)
+        assert len(clients) == 1  # one client for the whole run
+        with db.get_sessionmaker()() as session:
+            rows = session.execute(
+                select(AuditLog).where(AuditLog.action == "price.closes")
+            ).scalars()
+            audited = sorted(s for r in rows for s in r.before_after["after"]["symbols"])
+        assert audited == symbols  # each symbol's closes with their own row
+
+    def test_a_symbol_whose_store_fails_rolls_back_alone(
+        self, broker: str, admin_client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """#404: each symbol is written in its own transaction. One that fails
+        as a whole stores nothing (it is asked again next run) and is
+        reported; the symbols before and after it keep their closes."""
+        from purser.holdings import overlay
+
+        _tiingo(admin_client)
+        first, bad, last = sorted(_symbol() for _ in range(3))
+        for symbol in (first, bad, last):
+            _hold(broker, symbol, "1", days_ago=2)
+        real = overlay.first_revalued
+
+        def failing(session, earliest):  # type: ignore[no-untyped-def]
+            if bad in earliest:
+                raise RuntimeError("the database went away mid-symbol")
+            return real(session, earliest)
+
+        monkeypatch.setattr(overlay, "first_revalued", failing)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text=_closes((today() - timedelta(days=1), "7")))
+
+        result = prices.run_fetch(today=today(), client=_client(handler))
+        assert result.failed == [{"symbol": bad, "status": None, "reason": "store failed"}]
+        assert _stored(first) != [] and _stored(last) != []
+        assert _stored(bad) == []
+        with db.get_sessionmaker()() as session:
+            (failure,) = session.execute(
+                select(Event).where(Event.type == "price.fetch_failed")
+            ).scalars()
+            assert failure.payload["symbol"] == bad
+        monkeypatch.setattr(overlay, "first_revalued", real)
+        again = prices.run_fetch(today=today(), client=_client(handler))
+        assert again.failed == [] and _stored(bad) != []
 
     def test_one_failing_symbol_never_blocks_the_others(
         self, broker: str, admin_client: TestClient
@@ -289,12 +381,12 @@ class TestFetch:
         def handler(request: httpx.Request) -> httpx.Response:
             if bad.lower() in request.url.path:
                 return httpx.Response(404, json={"detail": "not found"})
-            return httpx.Response(200, text=_closes((TODAY, "3")))
+            return httpx.Response(200, text=_closes((today(), "3")))
 
-        result = prices.run_fetch(today=TODAY, client=_client(handler))
+        result = prices.run_fetch(today=today(), client=_client(handler))
         assert result.failed == [{"symbol": bad, "status": 404, "reason": "not found"}]
-        assert _stored(good) == [(TODAY, Decimal("3"), "tiingo")]
-        prices.run_fetch(today=TODAY, client=_client(handler))  # fails again the same day
+        assert _stored(good) == [(today(), Decimal("3"), "tiingo")]
+        prices.run_fetch(today=today(), client=_client(handler))  # fails again the same day
         with db.get_sessionmaker()() as session:
             failures = (
                 session.execute(select(Event).where(Event.type == "price.fetch_failed"))
@@ -318,15 +410,15 @@ class TestFetch:
             if second.lower() in request.url.path:
                 raise RuntimeError("the transport broke")
             if third.lower() in request.url.path:
-                return httpx.Response(200, text=_closes((TODAY, "1e22")))
-            return httpx.Response(200, text=_closes((TODAY, "3")))
+                return httpx.Response(200, text=_closes((today(), "1e22")))
+            return httpx.Response(200, text=_closes((today(), "3")))
 
-        result = prices.run_fetch(today=TODAY, client=_client(handler))
+        result = prices.run_fetch(today=today(), client=_client(handler))
         assert result.failed == [
             {"symbol": second, "status": None, "reason": "RuntimeError"},
             {"symbol": third, "status": 200, "reason": "1 close(s) out of range dropped"},
         ]
-        assert _stored(first) == [(TODAY, Decimal("3"), "tiingo")]
+        assert _stored(first) == [(today(), Decimal("3"), "tiingo")]
         with db.get_sessionmaker()() as session:
             failed = {
                 e.payload["symbol"]: e.payload["reason"]
@@ -368,10 +460,10 @@ class TestFetch:
                 return httpx.Response(500, text=f"echo {request.headers['Authorization']}")
             if step == "raise":
                 raise httpx.ReadTimeout(f"timeout {request.headers['Authorization']}")
-            return httpx.Response(200, text=_closes((TODAY, "1")))
+            return httpx.Response(200, text=_closes((today(), "1")))
 
         caplog.set_level(logging.DEBUG)
-        result = prices.run_fetch(today=TODAY, client=_client(handler))
+        result = prices.run_fetch(today=today(), client=_client(handler))
         assert len(result.failed) == 2
         assert FAKE_KEY not in caplog.text
         with migrated_engine.connect() as conn:
@@ -400,7 +492,7 @@ class TestFetch:
         def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
             raise AssertionError("no key: the provider must not be called")
 
-        result = prices.run_fetch(today=TODAY, client=_client(handler))
+        result = prices.run_fetch(today=today(), client=_client(handler))
         assert result.skipped is not None and "no API key" in result.skipped
 
 
@@ -435,7 +527,7 @@ def _unpriced(symbol: str) -> list[tuple[date, Decimal]]:
 
 
 def _day(days_ago: int) -> str:
-    return (TODAY - timedelta(days=days_ago)).isoformat()
+    return (today() - timedelta(days=days_ago)).isoformat()
 
 
 class TestBackfill:
@@ -449,14 +541,14 @@ class TestBackfill:
         symbol = _symbol()
         _hold(broker, symbol, "2", days_ago=4)
         windows: list[tuple[str, str]] = []
-        prices.run_fetch(today=TODAY, client=_client(_windows(windows)))
+        prices.run_fetch(today=today(), client=_client(_windows(windows)))
         assert windows == [(_day(11), _day(0))]
 
         _hold(broker, symbol, "2", days_ago=20)  # backdated: the history grows earlier
-        prices.run_fetch(today=TODAY, client=_client(_windows(windows)))
+        prices.run_fetch(today=today(), client=_client(_windows(windows)))
         assert windows[1:] == [(_day(27), _day(12))]  # the head gap, once
         assert _unpriced(symbol) == []
-        prices.run_fetch(today=TODAY, client=_client(_windows(windows)))
+        prices.run_fetch(today=today(), client=_client(_windows(windows)))
         assert len(windows) == 2
 
     def test_a_second_account_holding_it_earlier_is_backfilled(
@@ -466,7 +558,7 @@ class TestBackfill:
         symbol = _symbol()
         _hold(broker, symbol, "2", days_ago=4)
         windows: list[tuple[str, str]] = []
-        prices.run_fetch(today=TODAY, client=_client(_windows(windows)))
+        prices.run_fetch(today=today(), client=_client(_windows(windows)))
 
         other = admin_client.post(
             "/accounts", json={"name": "Second", "type": "brokerage", "path": "assets.second"}
@@ -474,7 +566,7 @@ class TestBackfill:
         resp = admin_client.patch(f"/accounts/{other}", json={"holdings_source": "manual"})
         assert resp.status_code == 200, resp.text
         _hold(other, symbol, "3", days_ago=30)
-        prices.run_fetch(today=TODAY, client=_client(_windows(windows)))
+        prices.run_fetch(today=today(), client=_client(_windows(windows)))
         assert windows[1:] == [(_day(37), _day(12))]
         assert _unpriced(symbol) == []
 
@@ -492,11 +584,11 @@ class TestBackfill:
             session.commit()
         _tiingo(admin_client)
         windows: list[tuple[str, str]] = []
-        prices.run_fetch(today=TODAY, client=_client(_windows(windows)))
+        prices.run_fetch(today=today(), client=_client(_windows(windows)))
         # Its history only: up to the last day it held shares.
         assert windows == [(_day(37), _day(11))]
         assert _unpriced(symbol) == []
-        prices.run_fetch(today=TODAY, client=_client(_windows(windows)))
+        prices.run_fetch(today=today(), client=_client(_windows(windows)))
         assert len(windows) == 1
 
     def test_a_range_before_the_listing_is_asked_for_once(
@@ -509,15 +601,15 @@ class TestBackfill:
         symbol = _symbol()
         _hold(broker, symbol, "2", days_ago=6)
         windows: list[tuple[str, str]] = []
-        listed = TODAY - timedelta(days=2)
-        prices.run_fetch(today=TODAY, client=_client(_windows(windows, listed=listed)))
+        listed = today() - timedelta(days=2)
+        prices.run_fetch(today=today(), client=_client(_windows(windows, listed=listed)))
         assert windows == [(_day(13), _day(0))]
         assert min(d for d, _c, _s in _stored(symbol)) == listed
-        prices.run_fetch(today=TODAY, client=_client(_windows(windows, listed=listed)))
+        prices.run_fetch(today=today(), client=_client(_windows(windows, listed=listed)))
         assert len(windows) == 1
         # A backdate still asks for the dates before the earlier answer.
         _hold(broker, symbol, "2", days_ago=9)
-        prices.run_fetch(today=TODAY, client=_client(_windows(windows, listed=listed)))
+        prices.run_fetch(today=today(), client=_client(_windows(windows, listed=listed)))
         assert windows[1:] == [(_day(16), _day(14))]
 
 
@@ -531,7 +623,7 @@ class TestWindows:
         _tiingo(admin_client)
         symbol = _symbol()
         _hold(broker, symbol, "2", days_ago=4)
-        prices.run_fetch(today=TODAY, client=_client(_windows([])))
+        prices.run_fetch(today=today(), client=_client(_windows([])))
         _hold(broker, symbol, "2", days_ago=20)  # backdated: a head window opens
         asked: list[tuple[str, str]] = []
         oldest_stored = min(d for d, _c, _s in _stored(symbol))
@@ -543,7 +635,7 @@ class TestWindows:
                 return httpx.Response(500, json={"detail": "upstream"})
             return _windows(asked)(request)
 
-        tomorrow = TODAY + timedelta(days=1)
+        tomorrow = today() + timedelta(days=1)
         result = prices.run_fetch(today=tomorrow, client=_client(refuse_the_head))
         assert asked[0] == (tomorrow.isoformat(), tomorrow.isoformat())  # the tail first
         assert len(asked) == 2  # and the head after it
@@ -577,7 +669,7 @@ def test_a_store_error_on_a_final_not_found_fails_one_window(
         return record(session, symbol, source, start, through)
 
     monkeypatch.setattr(prices, "_record_answered", failing)
-    result = prices.run_fetch(today=TODAY, client=_client(Exchange(unknown=frozenset({unknown}))))
+    result = prices.run_fetch(today=today(), client=_client(Exchange(unknown=frozenset({unknown}))))
     assert {"symbol": unknown, "status": None, "reason": "store failed"} in result.failed
     assert result.fetched > 0 and _stored(known) != []
     with db.get_sessionmaker()() as session:
@@ -593,7 +685,7 @@ class Exchange:
     the close is published). Unknown tickers answer 404."""
 
     def __init__(self, unknown: frozenset[str] = frozenset()) -> None:
-        self.run_day = TODAY
+        self.run_day = today()
         self.unknown = unknown
         self.asked: list[tuple[str, date, date]] = []
 
@@ -621,14 +713,14 @@ class Exchange:
 
 
 def _weekday_back(weekday: int, at_least: int) -> date:
-    day = TODAY - timedelta(days=at_least)
+    day = today() - timedelta(days=at_least)
     while day.weekday() != weekday:
         day -= timedelta(days=1)
     return day
 
 
 def _ago_of(day: date) -> int:
-    return (TODAY - day).days
+    return (today() - day).days
 
 
 def _close_position(symbol: str) -> None:
@@ -652,7 +744,7 @@ class TestCoverage:
         saturday = _weekday_back(5, 14)
         symbol = _symbol()
         _hold(broker, symbol, "10", days_ago=_ago_of(saturday))
-        Exchange().run(TODAY)
+        Exchange().run(today())
         with db.get_sessionmaker()() as session:
             row = session.execute(
                 select(HoldingsSnapshot).where(
@@ -676,7 +768,7 @@ class TestCoverage:
         _close_position(gone)  # zero stays open, holding nothing
         exchange = Exchange()
         day = saturday + timedelta(days=1)
-        while day <= TODAY:
+        while day <= today():
             exchange.run(day)
             day += timedelta(days=1)
         for symbol in (gone, zero):
@@ -694,7 +786,7 @@ class TestCoverage:
         _close_position(unknown)
         exchange = Exchange(unknown=frozenset({unknown}))
         for back in range(5, -1, -1):
-            exchange.run(TODAY - timedelta(days=back))
+            exchange.run(today() - timedelta(days=back))
         assert len(exchange.requests(unknown)) == 1
         with db.get_sessionmaker()() as session:
             failures = [
@@ -720,7 +812,7 @@ class TestCoverage:
         exchange.run(monday)  # Monday's close is not published yet
         _hold(broker, symbol, "0", days_ago=_ago_of(tuesday))
         day = tuesday
-        while day <= TODAY:
+        while day <= today():
             exchange.run(day)
             day += timedelta(days=1)
         assert monday in {d for d, _c, _s in _stored(symbol)}
@@ -742,16 +834,16 @@ class TestCoverage:
         symbol = _symbol()
         _hold(broker, symbol, "5", days_ago=30)
         windows: list[tuple[str, str]] = []
-        prices.run_fetch(today=TODAY - timedelta(days=20), client=_client(_windows(windows)))
+        prices.run_fetch(today=today() - timedelta(days=20), client=_client(_windows(windows)))
 
         def down(request: httpx.Request) -> httpx.Response:
             return httpx.Response(503, json={"detail": "down"})
 
-        prices.run_fetch(today=TODAY - timedelta(days=15), client=_client(down))
+        prices.run_fetch(today=today() - timedelta(days=15), client=_client(down))
         resp = admin_client.post(f"/accounts/{broker}/close", json={})
         assert resp.status_code == 200, resp.text
         recovery: list[tuple[str, str]] = []
-        prices.run_fetch(today=TODAY, client=_client(_windows(recovery)))
+        prices.run_fetch(today=today(), client=_client(_windows(recovery)))
         assert recovery == [(_day(19), _day(0))]
 
 
@@ -772,7 +864,7 @@ def _island(broker: str, symbol: str, exchange: "Exchange") -> uuid.UUID:
     Returns the position."""
     _hold(broker, symbol, "10", days_ago=300)
     _hold(broker, symbol, "0", days_ago=291)
-    exchange.run(TODAY)
+    exchange.run(today())
     with db.get_sessionmaker()() as session:
         position = session.execute(select(Position).where(Position.symbol == symbol)).scalar_one()
         for event in reversed(service.list_events(session, position.id)):
@@ -793,31 +885,32 @@ class TestAnsweredRanges:
         exchange = Exchange()
         position_id = _island(broker, symbol, exchange)
         _hold(broker, symbol, "10", days_ago=10)  # the real count
-        exchange.run(TODAY)
-        assert exchange.requests(symbol)[-1] == (TODAY - timedelta(days=17), TODAY)
+        exchange.run(today())
+        assert exchange.requests(symbol)[-1] == (today() - timedelta(days=17), today())
         with db.get_sessionmaker()() as session:
             service.record_event(
                 session,
                 position_id=position_id,
                 kind="buy",
-                occurred_on=TODAY - timedelta(days=100),
+                occurred_on=today() - timedelta(days=100),
                 quantity=Decimal("5"),
                 token=None,
             )
             session.commit()
-        exchange.run(TODAY)
+        exchange.run(today())
         assert exchange.requests(symbol)[-1] == (
-            TODAY - timedelta(days=107),
-            TODAY - timedelta(days=18),
+            today() - timedelta(days=107),
+            today() - timedelta(days=18),
         )
-        row = _row_on(symbol, TODAY - timedelta(days=100))
+        row = _row_on(symbol, today() - timedelta(days=100))
         assert row.price_as_of is not None
-        assert (TODAY - timedelta(days=100) - row.price_as_of).days <= 4  # not the island's
+        assert (today() - timedelta(days=100) - row.price_as_of).days <= 4  # not the island's
         asked = len(exchange.requests(symbol))
-        exchange.run(TODAY)
+        exchange.run(today())
         # Answered for good: only the unsettled last days are asked again.
         assert all(
-            start >= TODAY - timedelta(days=3) for start, _end in exchange.requests(symbol)[asked:]
+            start >= today() - timedelta(days=3)
+            for start, _end in exchange.requests(symbol)[asked:]
         )
 
     def test_a_weekend_start_after_an_island_gets_the_friday_close(
@@ -829,7 +922,7 @@ class TestAnsweredRanges:
         _island(broker, symbol, exchange)
         sunday = _weekday_back(6, 14)
         _hold(broker, symbol, "10", days_ago=_ago_of(sunday))
-        exchange.run(TODAY)
+        exchange.run(today())
         assert _row_on(symbol, sunday).price_as_of == sunday - timedelta(days=2)
 
     def test_a_backdate_into_the_gap_after_an_account_left_manual(
@@ -844,7 +937,7 @@ class TestAnsweredRanges:
         symbol = _symbol()
         exchange = Exchange()
         _hold(broker, symbol, "4", days_ago=200)
-        exchange.run(TODAY - timedelta(days=150))  # priced up to then
+        exchange.run(today() - timedelta(days=150))  # priced up to then
         with db.get_sessionmaker()() as session:
             connection = Connection(provider="simplefin")
             session.add(connection)
@@ -863,17 +956,17 @@ class TestAnsweredRanges:
         resp = admin_client.patch(f"/accounts/{other}", json={"holdings_source": "manual"})
         assert resp.status_code == 200, resp.text
         _hold(other, symbol, "3", days_ago=10)
-        exchange.run(TODAY)
-        assert exchange.requests(symbol)[-1] == (TODAY - timedelta(days=17), TODAY)
+        exchange.run(today())
+        assert exchange.requests(symbol)[-1] == (today() - timedelta(days=17), today())
         _hold(other, symbol, "3", days_ago=100)  # backdated into the gap
-        exchange.run(TODAY)
+        exchange.run(today())
         assert exchange.requests(symbol)[-1] == (
-            TODAY - timedelta(days=107),
-            TODAY - timedelta(days=18),
+            today() - timedelta(days=107),
+            today() - timedelta(days=18),
         )
-        row = _row_on(symbol, TODAY - timedelta(days=100))
+        row = _row_on(symbol, today() - timedelta(days=100))
         assert row.price_as_of is not None
-        assert (TODAY - timedelta(days=100) - row.price_as_of).days <= 4
+        assert (today() - timedelta(days=100) - row.price_as_of).days <= 4
 
 
 class TestAbsurdCloses:
@@ -885,8 +978,8 @@ class TestAbsurdCloses:
         _tiingo(admin_client)
         symbol = _symbol()
         _hold(broker, symbol, "2", days_ago=3)
-        prices.run_fetch(today=TODAY, client=_client(_windows([])))
-        bad = TODAY + timedelta(days=1)
+        prices.run_fetch(today=today(), client=_client(_windows([])))
+        bad = today() + timedelta(days=1)
 
         def handler(request: httpx.Request) -> httpx.Response:
             start = date.fromisoformat(request.url.params["startDate"])
@@ -896,7 +989,7 @@ class TestAbsurdCloses:
                 200, text=_closes(*[(d, "1e22" if d == bad else "10.5") for d in days])
             )
 
-        later = TODAY + timedelta(days=3)
+        later = today() + timedelta(days=3)
         result = prices.run_fetch(today=later, client=_client(handler))
         assert max(d for d, _c, _s in _stored(symbol)) == later  # the rest is stored
         assert bad not in {d for d, _c, _s in _stored(symbol)}
@@ -926,10 +1019,10 @@ class TestAbsurdCloses:
         _tiingo(admin_client)
         symbol = _symbol()
         _hold(broker, symbol, "2", days_ago=4)
-        prices.run_fetch(today=TODAY, client=_client(_windows([])))
+        prices.run_fetch(today=today(), client=_client(_windows([])))
         _hold(broker, symbol, "2", days_ago=20)  # backdated: a head window opens
-        bad = TODAY - timedelta(days=15)
-        tomorrow = TODAY + timedelta(days=1)
+        bad = today() - timedelta(days=15)
+        tomorrow = today() + timedelta(days=1)
 
         def handler(request: httpx.Request) -> httpx.Response:
             start = date.fromisoformat(request.url.params["startDate"])
@@ -974,7 +1067,7 @@ class TestAbsurdCloses:
             days = [start + timedelta(days=n) for n in range((end - start).days + 1)]
             close = "10000000000000" if big.lower() in request.url.path else "10.5"
             return httpx.Response(
-                200, text=_closes(*[(d, close if d == TODAY else "10.5") for d in days])
+                200, text=_closes(*[(d, close if d == today() else "10.5") for d in days])
             )
 
         from purser.holdings import projection
@@ -988,8 +1081,8 @@ class TestAbsurdCloses:
                 logged.append({"event": event, **fields})
 
         monkeypatch.setattr(projection, "log", Recorder())
-        result = prices.run_fetch(today=TODAY, client=_client(handler))
-        prices.run_fetch(today=TODAY, client=_client(handler))  # nothing changes
+        result = prices.run_fetch(today=today(), client=_client(handler))
+        prices.run_fetch(today=today(), client=_client(handler))  # nothing changes
         assert result.accounts_failed == 0
         assert [e["event"] for e in logged] == ["holdings.value_out_of_range"]
         assert logged[0]["symbols"] == [big]
@@ -999,7 +1092,7 @@ class TestAbsurdCloses:
         assert Decimal(rows[other]["market_value"]) == Decimal("105")
         resp = admin_client.post(
             f"/positions/{rows[other]['id']}/events",
-            json={"kind": "set_quantity", "occurred_on": TODAY.isoformat(), "quantity": "11"},
+            json={"kind": "set_quantity", "occurred_on": today().isoformat(), "quantity": "11"},
         )
         assert resp.status_code == 201, resp.text
 
@@ -1017,7 +1110,7 @@ class TestAbsurdCloses:
             session.add(
                 HoldingsSnapshot(
                     account_id=uuid.UUID(feed_account),
-                    as_of=TODAY - timedelta(days=1),
+                    as_of=today() - timedelta(days=1),
                     symbol=symbol,
                     quantity=Decimal("0.000001"),
                     market_value=Decimal("1000000000.0000"),
@@ -1026,7 +1119,7 @@ class TestAbsurdCloses:
             )
             session.commit()
         _hold(broker, symbol, "1", days_ago=5)
-        result = prices.run_fetch(today=TODAY)  # no provider: the projection step only
+        result = prices.run_fetch(today=today())  # no provider: the projection step only
         assert result.accounts_failed == 0
         listing = admin_client.get(f"/accounts/{broker}/positions")
         assert listing.status_code == 200, listing.text
@@ -1034,7 +1127,7 @@ class TestAbsurdCloses:
         assert row["price"] is None and row["market_value"] is None
         resp = admin_client.post(
             f"/positions/{row['id']}/events",
-            json={"kind": "set_quantity", "occurred_on": TODAY.isoformat(), "quantity": "100"},
+            json={"kind": "set_quantity", "occurred_on": today().isoformat(), "quantity": "100"},
         )
         assert resp.status_code == 201, resp.text
 
@@ -1044,7 +1137,7 @@ def test_closes_are_stored_in_one_statement_per_batch(migrated_engine: Engine) -
     from sqlalchemy import event
 
     symbol = _symbol()
-    closes = [(TODAY - timedelta(days=n), Decimal("10")) for n in range(30)]
+    closes = [(today() - timedelta(days=n), Decimal("10")) for n in range(30)]
     statements: list[str] = []
 
     def count(conn, cursor, statement, parameters, context, executemany) -> None:
@@ -1071,11 +1164,11 @@ def test_a_date_answered_twice_keeps_its_first_close(migrated_engine: Engine) ->
     symbol = _symbol()
     with db.get_sessionmaker()() as session:
         inserted = prices._insert_closes(
-            session, symbol, "tiingo", [(TODAY, Decimal("10")), (TODAY, Decimal("11"))]
+            session, symbol, "tiingo", [(today(), Decimal("10")), (today(), Decimal("11"))]
         )
         session.commit()
-    assert inserted == [TODAY]
-    assert _stored(symbol) == [(TODAY, Decimal("10"), "tiingo")]
+    assert inserted == [today()]
+    assert _stored(symbol) == [(today(), Decimal("10"), "tiingo")]
 
 
 class TestStaleness:
@@ -1088,7 +1181,7 @@ class TestStaleness:
             prices.record_price(
                 session,
                 symbol=symbol,
-                price_date=TODAY - timedelta(days=10),
+                price_date=today() - timedelta(days=10),
                 close=Decimal("5"),
                 token=None,
             )
@@ -1106,9 +1199,9 @@ class TestStaleness:
                     if e.payload["symbol"] == symbol
                 ]
 
-        prices.run_fetch(today=TODAY)
-        prices.run_fetch(today=TODAY)  # still stale on the same close: no repeat
-        assert stale_events() == [(TODAY - timedelta(days=10)).isoformat()]
+        prices.run_fetch(today=today())
+        prices.run_fetch(today=today())  # still stale on the same close: no repeat
+        assert stale_events() == [(today() - timedelta(days=10)).isoformat()]
 
         # A fresher close ends the episode; when it too goes stale, that is a
         # new transition and alerts again.
@@ -1116,23 +1209,23 @@ class TestStaleness:
             prices.record_price(
                 session,
                 symbol=symbol,
-                price_date=TODAY - timedelta(days=2),
+                price_date=today() - timedelta(days=2),
                 close=Decimal("6"),
                 token=None,
             )
             session.commit()
-        prices.run_fetch(today=TODAY)
+        prices.run_fetch(today=today())
         assert len(stale_events()) == 1
-        prices.run_fetch(today=TODAY + timedelta(days=6))
+        prices.run_fetch(today=today() + timedelta(days=6))
         assert stale_events() == [
-            (TODAY - timedelta(days=10)).isoformat(),
-            (TODAY - timedelta(days=2)).isoformat(),
+            (today() - timedelta(days=10)).isoformat(),
+            (today() - timedelta(days=2)).isoformat(),
         ]
 
         with db.get_sessionmaker()() as session:
             digest = whats_new(session)
         lines = [line for line in digest["stale_prices"] if line["symbol"] == symbol]
-        assert lines and lines[0]["price_as_of"] == (TODAY - timedelta(days=10)).isoformat()
+        assert lines and lines[0]["price_as_of"] == (today() - timedelta(days=10)).isoformat()
 
     def test_a_position_sold_down_to_zero_is_not_open(
         self, broker: str, admin_client: TestClient
@@ -1147,13 +1240,13 @@ class TestStaleness:
                 account_ref=broker,
                 symbol=symbol,
                 quantity=Decimal("5"),
-                as_of=TODAY - timedelta(days=20),
+                as_of=today() - timedelta(days=20),
                 token=None,
             )
             prices.record_price(
                 session,
                 symbol=symbol,
-                price_date=TODAY - timedelta(days=15),
+                price_date=today() - timedelta(days=15),
                 close=Decimal("10"),
                 token=None,
             )
@@ -1161,13 +1254,13 @@ class TestStaleness:
                 session,
                 position_id=recorded.position.id,
                 kind="set_quantity",
-                occurred_on=TODAY - timedelta(days=10),
+                occurred_on=today() - timedelta(days=10),
                 quantity=Decimal("0"),
                 token=None,
             )
             session.commit()
             assert symbol not in prices.open_symbols(session)
-        result = prices.run_fetch(today=TODAY)
+        result = prices.run_fetch(today=today())
         assert symbol not in {s["symbol"] for s in result.stale}
         status = admin_client.get("/prices/status").json()
         assert symbol not in {s["symbol"] for s in status["symbols"]}
@@ -1181,12 +1274,12 @@ class TestStaleness:
             prices.record_price(
                 session,
                 symbol=symbol,
-                price_date=TODAY - timedelta(days=10),
+                price_date=today() - timedelta(days=10),
                 close=Decimal("5"),
                 token=None,
             )
             session.commit()
-        result = prices.run_fetch(today=TODAY)
+        result = prices.run_fetch(today=today())
         assert symbol not in {s["symbol"] for s in result.stale}
 
 

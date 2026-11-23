@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from purser import appsettings
 from purser import categorize as service
 from purser.admin.auth import ReadToken, WriteToken
+from purser.api.disclosure import NOTHING, disclose
 from purser.db import get_session
 
 DbSession = Annotated[Session, Depends(get_session)]
@@ -15,7 +16,7 @@ DbSession = Annotated[Session, Depends(get_session)]
 router = APIRouter(prefix="/categorize", tags=["categorize"])
 
 
-@router.get("/status")
+@router.get("/status", dependencies=[disclose(NOTHING)])
 def status(token: ReadToken) -> dict[str, str | bool]:
     """Provider configuration (never the key). The core works with AI off."""
     settings = appsettings.effective()

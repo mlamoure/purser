@@ -114,6 +114,10 @@ def _connection_entry(
             {
                 "name": redact_name(name) if redact else name,
                 "external_id": None if redact else external_id,
+                # How an agent names it in a mapping call (decision 126).
+                "ref": crypto.feed_account_ref(connection.id, str(external_id))
+                if external_id
+                else None,
                 "account": account.path if account else None,
                 "connected": account is not None and account.closed_at is None,
                 "closed": account is not None and account.closed_at is not None,
@@ -181,6 +185,13 @@ def feed_status(session: Session) -> dict[str, Any]:
                             "institution": login["institution"],
                             "name": account["name"],
                             **({"account": account["account"]} if account["account"] else {}),
+                            # An account waiting to be mapped carries its
+                            # ref for map_feed_accounts (decision 126).
+                            **(
+                                {"ref": account["ref"]}
+                                if "not_connected" in reasons and account["ref"]
+                                else {}
+                            ),
                             "problems": reasons,
                         }
                     )

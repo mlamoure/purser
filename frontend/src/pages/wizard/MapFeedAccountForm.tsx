@@ -12,9 +12,13 @@ type MapRequest = components["schemas"]["MapRequest"];
  * server takes exactly one of `account_id` / `create` (MapRequest); `create`
  * carries the fields `ledger.create_account` reads (name, type, path,
  * currency). */
-export type MapTarget =
+export type MapTarget = (
   | { account_id: string }
-  | { create: { name: string; type: string; path: string; currency: string } };
+  | { create: { name: string; type: string; path: string; currency: string } }
+) & {
+  /** Start the account from the bank's reported balance (decision 123). */
+  starting_balance?: boolean;
+};
 
 /** The real (non-category) account types the ledger accepts, in the order a
  * bank feed most often needs them. */
@@ -29,6 +33,28 @@ export const MAP_ACCOUNT_TYPES: [string, string][] = [
 ];
 
 const LIABILITY_TYPES = new Set(["credit_card", "loan"]);
+
+/** The account types that can start from the bank's reported balance: the
+ * ones whose balance is the sum of their transactions (decision 123). A
+ * brokerage account's balance includes its holdings, and a loan or an asset
+ * is valued, so the option is not offered for them. */
+export const STARTING_BALANCE_TYPES = new Set(["checking", "savings", "credit_card", "cash"]);
+
+/** The account type a bank account's name suggests. Banks name accounts
+ * after what they are ("Online Savings", "Rewards Visa", "Auto Loan"), and
+ * the feed carries no type, so the form starts from this guess and the person
+ * corrects it. The words a bank uses for the product win over a brand name:
+ * "Discover Online Savings" is savings. Anything unrecognised is checking,
+ * the commonest feed account. */
+export function guessAccountType(name: string): string {
+  const n = name.toLowerCase();
+  if (/\b(checking|chequing)\b/.test(n)) return "checking";
+  if (/\b(savings?|money market)\b/.test(n)) return "savings";
+  if (/\b(mortgage|loan|heloc|line of credit)\b/.test(n)) return "loan";
+  if (/\b(brokerage|investments?|investing|ira|roth|401k|401\(k\)|403b|retirement|securities)/.test(n)) return "brokerage";
+  if (/\b(credit|card|visa|mastercard|amex|american express)\b/.test(n)) return "credit_card";
+  return "checking";
+}
 
 /** Ledger label for a bank account: its name (or external id) lower-cased,
  * other characters collapsed to `_`. */
@@ -54,7 +80,7 @@ export async function mapFeedAccount(
   externalId: string,
   target: MapTarget,
 ): Promise<void> {
-  const body: MapRequest = { external_id: externalId, ...target };
+  const body: MapRequest = { external_id: externalId, starting_balance: false, ...target };
   const { error } = await api.POST("/connections/{connection_id}/map", {
     params: { path: { connection_id: connectionId } },
     body,
@@ -62,12 +88,22 @@ export async function mapFeedAccount(
   if (error) throw new Error(errorDetail(error));
 }
 
+/** Why Purser proposes a type, in words (ProposalOut.type_basis). The feed
+ * carries no account type, so the form says what the proposal rests on. */
+export const TYPE_BASIS_TEXT: Record<string, string> = {
+  holdings: "Proposed because the bank lists holdings for this account.",
+  name: "Proposed from the bank's name for this account.",
+  balance: "Proposed because the account owes money; the bank's name does not say what it is.",
+  default: "The bank's data does not say what kind of account this is. Please check the type.",
+};
+
 /** The form behind a feed account's Map button — the setup wizard's mapping
- * step and Settings -> Connections both render it. It defaults to a new checking
- * account named after the bank account (the wizard's original one-click
- * mapping); an existing open account in the same currency can be chosen
- * instead. `onMap` does the request (and any refresh); what it throws shows
- * here. */
+ * step and Settings -> Connections both render it. It starts from Purser's
+ * proposal for the account (name, type and path, derived on the server from
+ * what the feed states: decision 126) and falls back to the name alone
+ * (guessAccountType) when there is none; an existing open account in the same
+ * currency can be chosen instead. `onMap` does the request (and any refresh);
+ * what it throws shows here. */
 export function MapFeedAccountForm({
   account,
   onMap,
@@ -80,12 +116,27 @@ export function MapFeedAccountForm({
   const id = useId();
   const { busy, error, run } = useStepRunner();
   const bankName = account.name ?? account.external_id;
+  const proposal = account.proposal ?? null;
   const [mode, setMode] = useState<"create" | "existing">("create");
-  const [name, setName] = useState(bankName);
-  const [type, setType] = useState("checking");
-  const [path, setPath] = useState(defaultPath("checking", bankName, account.external_id));
+  const [name, setName] = useState(proposal?.name ?? bankName);
+  const [type, setType] = useState(() => proposal?.type ?? guessAccountType(bankName));
+  const [path, setPath] = useState(
+    () => proposal?.path ?? defaultPath(guessAccountType(bankName), bankName, account.external_id),
+  );
   const [pathEdited, setPathEdited] = useState(false);
+  // The proposal's reason holds only while its type stands.
+  const typeNote = !proposal
+    ? null
+    : proposal.note
+      ? "The bank also lists investments in this account. If it is an investment account, choose Brokerage."
+      : type === proposal.type
+        ? (TYPE_BASIS_TEXT[proposal.type_basis] ?? null)
+        : null;
   const [accountId, setAccountId] = useState("");
+  // On for a new account: the feed brings about three months of rows and no
+  // balance from before them. Off for an existing one, whose ledger may be
+  // deliberate; the person can still tick it.
+  const [startFromBank, setStartFromBank] = useState(true);
 
   // Mapping onto an existing account: open real accounts in the feed's
   // currency. One already fed by another bank account is listed too (a
@@ -108,9 +159,14 @@ export function MapFeedAccountForm({
     if (!pathEdited) setPath(defaultPath(nextType, nextName, account.external_id));
   };
 
+  const targetType =
+    mode === "existing" ? candidates.find((a) => a.id === accountId)?.type : type;
+  const canStartFromBank = targetType !== undefined && STARTING_BALANCE_TYPES.has(targetType);
+  const starting = canStartFromBank && startFromBank ? { starting_balance: true } : {};
+
   const target = (): MapTarget =>
     mode === "existing"
-      ? { account_id: accountId }
+      ? { account_id: accountId, ...starting }
       : {
           create: {
             name: name.trim() || bankName,
@@ -118,6 +174,7 @@ export function MapFeedAccountForm({
             path: path.trim(),
             currency: account.currency,
           },
+          ...starting,
         };
 
   const ready = mode === "existing" ? accountId !== "" : path.trim() !== "";
@@ -138,7 +195,10 @@ export function MapFeedAccountForm({
             type="radio"
             name={`${id}-mode`}
             checked={mode === "create"}
-            onChange={() => setMode("create")}
+            onChange={() => {
+              setMode("create");
+              setStartFromBank(true);
+            }}
           />
           A new Purser account
         </label>
@@ -148,7 +208,10 @@ export function MapFeedAccountForm({
               type="radio"
               name={`${id}-mode`}
               checked={mode === "existing"}
-              onChange={() => setMode("existing")}
+              onChange={() => {
+                setMode("existing");
+                setStartFromBank(false);
+              }}
             />
             An existing account
           </label>
@@ -185,6 +248,7 @@ export function MapFeedAccountForm({
                 </option>
               ))}
             </select>
+            {typeNote && <p className="text-xs text-muted-foreground">{typeNote}</p>}
           </div>
           <div className="space-y-1">
             <Label htmlFor={`${id}-path`}>Ledger path</Label>
@@ -219,6 +283,37 @@ export function MapFeedAccountForm({
         </div>
       )}
 
+      {mode === "create" && (
+        <p className="text-xs text-muted-foreground">
+          The account type cannot be changed after mapping.
+        </p>
+      )}
+      {proposal?.action === "ignore" && (
+        <p className="text-xs text-muted-foreground">
+          This looks like an account another bank login already delivers
+          {proposal.duplicate_of && !proposal.duplicate_of.startsWith("fa_")
+            ? ` (${proposal.duplicate_of})`
+            : ""}
+          . If it is the same account, ignore it instead of mapping it.
+        </p>
+      )}
+      {canStartFromBank && (
+        <div className="space-y-1">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={startFromBank}
+              onChange={(e) => setStartFromBank(e.target.checked)}
+            />
+            Start from the bank&apos;s balance
+          </label>
+          <p className="text-xs text-muted-foreground">
+            The bank sends about three months of transactions and no balance from before them.
+            Purser adds one starting entry so the account matches the balance the bank reports,
+            and lowers that entry by itself if you import older history later.
+          </p>
+        </div>
+      )}
       <p className="text-xs text-muted-foreground">
         Transactions already fetched for this bank account import as soon as it is mapped.
       </p>

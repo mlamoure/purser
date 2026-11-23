@@ -18,7 +18,7 @@ import type {
 } from "../lib/contracts";
 import { balanceChart, CHART_W, type ChartMarker } from "../lib/chart";
 import { initWidget, type WidgetHost } from "../lib/host";
-import { CHART, clear, dayDiff, h, money, num, pathLabel, shortDate } from "../lib/kit";
+import { CHART, clear, dayDiff, h, money, moneySign, num, pathLabel, shortDate } from "../lib/kit";
 import "../lib/theme.css";
 
 const PERIODS = ["30d", "90d", "1y", "all"] as const;
@@ -50,12 +50,13 @@ function balanceOn(dates: string[], balances: string[], iso: string, fallback: s
 
 async function showMover(
   mover: BalanceHistoryMover,
+  currency: string,
   x: number,
   y: number,
   host: WidgetHost,
 ): Promise<void> {
   host.tellModel(
-    `Looking at ${mover.payee ?? "a transaction"} ${money(mover.amount, { sign: true })} on ${mover.date}.`,
+    `Looking at ${mover.payee ?? "a transaction"} ${money(mover.amount, { sign: true, currency })} on ${mover.date}.`,
   );
   const detail = await host.callTool<TransactionDetail>("get_transaction", {
     transaction_id: mover.transaction_id,
@@ -80,7 +81,7 @@ async function showMover(
     h(
       "div",
       { style: "color:var(--text-muted);" },
-      `${money(mover.amount, { sign: true })} · ${shortDate(mover.date)}`,
+      `${money(mover.amount, { sign: true, currency })} · ${shortDate(mover.date)}`,
     ),
     ...(detail?.status
       ? [h("div", { style: "color:var(--text-muted);margin-top:2px;" }, detail.status)]
@@ -95,7 +96,6 @@ function render(data: BalanceHistoryResult, host: WidgetHost): void {
   clear(node);
 
   /* header: account, current balance, change, period pills */
-  const delta = num(data.change.delta);
   const pills = PERIODS.map((period) =>
     h(
       "button",
@@ -125,16 +125,16 @@ function render(data: BalanceHistoryResult, host: WidgetHost): void {
         h(
           "div",
           { style: "font-size:22px;font-weight:600;margin-top:2px;" },
-          money(data.current, { cents: true }),
+          money(data.current, { cents: true, currency: data.currency }),
         ),
         h(
           "div",
           {
             style:
               "font-size:12px;margin-top:2px;color:" +
-              (delta >= 0 ? CHART.positive : "var(--text-secondary)"),
+              (moneySign(data.change.delta) >= 0 ? CHART.positive : "var(--text-secondary)"),
           },
-          `${money(data.change.delta, { sign: true })}${data.change.pct ? ` (${data.change.pct}%)` : ""} over ${data.change.period}`,
+          `${money(data.change.delta, { sign: true, currency: data.currency })}${data.change.pct ? ` (${data.change.pct}%)` : ""} over ${data.change.period}`,
         ),
       ),
       h("div", { style: "display:flex;gap:4px;align-self:flex-start;" }, ...pills),
@@ -153,9 +153,9 @@ function render(data: BalanceHistoryResult, host: WidgetHost): void {
     x: xOf(data.start, mover.date),
     // Place the dot on the line: the balance in effect at that date.
     value: num(balanceOn(dates, balances, mover.date, data.current)),
-    kind: num(mover.amount) >= 0 ? "in" : "out",
-    label: `${(mover.payee ?? "move").toLowerCase()} ${money(mover.amount, { sign: true })}`,
-    title: `${mover.payee ?? "Transaction"} ${money(mover.amount, { sign: true })} · ${shortDate(mover.date)}`,
+    kind: moneySign(mover.amount) >= 0 ? "in" : "out",
+    label: `${(mover.payee ?? "move").toLowerCase()} ${money(mover.amount, { sign: true, currency: data.currency })}`,
+    title: `${mover.payee ?? "Transaction"} ${money(mover.amount, { sign: true, currency: data.currency })} · ${shortDate(mover.date)}`,
     onClick: () => {},
   }));
   if (data.low && data.low.balance !== data.current) {
@@ -163,8 +163,8 @@ function render(data: BalanceHistoryResult, host: WidgetHost): void {
       x: xOf(data.start, data.low.date),
       value: num(data.low.balance),
       kind: "low",
-      label: money(data.low.balance),
-      title: `Low ${money(data.low.balance)} on ${shortDate(data.low.date)}`,
+      label: money(data.low.balance, { currency: data.currency }),
+      title: `Low ${money(data.low.balance, { currency: data.currency })} on ${shortDate(data.low.date)}`,
     });
   }
 
@@ -182,6 +182,7 @@ function render(data: BalanceHistoryResult, host: WidgetHost): void {
     reference: { value: 0, label: "zero", color: CHART.floor },
     markers,
     step: true,
+    currency: data.currency,
     ariaLabel: `Balance history for ${pathLabel(data.account)} over ${data.change.period}`,
   });
   wrap.append(svg);
@@ -196,6 +197,7 @@ function render(data: BalanceHistoryResult, host: WidgetHost): void {
     dot.addEventListener("click", () => {
       void showMover(
         mover,
+        data.currency,
         scales.x(xOf(data.start, mover.date)),
         scales.y(num(balanceOn(dates, balances, mover.date, data.current))),
         host,
@@ -234,7 +236,11 @@ function render(data: BalanceHistoryResult, host: WidgetHost): void {
 
   /* progressive enhancement: overlay the full per-change series, faint.
    * Never required for first paint — a host without resource support, or a
-   * denied read, simply keeps the sampled line. */
+   * denied read, simply keeps the sampled line. The per-change series is the
+   * postings history (decision 129), so it refines the line only when the
+   * line is postings too: under a brokerage or loan line it would draw the
+   * cash or the postings beneath the reported value. */
+  if (data.method !== "postings") return;
   void host.readResource(data.series_uri).then((raw) => {
     if (!raw) return;
     let full: BalanceHistoryFullSeries;
@@ -257,6 +263,7 @@ function render(data: BalanceHistoryResult, host: WidgetHost): void {
       markers,
       step: true,
       underlay,
+      currency: data.currency,
       ariaLabel: `Balance history for ${pathLabel(data.account)} over ${data.change.period}`,
     });
     clear(wrap);
@@ -311,6 +318,7 @@ async function addForecast(
     markers,
     step: true,
     splitAt: lastX,
+    currency: data.currency,
     ariaLabel: `Balance history and ${FORECAST_DAYS}-day forecast for ${pathLabel(data.account)}`,
   });
   clear(wrap);

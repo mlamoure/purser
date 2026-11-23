@@ -1,5 +1,6 @@
 import { Fragment, useState } from "react";
 import { Badge, Button, Card, CardTitle, Table, Td, Th } from "../../components/ui";
+import { pathLeafLabel } from "../../lib/labels";
 import { MapFeedAccountForm, type Discovered, type MapTarget } from "./MapFeedAccountForm";
 
 /** Step 4: map each discovered bank account to a Purser account, new or
@@ -34,8 +35,9 @@ export function MapAccountsStep({
                 <Td>{d.name ?? d.external_id}{d.org ? ` · ${d.org}` : ""}</Td>
                 <Td>{d.balance ?? "—"}</Td>
                 <Td>
+                  {/* The Purser account by its name (#552), never its path. */}
                   {d.mapped_account_path
-                    ? <Badge variant="green">{d.mapped_account_path}</Badge>
+                    ? <Badge variant="green">{d.mapped_account_name ?? pathLeafLabel(d.mapped_account_path)}</Badge>
                     : <Badge variant="amber">unmapped</Badge>}
                 </Td>
                 <Td>

@@ -4,7 +4,7 @@ import hashlib
 import hmac
 import json
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 import httpx
 import pytest
@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine, text
 
 from purser.webhooks import MAX_ATTEMPTS
+from tests.conftest import today
 
 
 @pytest.fixture
@@ -62,7 +63,7 @@ def _spend(client: TestClient, amount: str = "-10.00", status: str = "posted") -
             "account": "assets.checking",
             "category": "expenses.dining",
             "amount": amount,
-            "date": date.today().isoformat(),
+            "date": today().isoformat(),
             "status": status,
         },
     )
@@ -319,7 +320,7 @@ class TestBillLate:
                 "account": "assets.checking",
                 "category": "expenses.dining",
                 "amount": "-60.00",
-                "date": (date.today() - timedelta(days=4)).isoformat(),
+                "date": (today() - timedelta(days=4)).isoformat(),
                 "payee": "Trash Service",
                 "status": "expected",
             },

@@ -166,14 +166,17 @@ def expand_split_transfer(
 
 @dataclass(frozen=True)
 class SplitLine:
-    """One category line of a split transaction (DESIGN §3.3, decision 87).
-    ``amount`` is the share of the real account's delta the line carries, in
-    the flat form's sign (negative = money out), so its category leg books the
-    negation."""
+    """One line of a split transaction (DESIGN §3.3, decisions 87 and 118).
+    ``category_id`` is the account the line books to: a category, or — with
+    ``is_account`` — another real account (a Quicken ``[Account]`` line).
+    ``amount`` is the share of the split account's delta the line carries, in
+    the flat form's sign (negative = money out), so the line's leg books the
+    negation: to the category, or as a leg on that account."""
 
     category_id: UUID
     amount: Decimal
     memo: str | None = None
+    is_account: bool = False
 
 
 def expand_split(
@@ -184,23 +187,27 @@ def expand_split(
     currency: str,
     memo: str | None = None,
 ) -> list[PostingSpec]:
-    """A split transaction is exactly one real leg plus two or more category
-    legs (DESIGN §3.3, decision 87): the real leg carries ``amount`` and each
-    line books its negation to its category, so the postings are zero-sum by
-    construction. It is not a transfer (``transfer_shape`` returns None).
+    """A split transaction is the split account's one real leg plus one leg
+    per line (DESIGN §3.3, decisions 87 and 118): the real leg carries
+    ``amount`` and each line books its negation to its category or account,
+    so the postings are zero-sum by construction. It is never a transfer:
+    the row carries the split marker (``split_account_id``), which every
+    classifier reads first.
 
     Raises ``ValueError`` unless ``amount`` is nonzero, there are at least two
-    lines (one line is a flat row), no line is zero, and the lines sum to
-    ``amount`` exactly.
+    lines (one line is a flat row), no line is zero or books to the split's
+    own account, and the lines sum to ``amount`` exactly.
     """
     amt = quantize(amount)
     if amt == 0:
         raise ValueError("a split's amount must be nonzero")
     if len(lines) < 2:
-        raise ValueError("a split needs at least two category lines; one line is a flat row")
+        raise ValueError("a split needs at least two lines; one line is a flat row")
     shares = [quantize(line.amount) for line in lines]
     if any(share == 0 for share in shares):
         raise ValueError("a split line's amount must be nonzero")
+    if any(line.category_id == account_id for line in lines):
+        raise ValueError("a split line cannot book to the split's own account")
     total = sum(shares, Decimal(0))
     if total != amt:
         raise ValueError(f"the split lines sum to {total}, not to the amount {amt}")
@@ -231,19 +238,24 @@ class Leg:
     is_virtual: bool
 
 
-def transfer_shape(legs: Sequence[Leg]) -> TransferShape | None:
+def transfer_shape(legs: Sequence[Leg], *, split: bool = False) -> TransferShape | None:
     """Which transfer shape a transaction's postings form — or None.
 
     A row is a transfer exactly when its postings are one of the shapes
     Purser itself creates, never merely "it touches two real accounts": a
     multi-posting row (a paycheck split into net pay, deductions and a
-    savings leg, #245) is not a transfer however many real accounts it has.
+    401(k) line, #245/#590) is not a transfer however many real accounts it
+    has. ``split`` is the row's split marker (decision 118): a split is never
+    a transfer, even when its postings happen to form one of the shapes
+    below (one category line plus one ``[Account]`` line is exactly SPLIT).
 
     - PLAIN: exactly two real legs, on different accounts, that cancel.
     - SPLIT: exactly two real legs on different accounts with
       ``0 < incoming < |outgoing|``, plus exactly one category leg carrying
       the remainder ``-(outgoing + incoming)``.
     """
+    if split:
+        return None
     real = [leg for leg in legs if not leg.is_virtual]
     virtual = [leg for leg in legs if leg.is_virtual]
     if len(real) != 2 or real[0].account_id == real[1].account_id:
@@ -260,13 +272,17 @@ def transfer_shape(legs: Sequence[Leg]) -> TransferShape | None:
     return TransferShape.SPLIT
 
 
-def split_line_count(legs: Sequence[Leg]) -> int:
-    """The category-line count of a split transaction — one real leg plus two
-    or more category legs (decision 87) — and 0 for every other row: a flat
-    row, a transfer, a split loan payment."""
-    real = sum(1 for leg in legs if not leg.is_virtual)
-    virtual = sum(1 for leg in legs if leg.is_virtual)
-    return virtual if real == 1 and virtual >= 2 else 0
+def split_line_count(legs: Sequence[Leg], split_account_id: UUID | None) -> int:
+    """The line count of a split transaction — every leg but the split
+    account's own (decision 118: category and ``[Account]`` lines alike) —
+    and 0 for every other row: a row without the split marker is a flat row,
+    a transfer or a split loan payment, whatever its legs."""
+    if split_account_id is None:
+        return 0
+    own = [leg for leg in legs if leg.account_id == split_account_id and not leg.is_virtual]
+    if len(own) != 1:
+        return 0
+    return len(legs) - 1
 
 
 def reversal_postings(postings: list[PostingSpec]) -> list[PostingSpec]:

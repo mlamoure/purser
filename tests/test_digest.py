@@ -11,6 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from purser import digest, events
+from tests.conftest import today
 
 # Batches of events; every event in one batch shares a flush (and therefore
 # a transaction timestamp) — the exact same-timestamp case the (at, id)
@@ -267,14 +268,13 @@ class TestUpcoming:
         """#352 (decision 76): an open proposal naming a live bank row means
         the bill is paid, pending confirmation — the same rule the forecast
         applies — so it is not still to come. A rejected one is listed."""
-        from datetime import UTC, datetime, timedelta
+        from datetime import timedelta
 
         from purser import ledger
         from purser.core import ledger as core
         from purser.feed import importer
         from purser.models import Match
 
-        today = datetime.now(UTC).date()
         account = ledger.create_account(
             db_session,
             name="Checking",
@@ -290,7 +290,7 @@ class TestUpcoming:
                 account_ref=str(account.id),
                 category_ref=str(category.id),
                 amount=Decimal(amount),
-                date=today + timedelta(days=2),
+                date=today() + timedelta(days=2),
                 payee_name="Eversource Gas",
                 requested_status=status,
                 origin=origin,
@@ -329,14 +329,13 @@ class TestUpcoming:
         transfer schedule whose own leg is an inflow (money moving INTO the
         schedule's account) is still not a bill, though its other leg is
         negative."""
-        from datetime import UTC, datetime, timedelta
+        from datetime import timedelta
 
         from purser import ledger
         from purser.core import ledger as core
         from purser.models import Schedule
 
-        today = datetime.now(UTC).date()
-        due = today + timedelta(days=3)
+        due = today() + timedelta(days=3)
         checking, card, savings = (
             ledger.create_account(
                 db_session, name=name, type_=type_, path=path, actor_token_id=None

@@ -34,14 +34,16 @@ one interest/fee posting for the difference, so it still sums to zero — see
 
 ### Split transactions
 
-One bank amount spread over several categories is a **split transaction**:
-one leg on the real account plus one leg per category line, still summing to
-zero. It is never a transfer and never has a second real leg; money a split
-sends to another account is a transfer of its own. The flat view shows a
-split with no single `category_path` and a `split_lines` count, and the
-transaction's postings carry the lines. Split rows come from
-[QIF imports](../../how-to/import-qif-csv/#split-transactions) today and are
-read-only.
+One bank amount spread over several categories and accounts is a **split
+transaction**, as in Quicken: the bank's leg keeps its exact amount, and each
+line is a category or another account (`[assets.retirement]`) whose amounts
+add up to it. A category line books its share to the category; an account
+line books it as a leg on that account. The row still sums to zero, and it is
+never a transfer, whatever its legs look like. An account line can be backed
+by that account's own downloaded row, which merges into the split so the
+money is counted once. The flat view shows a split with no single
+`category_path`, a `split_lines` count and `split_account_path`; the detail
+lists its lines. See [Split a transaction](../../how-to/split-transactions/).
 
 ## Lifecycle and immutability
 

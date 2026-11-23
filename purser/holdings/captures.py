@@ -660,14 +660,14 @@ def _apply_symbol(
             # The row's basis as the broker gave it — a total stays the total
             # (authoritative), never rebuilt from a rounded per-share figure.
             # A lot whose basis may change has no dispositions, so its
-            # remaining shares on as_of are its quantity: the row's basis is
-            # the lot's.
+            # remaining shares on as_of are its quantity — after any split
+            # since it was acquired, its quantity times that ratio (#624):
+            # the row's total is the lot's, and its per-share figure as
+            # acquired is that total over the shares as acquired.
             if Decimal(lot.quantity) == row.quantity:
                 basis = row.basis
-            else:  # unreachable while the planner gates on dispositions
-                basis = core_lots.normalize_basis(
-                    Decimal(lot.quantity), row.basis.basis_per_share, None
-                )
+            else:
+                basis = core_lots.normalize_basis(Decimal(lot.quantity), None, row.basis.cost_basis)
             audit.record(
                 session,
                 actor_token_id=token.id if token else None,

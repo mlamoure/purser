@@ -22,6 +22,10 @@ describe("path names (#541)", () => {
   it("reads a category cell value, transfer targets included", () => {
     expect(categoryValueLabel("expenses.food.groceries", name)).toBe("Groceries");
     expect(categoryValueLabel("[assets.savings]", name)).toBe("Transfer to Rainy Day");
+    // #589: money in reads from the other account.
+    expect(categoryValueLabel("[assets.savings]", name, "credit")).toBe("Transfer from Rainy Day");
+    expect(categoryValueLabel("[assets.savings]", name, "debit")).toBe("Transfer to Rainy Day");
+    expect(categoryValueLabel("expenses.food.groceries", name, "credit")).toBe("Groceries");
     expect(categoryValueLabel("", name)).toBe("—");
   });
 });

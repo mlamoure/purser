@@ -28,8 +28,9 @@ with one a human looked at.
 A mark FOLLOWS its bank line (decision 82): a pending's mark is copied to its
 posted successor's live head when that head has no mark and its category legs
 equal the pending's (``carry_to_successor``), a system correction's
-replacement takes the original's mark (``inherit``), and an unlinked bank
-line's clone takes its void row's (``copy_to_clone``). Each copy is whole —
+replacement takes the original's mark (``inherit``), so does an un-split
+row's, and an unlinked bank line's clone takes its void row's
+(``copy_to_clone``). Each copy is whole —
 actor, ``via``, time, note, escalation — with ``carried_from`` naming the
 source, through one copier, ``_copy_mark``. A merge or an absorb never
 carries a mark: pairing rows into a transfer is a judgement of its own.
@@ -208,6 +209,7 @@ def mark_if_in_scope(
 CARRY_PENDING_POSTED = "pending_posted"
 CARRY_CORRECTION = "correction"
 CARRY_UNLINK = "unlink"
+CARRY_UNSPLIT = "unsplit"
 
 
 def _copy_mark(
@@ -292,7 +294,12 @@ def carry_to_successor(session: Session, *, pending: Transaction, successor: Tra
 
 
 def inherit(
-    session: Session, *, original_id: uuid.UUID, replacement_id: uuid.UUID, token: ApiToken | None
+    session: Session,
+    *,
+    original_id: uuid.UUID,
+    replacement_id: uuid.UUID,
+    token: ApiToken | None,
+    keep_mark: bool = False,
 ) -> None:
     """Correction-chain inheritance (DESIGN §4).
 
@@ -302,13 +309,20 @@ def inherit(
     unreviewed import row leaves it needing review, and a rule touching an
     already-reviewed row does not nag again — its mark is copied whole, so
     who reviewed it and when survive the post-sync correction (decision 82).
+
+    ``keep_mark`` is un-split's (decision 130): removing a split restores the
+    bank line, so its replacement keeps the original's mark whole, as the
+    backing rows it restores keep theirs (``copy_to_clone``); only a row with
+    no mark takes the actor's.
     """
+    if token is None or keep_mark:
+        original = session.get(TransactionReview, original_id)
+        if original is not None:
+            reason = CARRY_UNSPLIT if keep_mark else CARRY_CORRECTION
+            _copy_mark(session, source=original, target_id=replacement_id, reason=reason)
+            return
     if token is not None:
         mark(session, tx_id=replacement_id, token=token, via=VIA_UPDATE)
-        return
-    original = session.get(TransactionReview, original_id)
-    if original is not None:
-        _copy_mark(session, source=original, target_id=replacement_id, reason=CARRY_CORRECTION)
 
 
 def copy_to_clone(session: Session, *, void_id: uuid.UUID, clone_id: uuid.UUID) -> None:
@@ -454,39 +468,33 @@ LOCKED_GUIDANCE = (
     "(locked.position_id) first when the position is closed — and record the trade again. "
     "Never update_transaction or confirm_transfer it. A row flagged value_change is a change "
     "in a hand-valued asset's value: mark_reviewed it if the figure is right; if not, "
-    "reverse_value_change it and record the right figure."
+    "reverse_value_change it and record the right figure. A row flagged securities_trade "
+    "WITHOUT locked was marked a securities trade by a person, an agent or a rule: "
+    "mark_reviewed it if it is a buy or sell; if not, update_transaction it with the right "
+    "category. A row flagged balance_adjustment is Purser's balance true-up of a brokerage "
+    "account (cash put in step with the broker's balance less its holdings): mark_reviewed "
+    "it; a buy or sell row the broker sends later is matched by the next true-up. A row "
+    "flagged starting_balance is what an account held before its first transaction, taken "
+    "from the bank's reported balance: mark_reviewed it; Purser lowers it by itself when "
+    "older history is imported. Never update_transaction it; set_starting_balance with "
+    "remove takes it out."
 )
 
 
 def _trade_of(session: Session, tx: Transaction) -> dict[str, str | None]:
     """The trade holding ``tx`` as its cash: the standing (non-reversal)
-    event naming a row of ``tx``'s correction chain, newest first."""
+    event naming a row of ``tx``'s bank line (``ledger.trade_chain_ids``:
+    its correction chain, and Purser's own cash row a broker's copy took
+    over at import, #408), newest first."""
+    from purser import ledger as ledger_service
     from purser.models import PositionEvent
 
-    ids = {tx.id}
-    current: Transaction | None = tx
-    while current is not None and current.reverses_id is not None:  # back to the bank's row
-        ids.add(current.reverses_id)
-        current = session.get(Transaction, current.reverses_id)
-    current = tx
-    while current is not None:  # forward to the live head
-        current = session.execute(
-            select(Transaction).where(Transaction.reverses_id == current.id)
-        ).scalar_one_or_none()
-        if current is not None:
-            ids.add(current.id)
-    # Purser's own cash row, voided into the broker's row that took it over
-    # at import (#408): the trade still names Purser's row.
-    ids |= set(
-        session.execute(
-            select(Transaction.id).where(
-                Transaction.superseded_by.in_(ids), Transaction.status == "void"
-            )
-        ).scalars()
-    )
     event = session.execute(
         select(PositionEvent)
-        .where(PositionEvent.transaction_id.in_(ids), PositionEvent.reverses_id.is_(None))
+        .where(
+            PositionEvent.transaction_id.in_(ledger_service.trade_chain_ids(session, tx)),
+            PositionEvent.reverses_id.is_(None),
+        )
         .order_by(PositionEvent.created_at.desc())
         .limit(1)
     ).scalar_one_or_none()
@@ -530,8 +538,21 @@ def _row_payload(
     if value_change:
         flags.append("value_change")
         locked = False
+    elif locked and ledger_service.is_starting_balance(tx.postings):
+        # An account's starting balance from the bank (decision 123): Purser's
+        # own entry, kept in step by Purser; mark_reviewed when plausible.
+        flags.append("starting_balance")
+        locked = False
+    elif locked and _is_true_up(session, tx):
+        # A balance true-up (decision 119): Purser's own entry, mark_reviewed
+        # when right; the account's switch stops future ones.
+        flags.append("balance_adjustment")
+        locked = False
     elif locked:
         flags.append("securities_trade")
+        # Marked by a person, an agent or a rule (decision 119): no recorded
+        # trade holds it, so it is edited back like any category.
+        locked = ledger_service.held_by_trade(session, tx)
 
     automation: list[dict[str, Any]] = []
     source = _category_source(session, tx.id)
@@ -558,6 +579,12 @@ def _row_payload(
         **({"locked": _trade_of(session, tx)} if locked else {}),
         **({"escalated": True} if flagged else {}),
     }
+
+
+def _is_true_up(session: Session, tx: Transaction) -> bool:
+    from purser.feed import trueup
+
+    return bool(trueup.true_up_ids(session, [tx.id]))
 
 
 def _relevant_memories(session: Session, real: Any, tx: Transaction) -> list[dict[str, Any]]:

@@ -33,7 +33,7 @@ from purser.models import (
     Transaction,
     User,
 )
-from tests.conftest import reset_db
+from tests.conftest import reset_db, today
 
 
 def _commit_token(session: Session, suffix: str) -> ApiToken:
@@ -126,7 +126,6 @@ class TestRunningBalanceProperty:
         self, migrated_engine: Engine, data: st.DataObject
     ) -> None:
         reset_db(migrated_engine)
-        today = date.today()
         with get_sessionmaker()() as session:
             token, accounts, category = _seed_world(session)
             pending: list[uuid.UUID] = []
@@ -145,7 +144,7 @@ class TestRunningBalanceProperty:
                         account_ref=str(data.draw(st.sampled_from(accounts)).id),
                         category_ref=str(category.id),
                         amount=data.draw(_amounts),
-                        date=today - timedelta(days=data.draw(_days_ago)),
+                        date=today() - timedelta(days=data.draw(_days_ago)),
                         payee_name="Prop",
                         description="prop row",
                         requested_status=status,
@@ -158,7 +157,7 @@ class TestRunningBalanceProperty:
                         from_account_ref=str(accounts[0].id),
                         to_account_ref=str(accounts[1].id),
                         amount=abs(data.draw(_amounts)),
-                        date=today - timedelta(days=data.draw(_days_ago)),
+                        date=today() - timedelta(days=data.draw(_days_ago)),
                         description="prop transfer",
                         requested_status=core.Status.POSTED,
                         token=token,
@@ -168,7 +167,7 @@ class TestRunningBalanceProperty:
                         session,
                         tx_id=data.draw(st.sampled_from(pending)),
                         token=token,
-                        date=today - timedelta(days=data.draw(_days_ago)),
+                        date=today() - timedelta(days=data.draw(_days_ago)),
                         amount=data.draw(_amounts),
                     )
                 elif op == "post" and pending:
@@ -190,7 +189,7 @@ class TestRunningBalanceProperty:
                         session,
                         tx_id=tx_id,
                         token=token,
-                        date=today - timedelta(days=data.draw(_days_ago)),
+                        date=today() - timedelta(days=data.draw(_days_ago)),
                         amount=data.draw(_amounts),
                     )
                     posted.remove(tx_id)
@@ -202,7 +201,7 @@ class TestRunningBalanceProperty:
             # 2) Newest stored balance per account == live account_balances().
             live = ledger.account_balances(session, [a.id for a in accounts])
             for account in accounts:
-                assert balances.balance_asof(session, account.id, today) == live.get(
+                assert balances.balance_asof(session, account.id, today()) == live.get(
                     account.id, Decimal("0")
                 )
             # 3) The register walk is additive over the visible set.
@@ -237,7 +236,6 @@ class TestRunningBalanceProperty:
         the extremes must be the end-of-day extremes of the whole window
         (decision 63), and sampling must never invent a value."""
         reset_db(migrated_engine)
-        today = date.today()
         with get_sessionmaker()() as session:
             token, accounts, category = _seed_world(session)
             for _ in range(data.draw(st.integers(min_value=3, max_value=8), label="n_rows")):
@@ -246,7 +244,7 @@ class TestRunningBalanceProperty:
                     account_ref=str(accounts[0].id),
                     category_ref=str(category.id),
                     amount=data.draw(_amounts),
-                    date=today - timedelta(days=data.draw(_days_ago)),
+                    date=today() - timedelta(days=data.draw(_days_ago)),
                     payee_name="Prop",
                     description="prop row",
                     requested_status=data.draw(
@@ -257,7 +255,7 @@ class TestRunningBalanceProperty:
                 session.commit()
 
             account = accounts[0]
-            start, end = today - timedelta(days=100), today
+            start, end = today() - timedelta(days=100), today()
             window = [start + timedelta(days=n) for n in range((end - start).days + 1)]
 
             # 1) Dense series == an INDEPENDENT Python resolution of the same
@@ -316,7 +314,6 @@ class TestRunningBalanceProperty:
         """A window with no activity reads flat at whatever was carried in —
         never absent, never None leaking into a money field."""
         reset_db(migrated_engine)
-        today = date.today()
         with get_sessionmaker()() as session:
             token, accounts, category = _seed_world(session)
             ledger.create_flat_transaction(
@@ -324,7 +321,7 @@ class TestRunningBalanceProperty:
                 account_ref=str(accounts[0].id),
                 category_ref=str(category.id),
                 amount=Decimal("-25.00"),
-                date=today - timedelta(days=200),
+                date=today() - timedelta(days=200),
                 payee_name="Old",
                 description="long before the window",
                 requested_status=core.Status.POSTED,
@@ -333,7 +330,7 @@ class TestRunningBalanceProperty:
             session.commit()
 
             account = accounts[0]
-            start, end = today - timedelta(days=30), today
+            start, end = today() - timedelta(days=30), today()
             window = [start + timedelta(days=n) for n in range((end - start).days + 1)]
             series = balances.balance_series(session, account.id, dates=window)
             assert set(series.values()) == {Decimal("-25.00")}
@@ -347,7 +344,7 @@ class TestRunningBalanceProperty:
             assert balances.largest_moves(session, account.id, start=start, end=end) == []
 
             # Before ANY activity the store answers 0, not absent.
-            early = [today - timedelta(days=400), today - timedelta(days=300)]
+            early = [today() - timedelta(days=400), today() - timedelta(days=300)]
             assert set(balances.balance_series(session, account.id, dates=early).values()) == {
                 Decimal("0")
             }
@@ -387,8 +384,7 @@ class TestEndOfDayExtremes:
         self, migrated_engine: Engine
     ) -> None:
         reset_db(migrated_engine)
-        today = date.today()
-        opened, payday, later = (today - timedelta(days=n) for n in (20, 10, 5))
+        opened, payday, later = (today() - timedelta(days=n) for n in (20, 10, 5))
         with get_sessionmaker()() as session:
             token, accounts, category = _seed_world(session)
             account = accounts[0]
@@ -401,7 +397,7 @@ class TestEndOfDayExtremes:
             ):
                 self._post(session, token, account, category, amount, on)
 
-            start, end = today - timedelta(days=30), today
+            start, end = today() - timedelta(days=30), today()
             points, _truncated = balances.change_points(session, account.id, start=start, end=end)
             assert max(Decimal(p.balance) for p in points) == Decimal("4000.00")
 
@@ -418,8 +414,7 @@ class TestEndOfDayExtremes:
         self, migrated_engine: Engine
     ) -> None:
         reset_db(migrated_engine)
-        today = date.today()
-        opened, charged, later = (today - timedelta(days=n) for n in (20, 10, 5))
+        opened, charged, later = (today() - timedelta(days=n) for n in (20, 10, 5))
         with get_sessionmaker()() as session:
             token, accounts, category = _seed_world(session)
             account = accounts[0]
@@ -432,7 +427,7 @@ class TestEndOfDayExtremes:
             ):
                 self._post(session, token, account, category, amount, on)
 
-            start, end = today - timedelta(days=30), today
+            start, end = today() - timedelta(days=30), today()
             points, _truncated = balances.change_points(session, account.id, start=start, end=end)
             assert min(Decimal(p.balance) for p in points) == Decimal("600.00")
 
@@ -452,8 +447,7 @@ class TestSemantics:
         """Decision 37: the original stays posted at D1 (demoted, not voided);
         the register/stored balance shows the row only at D3."""
         reset_db(migrated_engine)
-        today = date.today()
-        d1, d3 = today - timedelta(days=30), today - timedelta(days=5)
+        d1, d3 = today() - timedelta(days=30), today() - timedelta(days=5)
         with get_sessionmaker()() as session:
             token, accounts, category = _seed_world(session)
             account = accounts[0]
@@ -485,7 +479,6 @@ class TestSemantics:
         """The migration-backfill path (full rebuild) reproduces exactly what
         incremental consumption built up."""
         reset_db(migrated_engine)
-        today = date.today()
         with get_sessionmaker()() as session:
             token, accounts, category = _seed_world(session)
             for days, amount in ((40, "25.00"), (20, "-10.00"), (0, "5.50")):
@@ -494,7 +487,7 @@ class TestSemantics:
                     account_ref=str(accounts[0].id),
                     category_ref=str(category.id),
                     amount=Decimal(amount),
-                    date=today - timedelta(days=days),
+                    date=today() - timedelta(days=days),
                     payee_name="Seed",
                     description="seed",
                     requested_status=core.Status.POSTED,
@@ -517,7 +510,7 @@ class TestSemantics:
                 account_ref=str(accounts[0].id),
                 category_ref=str(category.id),
                 amount=Decimal("42.00"),
-                date=date.today(),
+                date=today(),
                 payee_name="Doomed",
                 description="rolled back",
                 requested_status=core.Status.POSTED,
@@ -540,7 +533,6 @@ class TestDeleteCli:
         from purser.admin import account_delete
 
         reset_db(migrated_engine)
-        today = date.today()
         with get_sessionmaker()() as session:
             token, accounts, category = _seed_world(session)
             keep, doomed = accounts
@@ -549,7 +541,7 @@ class TestDeleteCli:
                 account_ref=str(keep.id),
                 category_ref=str(category.id),
                 amount=Decimal("10.00"),
-                date=today - timedelta(days=10),
+                date=today() - timedelta(days=10),
                 payee_name="Keep",
                 description="keep",
                 requested_status=core.Status.POSTED,
@@ -560,7 +552,7 @@ class TestDeleteCli:
                 from_account_ref=str(doomed.id),
                 to_account_ref=str(keep.id),
                 amount=Decimal("50.00"),
-                date=today - timedelta(days=8),
+                date=today() - timedelta(days=8),
                 description="cross",
                 requested_status=core.Status.POSTED,
                 token=token,
@@ -615,9 +607,8 @@ class TestApi:
     def test_register_rows_carry_stored_balances(
         self, seeded: dict[str, str], client: TestClient
     ) -> None:
-        today = date.today()
-        self._post_row(client, seeded, "-40.00", today - timedelta(days=2))
-        self._post_row(client, seeded, "100.00", today - timedelta(days=1))
+        self._post_row(client, seeded, "-40.00", today() - timedelta(days=2))
+        self._post_row(client, seeded, "100.00", today() - timedelta(days=1))
         page = client.get("/transactions", params={"account": seeded["checking"]}).json()
         newest, oldest = page["items"][0], page["items"][1]
         assert Decimal(oldest["balance"]) == Decimal("-40.00")
@@ -634,8 +625,7 @@ class TestApi:
         """A category is virtual and has no running-balance rows by
         construction (#197): asking from its perspective is answered with a
         blank column, not an error and not a wrong number."""
-        today = date.today()
-        self._post_row(client, seeded, "-40.00", today - timedelta(days=1))
+        self._post_row(client, seeded, "-40.00", today() - timedelta(days=1))
         page = client.get("/transactions", params={"account": "expenses.dining"}).json()
         assert page["items"], "the seeded row posts to expenses.dining"
         assert all(t["balance"] is None for t in page["items"])
@@ -643,11 +633,10 @@ class TestApi:
     def test_balance_series_endpoint(self, seeded: dict[str, str], client: TestClient) -> None:
         """#198: one point per stored change, plus the opening balance carried
         into the window. Not shadowed by /{account_id}/balance."""
-        today = date.today()
         account_id = seeded["checking"]
-        self._post_row(client, seeded, "-40.00", today - timedelta(days=40))
-        self._post_row(client, seeded, "100.00", today - timedelta(days=5))
-        self._post_row(client, seeded, "-10.00", today - timedelta(days=1))
+        self._post_row(client, seeded, "-40.00", today() - timedelta(days=40))
+        self._post_row(client, seeded, "100.00", today() - timedelta(days=5))
+        self._post_row(client, seeded, "-10.00", today() - timedelta(days=1))
 
         resp = client.get(f"/accounts/{account_id}/balance/series")
         assert resp.status_code == 200, resp.text
@@ -678,7 +667,7 @@ class TestApi:
         # dated exactly on `start` is a point, never double-counted.
         narrow = client.get(
             f"/accounts/{account_id}/balance/series",
-            params={"start": (today - timedelta(days=5)).isoformat(), "end": today.isoformat()},
+            params={"start": (today() - timedelta(days=5)).isoformat(), "end": today().isoformat()},
         ).json()
         assert Decimal(narrow["opening"]) == Decimal("-40.00")
         assert [Decimal(p["balance"]) for p in narrow["points"]] == [
@@ -692,32 +681,33 @@ class TestApi:
     def test_balance_series_rejects_a_category_and_a_backwards_window(
         self, seeded: dict[str, str], client: TestClient
     ) -> None:
-        today = date.today()
         categories = client.get("/accounts", params={"include_virtual": True}).json()
         category_id = next(a["id"] for a in categories if a["path"] == "expenses.dining")
         assert client.get(f"/accounts/{category_id}/balance/series").status_code == 422
         assert (
             client.get(
                 f"/accounts/{seeded['checking']}/balance/series",
-                params={"start": today.isoformat(), "end": (today - timedelta(days=5)).isoformat()},
+                params={
+                    "start": today().isoformat(),
+                    "end": (today() - timedelta(days=5)).isoformat(),
+                },
             ).status_code
             == 422
         )
 
     def test_balance_asof_endpoint(self, seeded: dict[str, str], client: TestClient) -> None:
-        today = date.today()
-        self._post_row(client, seeded, "25.00", today - timedelta(days=10))
+        self._post_row(client, seeded, "25.00", today() - timedelta(days=10))
         account_id = seeded["checking"]
         # Before first activity -> 0.
         early = client.get(
             f"/accounts/{account_id}/balance",
-            params={"as_of": (today - timedelta(days=30)).isoformat()},
+            params={"as_of": (today() - timedelta(days=30)).isoformat()},
         ).json()
         assert Decimal(early["balance"]) == Decimal("0")
         # At/after the row -> its running balance; default as_of = today.
         at = client.get(
             f"/accounts/{account_id}/balance",
-            params={"as_of": (today - timedelta(days=10)).isoformat()},
+            params={"as_of": (today() - timedelta(days=10)).isoformat()},
         ).json()
         assert Decimal(at["balance"]) == Decimal("25.00")
         default = client.get(f"/accounts/{account_id}/balance").json()
@@ -730,19 +720,18 @@ class TestApi:
     def test_voided_row_shows_no_balance_and_rewrites_history(
         self, seeded: dict[str, str], client: TestClient
     ) -> None:
-        today = date.today()
         resp = client.post(
             "/transactions",
             json={
                 "account": seeded["checking"],
                 "category": "expenses.dining",
                 "amount": "-15.00",
-                "date": (today - timedelta(days=3)).isoformat(),
+                "date": (today() - timedelta(days=3)).isoformat(),
                 "payee": "Void me",
             },
         )
         tx_id = resp.json()["id"]  # pending — counts until voided
-        self._post_row(client, seeded, "10.00", today - timedelta(days=1))
+        self._post_row(client, seeded, "10.00", today() - timedelta(days=1))
         account_id = seeded["checking"]
         assert Decimal(client.get(f"/accounts/{account_id}/balance").json()["balance"]) == Decimal(
             "-5.00"

@@ -31,6 +31,7 @@ def ev(
     reverses: uuid.UUID | None = None,
     replaces: uuid.UUID | None = None,
     event_id: uuid.UUID | None = None,
+    split: tuple[int, int] | None = None,
 ) -> core.Event:
     return core.Event(
         id=event_id or uuid.uuid4(),
@@ -43,6 +44,7 @@ def ev(
         cost_basis=Decimal(cost_basis) if cost_basis is not None else None,
         reverses_id=reverses,
         replaces_id=replaces,
+        split=split,
     )
 
 
@@ -415,7 +417,10 @@ def event_lists(draw: st.DrawFn, max_size: int = 12) -> list[core.Event]:
     for seq in range(n):
         kind = draw(st.sampled_from(core.KINDS))
         on = D0 + timedelta(days=draw(st.integers(min_value=0, max_value=30)))
-        if kind == core.SET_QUANTITY:
+        if kind == core.SPLIT:  # #624: a ratio and nothing else
+            ratio = draw(st.sampled_from([(2, 1), (1, 3), (3, 2), (1, 10)]))
+            out.append(ev(on, kind, "0", seq=seq, split=ratio))
+        elif kind == core.SET_QUANTITY:
             basis = draw(st.none() | _money)
             out.append(
                 ev(
@@ -475,6 +480,9 @@ def test_a_refused_history_names_its_first_negative_date(events: list[core.Event
             running = event.quantity
         elif event.kind in core.ADDS:  # buy, vest (#393)
             running += event.quantity
+        elif event.kind == core.SPLIT:  # #624: a ratio of what is held
+            assert event.split is not None
+            running = core.split_quantity(running, *event.split)
         else:  # sell, transfer_out
             running -= event.quantity
         if running < 0:

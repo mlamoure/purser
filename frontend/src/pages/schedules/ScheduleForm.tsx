@@ -20,6 +20,7 @@ import {
   WEEKDAYS,
 } from "./cadence";
 import { AUTOPOST_LABELS } from "../../lib/labels";
+import { moneySign } from "../../lib/money";
 
 type ScheduleOut = components["schemas"]["ScheduleOut"];
 type ScheduleCreate = components["schemas"]["ScheduleCreate"];
@@ -174,6 +175,7 @@ export default function ScheduleForm({
             id={field("target")}
             value={form.target}
             currentAccountPath={form.account}
+            direction={moneySign(form.amount) > 0 ? "credit" : "debit"}
             onChange={(v) => set("target", v)}
           />
           <p className="mt-1 text-xs text-muted-foreground">

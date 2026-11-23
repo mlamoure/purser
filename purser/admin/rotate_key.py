@@ -6,12 +6,14 @@ keys configured::
 
     PURSER_ENCRYPTION_KEY="<new>,<old>" purser admin rotate-key
 
-The two wrapped DEK rows (``encryption_keys``) rotate the same way, so their
-unwrapped plaintext — and therefore every ``payees.name_bidx`` and
-``transactions.content_hash`` derived from them — is byte-identical before and
-after. That is the payoff of storing DEKs wrapped rather than deriving them from
-the primary key (HKDF-from-primary would force a global rehash on every
-rotation). After a clean rotation, drop the old key from ``PURSER_ENCRYPTION_KEY``.
+The three wrapped DEK rows (``encryption_keys``: ``blind_index``,
+``content_hash``, ``payee_ref``) rotate the same way, so their unwrapped
+plaintext — and therefore every ``payees.name_bidx``,
+``transactions.content_hash`` and agent payee reference derived from them — is
+byte-identical before and after. That is the payoff of storing DEKs wrapped
+rather than deriving them from the primary key (HKDF-from-primary would force a
+global rehash on every rotation). After a clean rotation, drop the old key
+from ``PURSER_ENCRYPTION_KEY``.
 
 The posted-immutability guards and the raw_fetches append-only guard are
 disabled for the rewrite window (re-encryption is an UPDATE on posted /

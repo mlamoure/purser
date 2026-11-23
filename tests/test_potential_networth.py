@@ -1,13 +1,13 @@
 """Synthetic Home scenario: unvested awards never become owned balances."""
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, text
 
-TODAY = datetime.now(UTC).date()
+from tests.conftest import now, today
 
 
 def account(client: TestClient, path: str = "assets.plan") -> str:
@@ -23,13 +23,13 @@ def grant(client: TestClient, aid: str, *, symbol: str = "SYN", known: bool = Tr
         "symbol": symbol,
         "grant_ref": f"SYN-{symbol}",
         "granted_quantity": "50",
-        "granted_on": (TODAY - timedelta(days=100)).isoformat(),
+        "granted_on": (today() - timedelta(days=100)).isoformat(),
     }
     if known:
         row["vested_quantity"] = "0"
     body = {
-        "as_of": (TODAY - timedelta(days=1)).isoformat(),
-        "captured_at": datetime.now(UTC).isoformat(),
+        "as_of": (today() - timedelta(days=1)).isoformat(),
+        "captured_at": now().isoformat(),
         "completeness": "partial",
         "awards": [row],
     }
@@ -52,7 +52,7 @@ def price(client: TestClient, *, symbol: str = "SYN", age: int = 0) -> None:
         json={
             "symbol": symbol,
             "close": "100.000001",
-            "date": (TODAY - timedelta(days=age)).isoformat(),
+            "date": (today() - timedelta(days=age)).isoformat(),
         },
     )
     assert r.status_code in (200, 201), r.text
@@ -68,7 +68,7 @@ def test_future_totals_are_additive_without_changing_owned_balances(
         json={
             "symbol": "SYN",
             "quantity": "10",
-            "as_of": TODAY.isoformat(),
+            "as_of": today().isoformat(),
         },
     )
     assert r.status_code == 201, r.text
@@ -127,7 +127,7 @@ def test_stale_prices_are_identified_and_closed_accounts_excluded(
     price(c, age=30)
     d = c.get("/networth/potential").json()
     assert d["complete"] and d["stale_price_symbols"] == ["SYN"]
-    assert d["oldest_price_as_of"] == (TODAY - timedelta(days=30)).isoformat()
+    assert d["oldest_price_as_of"] == (today() - timedelta(days=30)).isoformat()
     with migrated_engine.begin() as conn:
         conn.execute(
             text("UPDATE accounts SET closed_at=now() WHERE id=:id"), {"id": uuid.UUID(aid)}
@@ -173,7 +173,7 @@ def test_recording_a_vest_moves_units_out_of_potential_without_double_counting(
     vested = c.post(
         f"/awards/{award['id']}/vests",
         json={
-            "vest_date": TODAY.isoformat(),
+            "vest_date": today().isoformat(),
             "gross_quantity": "10",
             "withheld_quantity": "3",
             "fmv": "100.000001",

@@ -15,6 +15,7 @@ import { GapRepairNote, RefetchCard, inventoryQuery } from "./FeedStatus";
 import { MapFeedAccountForm, mapFeedAccount } from "../wizard/MapFeedAccountForm";
 import { AccountIcon } from "../../components/AccountIcon";
 import { useAccounts } from "../../components/AccountsTable";
+import { pathLeafLabel } from "../../lib/labels";
 
 type SyncSchedule = components["schemas"]["SyncSchedule"];
 type ConfigOut = components["schemas"]["ConfigOut"];
@@ -164,6 +165,13 @@ function SyncScheduleCard({ config }: { config: ConfigOut }) {
 
 const AUTO = "auto";
 
+/** The Purser account a feed account maps to, by its name (#552); a path
+ * only as words when the name is missing. */
+function mappedName(d: DiscoveredOut): string | null {
+  if (!d.mapped_account_path) return null;
+  return d.mapped_account_name ?? pathLeafLabel(d.mapped_account_path);
+}
+
 // The basis pin for one mapped account (issue #307): "Auto" lets the sync
 // history decide (decision 64); a pin overrides it until cleared. Only rows the
 // drift check runs on (ledger_balance set) get the control.
@@ -191,7 +199,7 @@ function BasisSelect({ row, connectionId }: { row: DiscoveredOut; connectionId: 
   return (
     <div className="space-y-1">
       <select
-        aria-label={`Drift basis for ${row.mapped_account_path ?? row.external_id}`}
+        aria-label={`Drift basis for ${mappedName(row) ?? row.external_id}`}
         className={selectClass}
         value={value}
         disabled={save.isPending}
@@ -479,6 +487,11 @@ function BankAccounts({
   // The Purser accounts the rows map to, for their icons (#567).
   const known = useAccounts({ showHidden: true, showClosed: true });
   const byPath = new Map((known.data ?? []).map((a) => [a.path, a]));
+  // What a badge shows (#552): the account's name, never its path.
+  const accountName = (path: string, d?: DiscoveredOut) =>
+    byPath.get(path)?.name ??
+    (d?.mapped_account_path === path ? d.mapped_account_name : null) ??
+    pathLeafLabel(path);
   // `?map=<external id>` (the Dashboard's links) opens that account's form.
   const [params] = useSearchParams();
   const asked = params.get("map");
@@ -510,15 +523,16 @@ function BankAccounts({
 
   // An unmapped account with the name and currency of a mapped one is most
   // often the same account delivered through a second login (a joint account).
-  const twinOf = (d: DiscoveredOut) =>
-    d.mapped_account_id || d.ignored || !d.name
-      ? undefined
-      : all.find(
-          (r) =>
-            r.disc?.mapped_account_path &&
-            r.disc.name === d.name &&
-            r.disc.currency === d.currency,
-        )?.disc?.mapped_account_path;
+  const twinOf = (d: DiscoveredOut) => {
+    if (d.mapped_account_id || d.ignored || !d.name) return undefined;
+    const twin = all.find(
+      (r) =>
+        r.disc?.mapped_account_path &&
+        r.disc.name === d.name &&
+        r.disc.currency === d.currency,
+    )?.disc;
+    return twin?.mapped_account_path ? accountName(twin.mapped_account_path, twin) : undefined;
+  };
   const columns = admin ? 4 : 3;
 
   return (
@@ -604,7 +618,7 @@ function BankAccounts({
                                 className="h-3.5 w-3.5"
                               />
                             )}
-                            {path}
+                            {accountName(path, d)}
                             {r.inv?.closed ? " (closed)" : ""}
                           </span>
                         </Badge>
@@ -758,7 +772,7 @@ function ComparisonCard({ connectionId, fetched }: { connectionId: string; fetch
         <tbody>
           {rows.map((d) => (
             <tr key={d.external_id}>
-              <Td>{d.mapped_account_path}</Td>
+              <Td>{mappedName(d)}</Td>
               <Td className="font-mono">{formatMoney(d.balance, { currency: d.currency })}</Td>
               <Td className="font-mono">{formatMoney(d.ledger_balance, { currency: d.currency })}</Td>
               <Td>

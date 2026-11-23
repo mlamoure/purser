@@ -1,6 +1,6 @@
 ---
 title: Run with Docker Compose
-description: What the bundled compose files run, the .env file, the database password, remote access, the API and worker split, data, health checks and upgrades.
+description: What the bundled compose files run, the .env file, the database password, using Purser from another machine at home, the API and worker split, data, health checks and upgrades.
 ---
 
 Docker Compose is the supported way to run Purser. The
@@ -30,21 +30,24 @@ readable only by you (`chmod 600 .env`): it holds the encryption key.
 ```bash
 PURSER_ENCRYPTION_KEY=YOUR_KEY
 POSTGRES_PASSWORD=YOUR_DATABASE_PASSWORD
-PURSER_PUBLIC_URL=https://purser.example.com
-PURSER_BIND_ADDRESS=127.0.0.1
+PURSER_TIMEZONE=America/New_York
 ```
 
 | Variable | Default | Used for |
 | --- | --- | --- |
 | `PURSER_ENCRYPTION_KEY` | none | Required. Compose refuses to start without it. See [Encryption at rest](../../explanation/encryption-at-rest/). |
 | `POSTGRES_PASSWORD` | `purser` | The database password, given to both containers. See [Set the database password](#set-the-database-password). |
-| `PURSER_PUBLIC_URL` | `http://localhost:8000` | The address people and agents use to reach Purser. |
-| `PURSER_BIND_ADDRESS` | `127.0.0.1` | The host interface the published port listens on. A Compose setting only; Purser itself never reads it. |
+| `PURSER_TIMEZONE` | `UTC` | The household's time zone, an IANA name. **Settings**, **General** overrides it later. |
+| `PURSER_HOST_PORT` | `8000` | The port on the Docker host. Change it when another program already uses 8000. A Compose setting only. |
+| `PURSER_BIND_ADDRESS` | `127.0.0.1` | The host interface the published port listens on. Compose passes it to Purser too, which shows how it is reached under **Settings**, **Agents & API**. |
+| `PURSER_PUBLIC_URL` | `http://localhost:8000` (with your `PURSER_HOST_PORT`) | The address people and agents use to reach Purser. |
+| `PURSER_ALLOWED_HOSTS` | none | The machine's other names on the home network, exact and comma-separated. See [Another machine on your home network](#another-machine-on-your-home-network). |
 
 The `.env` file only fills in the compose file. `docker-compose.yml` passes the
-`purser` container its database URL, the encryption key and
-`PURSER_PUBLIC_URL`, and nothing else, so another line in `.env` (for example
-`PURSER_TIMEZONE`) does not reach Purser. Set other variables in an override
+`purser` container its database URL, the encryption key, `PURSER_PUBLIC_URL`,
+`PURSER_ALLOWED_HOSTS`, `PURSER_BIND_ADDRESS` and `PURSER_TIMEZONE`, and nothing
+else, so another line in `.env` (for example
+`PURSER_LOG_LEVEL`) does not reach Purser. Set other variables in an override
 file (below), or set the [runtime-editable ones](../../reference/configuration/#runtime-editable)
 in the admin UI under **Settings**.
 
@@ -60,7 +63,7 @@ losing them:
 services:
   purser:
     environment:
-      PURSER_TIMEZONE: America/New_York
+      PURSER_LOG_LEVEL: DEBUG
 ```
 
 Run `docker compose config` to see the merged result before you start it.
@@ -94,21 +97,61 @@ then `\q`. Put the same password in `.env` as `POSTGRES_PASSWORD` and run
 ## Reach Purser from other machines
 
 By default the published port listens on `127.0.0.1:8000`, so only the Docker
-host itself can reach Purser. Finish the first-run setup (the admin account)
-before you open it to anything else: until the first admin exists, the setup
-page is open to whoever reaches it first.
+host itself can reach Purser. That is all you need when your browser and your
+agent run on the same machine.
 
-For access from other machines, put Purser behind an HTTPS reverse proxy and
-set `PURSER_PUBLIC_URL` to the HTTPS address; see
-[Put Purser behind a reverse proxy](../reverse-proxy/). Only set
-`PURSER_BIND_ADDRESS` to another interface (for example a private LAN address)
-when something on that network needs to reach port 8000 directly, and never
+### Another machine on your home network
+
+To use Purser from another machine at home (a laptop, while Purser runs on a
+home server), let the port listen on the network, tell Purser its address and
+list the other names the machine goes by. Add these lines to `.env`, with the
+Docker host's own address and name, then run `docker compose up -d`:
+
+```bash
+PURSER_BIND_ADDRESS=0.0.0.0
+PURSER_PUBLIC_URL=http://192.168.1.20:8000
+PURSER_ALLOWED_HOSTS=192.168.1.20,homeserver,homeserver.local
+```
+
+Purser is then reached over plain HTTP at that address. This is the supported
+setup for a home network you trust:
+
+- **The first two settings are both needed.** With only
+  `PURSER_BIND_ADDRESS`, the web UI opens from other machines but `/mcp`
+  refuses agents with HTTP 421, because the address they used is not one
+  Purser was told about.
+- **Its names.** `/mcp` answers at the host in `PURSER_PUBLIC_URL`, at the
+  names in `PURSER_ALLOWED_HOSTS` and at `localhost` on the Docker host, and
+  refuses any other name with HTTP 421 (the answer says how to allow it). List
+  each name exactly, comma-separated: wildcards are refused, because the check
+  exists to stop DNS rebinding, and a malformed line stops Purser at startup
+  with a log line naming the entry. Links and connection steps keep using
+  `PURSER_PUBLIC_URL`. Give the machine a fixed address in your router.
+- **Unencrypted.** The admin password and agent tokens cross your home network
+  in the clear. Purser has no certificate support of its own.
+- **Create the admin first, or straight away.** Until the first admin exists,
+  the setup page is open to whoever reaches it first.
+- **A host firewall** may need the port allowed for your home network.
+
+[Set up Purser with your AI](../../tutorials/ai-setup/#use-purser-from-another-machine-on-the-home-network)
+has a command that finds the address and the names and writes the three lines.
+**Settings**, **Agents & API** then says "Reachable from: your home network"
+with the address agents connect to, and warns when you have the web UI open at
+an address agents cannot use.
+
+### Beyond your home network
+
+Purser is not designed to face the internet by itself, and that setup is not
+tested. If you want it anyway, put your own HTTPS reverse proxy in front, keep
+`PURSER_BIND_ADDRESS` at `127.0.0.1` and set `PURSER_PUBLIC_URL` to the HTTPS
+address; see [Put Purser behind a reverse proxy](../reverse-proxy/). Never
 publish plain HTTP to the internet.
 
 `PURSER_PUBLIC_URL` must be the address people actually use: it decides whether
 the session cookie is marked secure, it is the base of the single sign-on
 redirect address, and the MCP endpoint refuses requests for any other host
-(HTTP 421). After changing it, run `docker compose up -d`.
+not listed in `PURSER_ALLOWED_HOSTS` (HTTP 421, with the address to use). After changing it, run
+`docker compose up -d`.
 
 ## Run the worker separately
 

@@ -9,6 +9,12 @@ adjustment for any difference, and records the claim. From then on, every read
 of the account re-checks the claim, so a reconciled balance never goes stale
 silently.
 
+A newly mapped bank account is a different case: it lacks only the balance
+from before its first transaction, which Purser sets by itself from the bank's
+reported balance. See
+[Start an account from the bank's balance](../starting-balance/). Reconcile
+when you have a statement to check against.
+
 ## Which accounts
 
 Checking, savings, cash and credit-card accounts. These are the accounts whose

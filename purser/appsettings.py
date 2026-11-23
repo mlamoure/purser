@@ -43,12 +43,12 @@ PRICE_API_KEY = "price_api_key"
 # Keys that overlay Settings attributes 1:1 (names must match config.Settings).
 OVERLAY_KEYS = (
     "transfer_auto_link",
-    "privacy_purchase",
-    "privacy_amount",
     "ai_provider",
     "ai_model",
     "ai_base_url",
     "ai_api_key",
+    # Provider answer timeout (#640, decision 133).
+    "ai_timeout_seconds",
     "grafana_url",
     "session_ttl_days",
     "session_idle_hours",

@@ -15,12 +15,30 @@ daylight-saving changes (decision 111). `reschedule_sync()` applies a change
 to the schedule or to the household time zone to the running scheduler. In the split serve/worker
 topology the API process runs no scheduler, so changes there apply at worker
 restart — the /config API reports which via `sync_reschedule_live`.
+
+A run that never happened is run once when Purser discovers it (issue #584,
+decision 124), with nothing to configure:
+
+- **The host slept through it.** A laptop asleep past a job's grace window
+  wakes to a scheduler that drops the run. `_on_job_missed` hears that, and
+  `run_missed` runs each dropped job once, in the registry's order, half a
+  minute later (so every job the same wake dropped is collected first).
+  `coalesce` has already folded several missed days into one.
+- **Purser was not running.** A scheduler that starts after a slot never sees
+  it. `check_sync_at_startup` asks the one question it can answer from stored
+  facts: has every syncing connection seen a sync attempt (a fetch, or a
+  recorded failure) since the latest sync slot before this process started?
+  If not, it runs the sync and the matching pass that follows it, once.
 """
 
+import threading
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from apscheduler.events import EVENT_JOB_MISSED, JobEvent
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 from purser.logging import get_logger
 
@@ -48,6 +66,25 @@ JOB_DEFAULTS: dict[str, Any] = {
     "coalesce": True,
     "max_instances": 1,
 }
+
+# Catching up on runs that never happened (#584). The two one-off jobs are
+# the scheduler's own, not part of the registry.
+CATCH_UP_JOB = "scheduler.catch_up"
+CATCH_UP_DELAY = timedelta(seconds=30)
+STARTUP_CHECK_JOB = "feed.sync_startup_check"
+STARTUP_CHECK_DELAY = timedelta(seconds=60)
+# How far back a sync slot is looked for: the longest preset is daily.
+_SLOT_LOOKBACK = timedelta(hours=25)
+# Jobs that run again within the hour anyway: a dropped run needs no catch-up.
+FREQUENT_JOBS = frozenset({"webhooks.delivery", "sessions.cleanup"})
+# What a sync missed while Purser was down is followed by: the pass that
+# matches what it imported. The rest of the morning train runs on its own
+# schedule, and nothing stored says whether it ran.
+_AFTER_A_LATE_SYNC = ("feed.sync_daily", "matching.run_daily")
+
+_missed: set[str] = set()
+_missed_lock = threading.Lock()
+_started_at: datetime | None = None
 
 _active: BackgroundScheduler | None = None
 
@@ -156,8 +193,13 @@ def _sync_zone(household: bool) -> str:
             return "UTC"
 
 
+def _utc_now() -> datetime:
+    """The current instant. The seam tests patch."""
+    return datetime.now(UTC)
+
+
 def build_scheduler() -> BackgroundScheduler:
-    global _active
+    global _active, _started_at
     _register_builtin_jobs()
     scheduler = BackgroundScheduler(timezone="UTC", job_defaults=JOB_DEFAULTS)
     for job_id, cron, fn in _JOBS:
@@ -167,8 +209,92 @@ def build_scheduler() -> BackgroundScheduler:
             extra["jitter"] = SYNC_JITTER_SECONDS
         scheduler.add_job(fn, "cron", id=job_id, **cron, **extra)
         log.info("scheduled job", job_id=job_id, cron=cron, timezone=extra.get("timezone", "UTC"))
+    _started_at = _utc_now()
+    with _missed_lock:
+        _missed.clear()
+    scheduler.add_listener(_on_job_missed, EVENT_JOB_MISSED)
+    # Once, shortly after start: a sync slot that passed while Purser was not
+    # running (#584). Slots after the start are the scheduler's own.
+    scheduler.add_job(
+        check_sync_at_startup,
+        "date",
+        id=STARTUP_CHECK_JOB,
+        run_date=_started_at + STARTUP_CHECK_DELAY,
+    )
     _active = scheduler
     return scheduler
+
+
+def _on_job_missed(event: JobEvent) -> None:
+    """A registered job's run was dropped for lateness (the host slept past
+    its grace window): note it and run it once, shortly."""
+    job_id = str(event.job_id)
+    if job_id in FREQUENT_JOBS or job_id not in {name for name, _, _ in _JOBS}:
+        return
+    with _missed_lock:
+        _missed.add(job_id)
+    log.warning("scheduled run was missed; it will run now", job_id=job_id)
+    if _active is not None:
+        # replace_existing: one catch-up for everything the same wake dropped.
+        _active.add_job(
+            run_missed,
+            "date",
+            id=CATCH_UP_JOB,
+            run_date=_utc_now() + CATCH_UP_DELAY,
+            replace_existing=True,
+        )
+
+
+def run_missed() -> None:
+    """Run every noted job once, in the registry's order (the sync before
+    the matching that reads it, and so on). One failing never stops the rest."""
+    with _missed_lock:
+        due = set(_missed)
+        _missed.clear()
+    for job_id, _cron, fn in _JOBS:
+        if job_id not in due:
+            continue
+        log.info("running a missed scheduled job", job_id=job_id)
+        try:
+            fn()
+        except Exception:
+            log.exception("missed scheduled job failed", job_id=job_id)
+
+
+def sync_slot_before(moment: datetime) -> datetime | None:
+    """The latest time the configured sync schedule names at or before
+    ``moment`` (jitter aside), or None when the last day holds none."""
+    cron, zone = _sync_trigger()
+    trigger = CronTrigger(timezone=zone, **cron)
+    slot: datetime | None = None
+    fire = trigger.get_next_fire_time(None, moment - _SLOT_LOOKBACK)
+    while fire is not None and fire <= moment:
+        slot = fire
+        # previous + a far-off "now": the next time strictly after ``fire``.
+        fire = trigger.get_next_fire_time(fire, moment + _SLOT_LOOKBACK)
+    return slot
+
+
+def check_sync_at_startup() -> None:
+    """Run the sync once when a slot passed while Purser was not running and
+    a connection has seen no attempt since. Never raises."""
+    if _started_at is None:
+        return
+    try:
+        slot = sync_slot_before(_started_at)
+        if slot is None:
+            return
+        from purser.feed.service import sync_owed_since
+
+        if not sync_owed_since(slot):
+            return
+    except Exception:
+        log.exception("startup sync check failed")
+        return
+    log.warning("a scheduled sync was missed while Purser was not running", slot=slot.isoformat())
+    with _missed_lock:
+        _missed.update(_AFTER_A_LATE_SYNC)
+    run_missed()
 
 
 def is_live() -> bool:
@@ -185,8 +311,6 @@ def reschedule_sync() -> bool:
     """
     if not is_live():
         return False
-    from apscheduler.triggers.cron import CronTrigger
-
     assert _active is not None
     cron, zone = _sync_trigger()
     _active.reschedule_job(

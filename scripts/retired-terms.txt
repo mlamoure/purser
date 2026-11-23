@@ -41,3 +41,11 @@ unredacted
 # API, and Memories became Agent memory.
 API (&|and|&amp;) MCP Access
 Config ?(->|→|,) ?(Settings|SimpleFIN|Categories|Rules|Memories|Prices)
+
+# The Privacy with agents settings — replaced by agent-requested privacy
+# (#613): the agent passes withhold per call; nothing is withheld by default.
+Privatize the (purchase|amount)
+privacy (defaults|settings)
+(purchase|amount)[- ]privacy
+\bprivacy_(purchase|amount)\b
+Privacy with agents

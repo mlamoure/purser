@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import App from "./App";
 import { apiMock, fail, mockApi, ok } from "./test/api";
 import { useLocation } from "react-router-dom";
-import { accountOut, configOut } from "./test/fixtures";
+import { accountOut, configOut, balanceHistoryOut, holdingsSummaryOut } from "./test/fixtures";
 import { renderWithProviders } from "./test/render";
 
 const session = (scopes: string[]) => ({
@@ -77,6 +77,8 @@ describe("App shell", () => {
       "GET /auth/setup/status": ok({ setup_needed: false }),
       "GET /auth/me": ok(session(["read", "write", "admin"])),
       "GET /accounts/{account_id}": ok(account),
+      "GET /accounts/{account_id}/balance/history": ok(balanceHistoryOut()),
+      "GET /accounts/{account_id}/holdings/summary": ok(holdingsSummaryOut()),
       "GET /transactions": ok({ items: [], total: 0, limit: 50, offset: 0 }),
       "GET /matching/transfer-candidates": ok([]),
       "GET /matching/proposed": ok([]),
@@ -302,6 +304,7 @@ describe("Moved routes (#542)", () => {
   // Every page an old link can land on, quiet: lists empty, config defaults.
   const quiet = {
     "GET /config": ok(configOut()),
+    "GET /config/network": fail(503, "unavailable"),
     "GET /connections": ok([]),
     "GET /connections/inventory": ok([]),
     "GET /categories": ok([]),

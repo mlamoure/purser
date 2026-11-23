@@ -14,7 +14,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from purser.mcp._registry import _amount, _principal, _run, _token_row, audited_tool
-from purser.mcp.privacy import Emits
+from purser.privacy import Emits
 
 # What a serialized suggestion carries that minimal disclosure governs
 # (suggestions.serialize; a match draft quotes both rows and the variance,
@@ -25,12 +25,16 @@ SUGGESTION_TEXT = (
     "items[].draft.outgoing_description",
     "items[].draft.incoming_description",
     "items[].evidence_summary.note",
+    "items[].draft.lines[].memo",
+    "items[].draft.match_text",
 )
 SUGGESTION_AMOUNTS = (
     "items[].draft.amount",
     "items[].draft.expected_amount",
     "items[].draft.posted_amount",
     "items[].draft.variance",
+    "items[].draft.template_amount",
+    "items[].draft.lines[].amount",
     "items[].evidence_summary.amount_range",
     "items[].evidence_summary.latest_amount",
 )
@@ -65,8 +69,18 @@ async def list_suggestions(
     score). kind='transfer_pair': two bank rows of exactly opposite amounts
     on two accounts, close in date, that nothing links automatically — is it
     one transfer? (draft = both rows, from_account/to_account, amount, the
-    dates and both bank texts). Omit kind for all. Each row carries a
-    one-line headline, the typed draft accept would apply unchanged, an
+    dates and both bank texts). kind='split': "split like last time?" — a new
+    bank row from a payee whose last split a person or agent made (draft =
+    the row, the template split, and the lines to apply: the template's,
+    with the amount difference on its largest category line, and an account
+    line's one exact backing row when there is exactly one). kind='trade_rule':
+    a rule proposed because a row was marked a securities trade — it would
+    mark rows like it on that brokerage account the same way (draft =
+    account, match_field, match_mode, match_text, direction). Omit kind for
+    all. Each row carries a
+    one-line headline naming accounts as people know them (the draft keeps
+    their paths, which other tools take), the typed draft accept would apply
+    unchanged, an
     evidence summary (count, first/last, amount range, latest amount and
     possible price change, cadence, and the
     proposing agent's note if it left one), and a confidence (null for
@@ -88,11 +102,12 @@ async def list_suggestions(
             limit=limit,
             offset=offset,
         )
+        names = service.AccountNames(session)
         return {
             "open": service.open_count(session),
             "open_by_kind": service.open_counts(session),
             "returned": len(rows),
-            "items": [service.serialize(session, r) for r in rows],
+            "items": [service.serialize(session, r, names=names) for r in rows],
         }
 
     return await _run(op)
@@ -120,7 +135,12 @@ async def decide_suggestion(
     applies it with `edits` (schedule draft fields: name, rrule, dtstart,
     amount, amount_type, estimate_basis, payee, category,
     counterparty_account, autopost_policy; transfer_link: amount_exact as a
-    decimal string, window_days 0 to 14, effective_from YYYY-MM-DD). A match
+    decimal string, window_days 0 to 14, effective_from YYYY-MM-DD;
+    trade_rule: match_field, match_mode, match_text, direction). A trade_rule
+    suggestion becomes a DRAFT categorize rule marking rows as a securities
+    trade (rule.projected_matches is how many live rows it selects); it
+    marks nothing until activated, and history only through apply-history
+    (dry run first). A match
     suggestion: accept confirms the proposal (match{id,state,variance} in
     the result) and reject rejects it for good — the matcher never proposes
     that pair again; it has nothing to edit, and a proposal already gone
@@ -129,10 +149,16 @@ async def decide_suggestion(
     (transfer{merged_transaction_id, suggestion_id} — the transfer_link rule
     the confirm proposed, when it proposed one), and reject means "not a
     transfer": nothing ever links that pair automatically; it has nothing to
-    edit, and a pair whose rows moved on withdraws it with an error. reject
+    edit, and a pair whose rows moved on withdraws it with an error. A split
+    suggestion: accept splits the row with the draft's lines (as
+    split_transaction does; split{transaction_id} in the result) and
+    edit_then_accept with edits={"lines": [...]} (same line shape as
+    split_transaction) applies changed lines; reject (reject_scope=
+    counterparty: never for this payee on this account). reject
     is durable — reject_scope=counterparty means never suggest this
     payee/counterparty on this account again (for a transfer_link: this
-    account pair, any payee; a match or transfer_pair rejects exactly);
+    account pair, any payee; for a trade_rule: any trade rule for this
+    account; a match or transfer_pair rejects exactly);
     snooze hides it until snooze_until (YYYY-MM-DD, default 30 days).
     Nothing auto-accepts."""
 
@@ -177,16 +203,27 @@ async def decide_suggestion(
                 "state": created.state,
                 "when": _render_predicate(created, accounts),
                 "then": _render_action(created, accounts),
-                "projected_links": rules_service.project_links(session, created),
-                "note": "draft: a human activates it on the Rules page, confirming projected_links",
             }
+            if created.type == rules_service.TYPE_TRANSFER_LINK:
+                out["rule"]["projected_links"] = rules_service.project_links(session, created)
+                out["rule"]["note"] = (
+                    "draft: a human activates it on the Rules page, confirming projected_links"
+                )
+            else:
+                out["rule"]["projected_matches"] = rules_service.project_matches(session, created)
+                out["rule"]["note"] = (
+                    "draft: marks nothing until a human activates it on the Rules page; "
+                    "apply-history then marks past rows, dry run first"
+                )
         elif isinstance(created, Match):
             out["match"] = {
                 "id": str(created.id),
                 "state": created.state,
                 "variance": _amount(created.variance),
             }
-        elif isinstance(created, service.TransferPairConfirmed):
+        if row.kind == service.KIND_SPLIT and row.result_entity_id is not None:
+            out["split"] = {"transaction_id": str(row.result_entity_id)}
+        if isinstance(created, service.TransferPairConfirmed):
             from purser import matching
 
             out["transfer"] = matching.transfer_confirmation(created.merged, created.proposed)
@@ -229,11 +266,12 @@ async def detect_schedules(account: str | None = None) -> dict[str, Any]:
             session, actor_token_id=_token_row(session, principal).id, account_ref=account
         )
         created = [r for r in touched if r.id not in before]
+        names = service.AccountNames(session)
         return {
             "created": len(created),
             "refreshed": len(touched) - len(created),
             "open": service.open_count(session),
-            "items": [service.serialize(session, r) for r in touched[:10]],
+            "items": [service.serialize(session, r, names=names) for r in touched[:10]],
         }
 
     return await _run(op)

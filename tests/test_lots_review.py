@@ -9,11 +9,10 @@ import pytest
 from purser.core import lots as core_lots
 from purser.holdings import awards, captures, service
 from purser.ledger import LedgerError
+from tests.conftest import now, today
 from tests.test_lots_service import (
-    AS_OF,
-    NOW,
-    TODAY,
     _apply,
+    _as_of,
     _broker,
     _capture,
     _lot,
@@ -25,8 +24,8 @@ from tests.test_lots_service import (
 def _grant(session, account, symbol, *, vested="0", schedule=()):
     capture = awards.AwardCaptureIn(
         account=str(account.id),
-        as_of=AS_OF,
-        captured_at=NOW - timedelta(hours=2),
+        as_of=_as_of(),
+        captured_at=now() - timedelta(hours=2),
         completeness="complete",
         awards=(
             awards.AwardIn(
@@ -53,14 +52,14 @@ def test_review_proceeds_never_negative():
 def test_review_fill_preserves_reported_total(db_session):
     account, symbol = _broker(db_session), _symbol()
     first = _capture(
-        account, symbol, [_lot("R", "300", AS_OF, None)], captured_at=NOW - timedelta(hours=2)
+        account, symbol, [_lot("R", "300", _as_of(), None)], captured_at=now() - timedelta(hours=2)
     )
     _apply(db_session, first)
     second = _capture(
         account,
         symbol,
-        [_lot("R", "300", AS_OF, None, cost_basis=Decimal("1"))],
-        captured_at=NOW - timedelta(hours=1),
+        [_lot("R", "300", _as_of(), None, cost_basis=Decimal("1"))],
+        captured_at=now() - timedelta(hours=1),
     )
     _apply(db_session, second)
     assert _state(db_session, account, symbol).cost_basis == Decimal("1.0000")
@@ -71,14 +70,17 @@ def test_review_same_day_older_capture_cannot_replace_basis(db_session):
     _apply(
         db_session,
         _capture(
-            account, symbol, [_lot("R", "3", AS_OF, "20")], captured_at=NOW - timedelta(hours=1)
+            account,
+            symbol,
+            [_lot("R", "3", _as_of(), "20")],
+            captured_at=now() - timedelta(hours=1),
         ),
     )
     old = _capture(
         account,
         symbol,
-        [_lot("R", "3", AS_OF, "10")],
-        captured_at=NOW - timedelta(hours=2),
+        [_lot("R", "3", _as_of(), "10")],
+        captured_at=now() - timedelta(hours=2),
         basis_policy="replace",
     )
     with pytest.raises(LedgerError):
@@ -87,7 +89,7 @@ def test_review_same_day_older_capture_cannot_replace_basis(db_session):
 
 def test_review_zero_remaining_row_accepts_zero_total_basis(db_session):
     account, symbol = _broker(db_session), _symbol()
-    c = _capture(account, symbol, [_lot("R", "0", AS_OF, None, cost_basis=Decimal("0"))])
+    c = _capture(account, symbol, [_lot("R", "0", _as_of(), None, cost_basis=Decimal("0"))])
     p = captures.preview(db_session, c)
     assert not p.conflicts
 
@@ -99,13 +101,13 @@ def test_review_reversal_frees_external_reference(db_session):
         account_ref=str(account.id),
         symbol=symbol,
         quantity=Decimal(0),
-        as_of=AS_OF,
+        as_of=_as_of(),
         token=None,
     )
     kwargs = dict(
         position_id=recorded.position.id,
         kind="buy",
-        occurred_on=AS_OF + timedelta(days=1),
+        occurred_on=_as_of() + timedelta(days=1),
         quantity=Decimal(5),
         price=Decimal(10),
         token=None,
@@ -119,7 +121,7 @@ def test_review_reversal_frees_external_reference(db_session):
 
 def test_review_scheduled_vest_cannot_exceed_grant(db_session):
     account, symbol = _broker(db_session), _symbol()
-    day = AS_OF + timedelta(days=1)
+    day = _as_of() + timedelta(days=1)
     _grant(db_session, account, symbol, schedule=(awards.VestIn(day, Decimal(10)),))
     with pytest.raises(LedgerError):
         awards.record_vest(
@@ -147,16 +149,16 @@ def test_review_omitted_reported_vested_preserves_baseline(db_session):
     row = replace(
         old.awards[0],
         vested_quantity=None,
-        schedule=(awards.VestIn(TODAY + timedelta(days=90), Decimal(50)),),
+        schedule=(awards.VestIn(today() + timedelta(days=90), Decimal(50)),),
     )
-    newer = replace(old, captured_at=NOW, awards=(row,))
+    newer = replace(old, captured_at=now(), awards=(row,))
     p = awards.preview_awards(db_session, newer)
     assert p.plan.conflicts, "80 vested + 50 scheduled cannot fit a grant of 100"
 
 
 def test_review_full_withholding_can_record_a_vest(db_session):
     account, symbol = _broker(db_session), _symbol()
-    day = AS_OF + timedelta(days=1)
+    day = _as_of() + timedelta(days=1)
     _grant(db_session, account, symbol, schedule=(awards.VestIn(day, Decimal(10)),))
     out = awards.record_vest(
         db_session,
@@ -191,7 +193,7 @@ def test_review_new_vest_respects_historical_reported_vested(db_session):
             db_session,
             award="REVIEW-G",
             account=str(account.id),
-            vest_date=AS_OF + timedelta(days=1),
+            vest_date=_as_of() + timedelta(days=1),
             gross_quantity=Decimal(21),
             fmv=Decimal(10),
             token=None,
@@ -227,7 +229,10 @@ def test_replace_keeps_reported_total(db_session):
     _apply(
         db_session,
         _capture(
-            account, symbol, [_lot("R", "300", AS_OF, "1")], captured_at=NOW - timedelta(hours=2)
+            account,
+            symbol,
+            [_lot("R", "300", _as_of(), "1")],
+            captured_at=now() - timedelta(hours=2),
         ),
     )
     _apply(
@@ -235,8 +240,8 @@ def test_replace_keeps_reported_total(db_session):
         _capture(
             account,
             symbol,
-            [_lot("R", "300", AS_OF, None, cost_basis=Decimal("1"))],
-            captured_at=NOW - timedelta(hours=1),
+            [_lot("R", "300", _as_of(), None, cost_basis=Decimal("1"))],
+            captured_at=now() - timedelta(hours=1),
             basis_policy="replace",
         ),
     )
@@ -248,7 +253,10 @@ def test_same_day_newer_capture_still_applies(db_session):
     _apply(
         db_session,
         _capture(
-            account, symbol, [_lot("R", "3", AS_OF, "10")], captured_at=NOW - timedelta(hours=2)
+            account,
+            symbol,
+            [_lot("R", "3", _as_of(), "10")],
+            captured_at=now() - timedelta(hours=2),
         ),
     )
     _apply(
@@ -256,15 +264,15 @@ def test_same_day_newer_capture_still_applies(db_session):
         _capture(
             account,
             symbol,
-            [_lot("R", "3", AS_OF, "20")],
-            captured_at=NOW - timedelta(hours=1),
+            [_lot("R", "3", _as_of(), "20")],
+            captured_at=now() - timedelta(hours=1),
             basis_policy="replace",
         ),
     )
     assert _state(db_session, account, symbol).cost_basis == Decimal("60.0000")
     # The exact first request again is still a retry, not a stale capture.
     first = _capture(
-        account, symbol, [_lot("R", "3", AS_OF, "10")], captured_at=NOW - timedelta(hours=2)
+        account, symbol, [_lot("R", "3", _as_of(), "10")], captured_at=now() - timedelta(hours=2)
     )
     assert captures.commit(db_session, first, expect_hash="x", token=None).retry
 
@@ -274,7 +282,7 @@ def test_same_day_older_award_capture_is_stale(db_session):
     newer = _grant(db_session, account, symbol, vested="10")
     older = replace(
         newer,
-        captured_at=NOW - timedelta(hours=5),
+        captured_at=now() - timedelta(hours=5),
         awards=(replace(newer.awards[0], vested_quantity=Decimal("5")),),
     )
     p = awards.preview_awards(db_session, older)
@@ -283,7 +291,7 @@ def test_same_day_older_award_capture_is_stale(db_session):
 
 def test_vest_reversal_frees_lot_reference(db_session):
     account, symbol = _broker(db_session), _symbol()
-    day = AS_OF + timedelta(days=1)
+    day = _as_of() + timedelta(days=1)
     _grant(db_session, account, symbol, schedule=(awards.VestIn(day, Decimal(10)),))
     kw = dict(
         award="REVIEW-G",
@@ -304,7 +312,7 @@ def test_vest_reversal_frees_lot_reference(db_session):
 
 def test_full_withholding_lifecycle(db_session):
     account, symbol = _broker(db_session), _symbol()
-    day = AS_OF + timedelta(days=1)
+    day = _as_of() + timedelta(days=1)
     _grant(db_session, account, symbol, schedule=(awards.VestIn(day, Decimal(10)),))
     kw = dict(
         award="REVIEW-G",
@@ -330,7 +338,7 @@ def test_full_withholding_lifecycle(db_session):
 
 def test_every_mutator_respects_the_grant(db_session):
     account, symbol = _broker(db_session), _symbol()
-    day = AS_OF + timedelta(days=1)
+    day = _as_of() + timedelta(days=1)
     _grant(db_session, account, symbol, vested="60", schedule=(awards.VestIn(day, Decimal(40)),))
     [view] = awards.award_views(db_session, account)
     vest = view.vests[0]
@@ -359,7 +367,7 @@ def test_unvested_reports_unscheduled_and_unknown(db_session):
         account,
         symbol,
         vested="20",
-        schedule=(awards.VestIn(TODAY + timedelta(days=30), Decimal(30)),),
+        schedule=(awards.VestIn(today() + timedelta(days=30), Decimal(30)),),
     )
     [v] = awards.award_views(db_session, account)
     assert (v.unvested, v.scheduled, v.unscheduled, v.unvested_known) == (80, 30, 50, True)
@@ -371,8 +379,8 @@ def test_unknown_baseline_is_not_reported_as_known(db_session):
     account, symbol = _broker(db_session), _symbol()
     capture = awards.AwardCaptureIn(
         account=str(account.id),
-        as_of=AS_OF,
-        captured_at=NOW,
+        as_of=_as_of(),
+        captured_at=now(),
         completeness="partial",
         awards=(
             awards.AwardIn(
@@ -380,7 +388,7 @@ def test_unknown_baseline_is_not_reported_as_known(db_session):
                 symbol=symbol,
                 granted_on=date(2024, 1, 1),
                 granted_quantity=Decimal("100"),
-                schedule=(awards.VestIn(TODAY + timedelta(days=30), Decimal(25)),),
+                schedule=(awards.VestIn(today() + timedelta(days=30), Decimal(25)),),
             ),
         ),
     )

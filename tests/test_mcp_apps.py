@@ -18,8 +18,8 @@ from hypothesis import strategies as st
 from mcp.shared.exceptions import MCPError as McpError
 from sqlalchemy import Engine
 
+from tests.conftest import today
 from tests.test_mcp import (  # noqa: F401 (fixture re-export)
-    TODAY,
     LiveServer,
     _mcp_call,
     seeded_tokens,
@@ -222,7 +222,7 @@ class TestReadSeries:
             },
         )
         assert resp.status_code == 201, resp.text
-        start, end = TODAY - timedelta(days=60), TODAY
+        start, end = today() - timedelta(days=60), today()
         return [
             "purser://forecast/assets.checking/90d",
             "purser://net-worth/daily",
@@ -575,7 +575,7 @@ class TestForecastPresentation:
                 "account": "assets.checking",
                 "category": "expenses.groceries",
                 "amount": "-75.00",
-                "date": (TODAY - timedelta(days=3)).isoformat(),
+                "date": (today() - timedelta(days=3)).isoformat(),
                 "payee": "Overdue Synthetic Bill With A Rather Long Descriptive Name",
                 "status": "expected",
             },
@@ -587,7 +587,7 @@ class TestForecastPresentation:
                 "account": "assets.checking",
                 "category": "expenses.groceries",
                 "amount": "-918.56",
-                "date": (TODAY - timedelta(days=2)).isoformat(),
+                "date": (today() - timedelta(days=2)).isoformat(),
                 "payee": "Proposed Synthetic Bill",
                 "status": "expected",
             },
@@ -596,7 +596,7 @@ class TestForecastPresentation:
             migrated_engine,
             account_path="assets.checking",
             amount="-918.56",
-            on=TODAY - timedelta(days=4),
+            on=today() - timedelta(days=4),
             payee="Synthetic Bank Line",
             description="SYNTHETIC BANK LINE",
         )
@@ -682,7 +682,7 @@ class TestForecastMatchesPending:
                 "account": "assets.checking",
                 "category": "expenses.groceries",
                 "amount": "-200.00",
-                "date": (TODAY - timedelta(days=4)).isoformat(),
+                "date": (today() - timedelta(days=4)).isoformat(),
                 "payee": "JP Cleaning",
                 "status": "expected",
             },
@@ -693,7 +693,7 @@ class TestForecastMatchesPending:
             migrated_engine,
             account_path="assets.checking",
             amount="-200.00",
-            on=TODAY - timedelta(days=7),
+            on=today() - timedelta(days=7),
             payee="Cleaning Service Bill O",
             description="CLEANING SERVICE BILL O",
             origin="system",  # in the review scope, so the confirm's mark is visible
@@ -706,7 +706,7 @@ class TestForecastMatchesPending:
                 "account": "assets.checking",
                 "category": "expenses.groceries",
                 "amount": "-40.00",
-                "date": (TODAY - timedelta(days=2)).isoformat(),
+                "date": (today() - timedelta(days=2)).isoformat(),
                 "payee": "Window Washer",
                 "status": "expected",
             },
@@ -912,8 +912,8 @@ class TestRecurringRadar:
         assert len(expected_rows) >= 2, "materialization should produce upcoming instances"
         expected_rows.sort(key=lambda r: r["date"])
 
-        last_month = (TODAY - timedelta(days=30)).isoformat()
-        history = [("-15.49", last_month), ("-17.99", TODAY.isoformat())]
+        last_month = (today() - timedelta(days=30)).isoformat()
+        history = [("-15.49", last_month), ("-17.99", today().isoformat())]
         for (amount, on), expected_row in zip(history, expected_rows, strict=False):
             posted = client.post(
                 "/transactions",
@@ -934,7 +934,7 @@ class TestRecurringRadar:
 
         got = _mcp_call_raw(live_server.url, seeded_tokens["reader"], "list_recurring", {})
         item = next(i for i in got["structured"]["items"] if i["payee"] == "Netflix")
-        assert item["last_change"] == {"date": TODAY.isoformat(), "delta": "2.50"}
+        assert item["last_change"] == {"date": today().isoformat(), "delta": "2.50"}
         assert item["amount"] == "17.99"  # estimate follows the confirmed actual
         assert got["structured"]["changes_12mo"]["count"] == 1
         assert Decimal(got["structured"]["changes_12mo"]["delta"]) == Decimal("2.50")
@@ -956,7 +956,6 @@ class TestRecurringRadar:
         as open, never lists it as a bill, and accepting it is a write
         decision. Once accepted it is an active schedule whose source still
         says "detected" — provenance, not a pending state (#347)."""
-        from datetime import date
 
         from purser import ledger as ledger_service
         from purser import suggestions as suggestions_service
@@ -968,7 +967,7 @@ class TestRecurringRadar:
                 name="Gym",
                 account="assets.checking",
                 rrule="FREQ=MONTHLY;BYMONTHDAY=12",
-                dtstart=date.today(),
+                dtstart=today(),
                 amount_type="fixed",
                 amount=Decimal("-45.00"),
                 payee="Gym",
@@ -1084,9 +1083,7 @@ class TestNetWorthStory:
 
         from purser import networth
 
-        # One spare day below the window: the server reads its own today,
-        # which is past the module's TODAY when a run crosses midnight UTC.
-        start = TODAY - timedelta(days=networth.SERIES_CAP_DAYS + 1)
+        start = today() - timedelta(days=networth.SERIES_CAP_DAYS)
         with migrated_engine.begin() as conn:
             first_tx = conn.execute(text("SELECT min(date) FROM transactions")).scalar_one()
             # Twelve years of history, stored the way the nightly job keeps it:
@@ -1104,13 +1101,13 @@ class TestNetWorthStory:
                 {
                     "first": start,
                     "last": first_tx - timedelta(days=1),
-                    "old": TODAY - timedelta(days=12 * 365),
+                    "old": today() - timedelta(days=12 * 365),
                 },
             )
 
         data, daily = self._all_window(live_server.url, seeded_tokens["reader"])
-        today = date.fromisoformat(daily["end"])
-        window_start = (today - timedelta(days=networth.SERIES_CAP_DAYS)).isoformat()
+        assert daily["end"] == today().isoformat()  # the server reads the test's clock
+        window_start = start.isoformat()
         assert data["series"][0]["date"] == daily["start"] == window_start
         assert data["series"][-1]["date"] == daily["end"]
         assert len(daily["days"]) == networth.SERIES_CAP_DAYS + 1
@@ -1164,7 +1161,7 @@ class TestNetWorthStory:
                 "account": "assets.checking",
                 "category": "expenses.rent",
                 "amount": "-1200.00",
-                "date": (TODAY + timedelta(days=20)).isoformat(),
+                "date": (today() + timedelta(days=20)).isoformat(),
                 "payee": "Synthetic landlord",
                 "status": "pending",
             },
@@ -1173,13 +1170,10 @@ class TestNetWorthStory:
         token = client.post("/tokens", json={"name": "reader", "scopes": ["read"]}).json()["token"]
 
         data, daily = self._all_window(live_server.url, token)
-        # The server's today (the resource's end), not the module's TODAY,
-        # which a run crossing midnight UTC leaves a day behind.
-        today = daily["end"]
-        assert today >= TODAY.isoformat()
-        assert [p["date"] for p in data["series"]] == [today]
-        assert daily["start"] == today
-        assert [d["date"] for d in daily["days"]] == [today]
+        day = today().isoformat()  # the server reads the test's clock
+        assert [p["date"] for p in data["series"]] == [day]
+        assert daily["start"] == daily["end"] == day
+        assert [d["date"] for d in daily["days"]] == [day]
         assert data["change"]["delta"] == "0.00"
 
 
@@ -1191,7 +1185,7 @@ class TestSpendingStory:
         seeded_tokens: dict[str, str],  # noqa: F811
         live_server: LiveServer,
     ) -> None:
-        period = TODAY.strftime("%Y-%m")
+        period = today().strftime("%Y-%m")
         got = _mcp_call_raw(
             live_server.url,
             seeded_tokens["reader"],
@@ -1212,7 +1206,7 @@ class TestSpendingStory:
         seeded_tokens: dict[str, str],  # noqa: F811
         live_server: LiveServer,
     ) -> None:
-        period = TODAY.strftime("%Y-%m")
+        period = today().strftime("%Y-%m")
         got = _mcp_call_raw(
             live_server.url,
             seeded_tokens["reader"],
@@ -1289,7 +1283,7 @@ class TestWhatsNewDigest:
                 "account": "assets.checking",
                 "category": "expenses.dining",
                 "amount": "-61.15",
-                "date": TODAY.isoformat(),
+                "date": today().isoformat(),
                 "payee": "Whole Foods",
                 "status": "posted",
             },
@@ -1522,7 +1516,7 @@ class TestBalanceHistoryPresentation:
             "/categories",
             json={"name": "Salary", "type": "category_income", "path": "income.salary"},
         )
-        opened, payday = TODAY - timedelta(days=20), TODAY - timedelta(days=10)
+        opened, payday = today() - timedelta(days=20), today() - timedelta(days=10)
         # Each POST commits on its own, so same-day rows keep this order.
         for category, amount, on in (
             ("income.salary", "1000.00", opened),
@@ -1555,6 +1549,86 @@ class TestBalanceHistoryPresentation:
         assert max(Decimal(p["balance"]) for p in full["points"]) == Decimal("4000.00")
         assert data["high"] == {"date": payday.isoformat(), "balance": "3150.00"}
         assert data["low"] == {"date": opened.isoformat(), "balance": "1000.00"}
+
+    def test_brokerage_reports_holdings_and_its_series_uri_is_the_cash(
+        self,
+        seeded_tokens: dict[str, str],  # noqa: F811
+        live_server: LiveServer,
+        client: Any,
+    ) -> None:
+        """#599 (decision 129): the tool's series, current AND extremes are
+        the reported balance (cash plus holdings), the low falling on a
+        snapshot-only day; the series_uri is the postings history, whose
+        opening plus every delta is its last point."""
+        from purser.db import get_sessionmaker
+        from purser.models import HoldingsSnapshot
+
+        resp = client.post(
+            "/accounts",
+            json={"name": "Invest", "type": "brokerage", "path": "assets.invest"},
+        )
+        assert resp.status_code == 201, resp.text
+        account_id = uuid.UUID(resp.json()["id"])
+        client.post(
+            "/categories",
+            json={"name": "Salary", "type": "category_income", "path": "income.salary"},
+        )
+        for category, amount, days_ago in (
+            ("income.salary", "1000.00", 60),  # carried into the window
+            ("expenses.groceries", "-400.00", 10),
+            ("income.salary", "50.00", 4),
+        ):
+            resp = client.post(
+                "/transactions",
+                json={
+                    "account": "assets.invest",
+                    "category": category,
+                    "amount": amount,
+                    "date": (today() - timedelta(days=days_ago)).isoformat(),
+                    "payee": "Synthetic payee",
+                    "status": "posted",
+                },
+            )
+            assert resp.status_code == 201, resp.text
+        with get_sessionmaker()() as session:
+            for days_ago, value in ((60, "5000.00"), (22, "300.00"), (20, "9000.00")):
+                session.add(
+                    HoldingsSnapshot(
+                        account_id=account_id,
+                        as_of=today() - timedelta(days=days_ago),
+                        symbol="VTI",
+                        quantity=Decimal("1"),
+                        market_value=Decimal(value),
+                    )
+                )
+            session.commit()
+
+        data = _mcp_call_raw(
+            live_server.url,
+            seeded_tokens["reader"],
+            "balance_history",
+            {"account": "assets.invest", "period": "30d"},
+        )["structured"]
+        assert data["method"] == "postings+holdings"
+        assert data["current"] == "9650.00"
+        assert data["low"] == {
+            "date": (today() - timedelta(days=22)).isoformat(),
+            "balance": "1300.00",
+        }
+        assert data["high"] == {
+            "date": (today() - timedelta(days=20)).isoformat(),
+            "balance": "10000.00",
+        }
+
+        full = json.loads(
+            _read_resource(live_server.url, seeded_tokens["reader"], data["series_uri"])["text"]
+        )
+        assert full["method"] == "postings"
+        assert Decimal(full["opening"]) == Decimal("1000.00")
+        assert Decimal(full["opening"]) + sum(
+            Decimal(p["delta"]) for p in full["points"]
+        ) == Decimal(full["points"][-1]["balance"])
+        assert Decimal(full["points"][-1]["balance"]) == Decimal("650.00")
 
     def test_resource_requires_read_and_rejects_a_bad_period(
         self,
@@ -1601,15 +1675,15 @@ class TestBalanceHistoryPresentation:
                     "account": "assets.window",
                     "category": category,
                     "amount": amount,
-                    "date": (TODAY - timedelta(days=days_ago)).isoformat(),
+                    "date": (today() - timedelta(days=days_ago)).isoformat(),
                     "payee": "Synthetic payee",
                     "status": "posted",
                 },
             )
             assert resp.status_code == 201, resp.text
         start, end = (
-            (TODAY - timedelta(days=30)).isoformat(),
-            (TODAY - timedelta(days=5)).isoformat(),
+            (today() - timedelta(days=30)).isoformat(),
+            (today() - timedelta(days=5)).isoformat(),
         )
 
         data = _mcp_call_raw(
@@ -1634,8 +1708,8 @@ class TestBalanceHistoryPresentation:
         assert [
             (p["date"], Decimal(p["delta"]), Decimal(p["balance"])) for p in full["points"]
         ] == [
-            ((TODAY - timedelta(days=25)).isoformat(), Decimal("-200.00"), Decimal("800.00")),
-            ((TODAY - timedelta(days=10)).isoformat(), Decimal("-300.00"), Decimal("500.00")),
+            ((today() - timedelta(days=25)).isoformat(), Decimal("-200.00"), Decimal("800.00")),
+            ((today() - timedelta(days=10)).isoformat(), Decimal("-300.00"), Decimal("500.00")),
         ]
         assert full["truncated"] is False
         # The tool's summary agrees with the series it points at, edge to edge.
@@ -1650,7 +1724,7 @@ class TestBalanceHistoryPresentation:
     ) -> None:
         """The resource runs the tool's own window check, so it accepts exactly
         the windows the tool does: an end before the start is refused by both."""
-        later, earlier = TODAY.isoformat(), (TODAY - timedelta(days=7)).isoformat()
+        later, earlier = today().isoformat(), (today() - timedelta(days=7)).isoformat()
         with pytest.raises(BaseException) as excinfo:
             _mcp_call_raw(
                 live_server.url,
@@ -1709,13 +1783,13 @@ class TestBalanceHistoryPresentation:
                     "account": "assets.decade",
                     "category": category,
                     "amount": amount,
-                    "date": (TODAY - timedelta(days=days_ago)).isoformat(),
+                    "date": (today() - timedelta(days=days_ago)).isoformat(),
                     "payee": "Synthetic payee",
                     "status": "posted",
                 },
             )
             assert resp.status_code == 201, resp.text
-        first_day = TODAY - timedelta(days=4400)
+        first_day = today() - timedelta(days=4400)
 
         got = _mcp_call_raw(
             live_server.url,
@@ -1727,7 +1801,7 @@ class TestBalanceHistoryPresentation:
         assert data["start"] == first_day.isoformat()
         # The window ends on the server's own today: a run that crosses 00:00 UTC
         # after this module captured TODAY lands one day later (#397).
-        assert data["end"] in {TODAY.isoformat(), (TODAY + timedelta(days=1)).isoformat()}
+        assert data["end"] in {today().isoformat(), (today() + timedelta(days=1)).isoformat()}
         assert data["series_uri"] == "purser://balance-history/assets.decade/all"
         assert "over all" in got["text"]
 
@@ -1742,7 +1816,7 @@ class TestBalanceHistoryPresentation:
         )
         assert Decimal(full["opening"]) == Decimal("0")
         assert [(p["date"], Decimal(p["balance"])) for p in full["points"]] == [
-            ((TODAY - timedelta(days=days_ago)).isoformat(), Decimal(balance))
+            ((today() - timedelta(days=days_ago)).isoformat(), Decimal(balance))
             for days_ago, balance in (
                 (4400, "1000.00"),
                 (4000, "600.00"),
@@ -1756,7 +1830,7 @@ class TestBalanceHistoryPresentation:
         assert Decimal(data["current"]) == Decimal(full["points"][-1]["balance"])
         by_date = {p["date"]: Decimal(p["balance"]) for p in full["points"]}
         assert data["low"] == {
-            "date": (TODAY - timedelta(days=4000)).isoformat(),
+            "date": (today() - timedelta(days=4000)).isoformat(),
             "balance": "600.00",
         }
         assert Decimal(data["low"]["balance"]) == min(by_date.values())

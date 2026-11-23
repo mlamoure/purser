@@ -5,17 +5,21 @@ outside net worth, and the response budget. Synthetic fixtures only."""
 
 import json
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 
+from tests.conftest import today
 from tests.test_mcp import LiveServer, _mcp_call
 
-TODAY = datetime.now(UTC).date()
-AS_OF = TODAY - timedelta(days=10)
+
+def _as_of() -> date:
+    return today() - timedelta(days=10)
+
+
 BUDGET = 1900
 
 
@@ -49,7 +53,7 @@ def _lots(n: int) -> list[dict[str, Any]]:
         rows.append(
             {
                 "external_ref": f"SYN-{i:04d}",
-                "acquired_on": (AS_OF - timedelta(days=30 * (i + 1))).isoformat(),
+                "acquired_on": (_as_of() - timedelta(days=30 * (i + 1))).isoformat(),
                 "quantity": f"{(i % 7) + 1}.125",
                 "basis_per_share": f"{50 + i}.123456",
                 "plan": "Synthetic plan",
@@ -64,7 +68,7 @@ def _lots(n: int) -> list[dict[str, Any]]:
 def _capture_args(rows: list[dict[str, Any]], **kw: Any) -> dict[str, Any]:
     return {
         "account": "assets.plan",
-        "as_of": AS_OF.isoformat(),
+        "as_of": _as_of().isoformat(),
         "completeness": "complete",
         "captured_at": "2026-11-01T15:00:00+00:00",
         "source_note": "synthetic holdings page",
@@ -110,7 +114,7 @@ def test_hundred_lot_capture_end_to_end(live_server: LiveServer, tokens: dict[st
     )
     assert float(page["summary"]["quantity"]) == pytest.approx(expected)
     assert page["summary"]["unallocated"] == "0"
-    assert page["summary"]["capture"]["as_of"] == AS_OF.isoformat()
+    assert page["summary"]["capture"]["as_of"] == _as_of().isoformat()
     assert page["total"] == 101 and page["next_cursor"] is not None
     assert len(json.dumps(page)) <= BUDGET + 100
     assert all("external_ref" not in lot for lot in page["lots"])
@@ -135,7 +139,7 @@ def test_sale_by_reference_and_realized_gains(
         "symbol": "SYNT",
         "quantity": "1",
         "price": "80",
-        "trade_date": TODAY.isoformat(),
+        "trade_date": today().isoformat(),
         "proceeds_to": "none",
     }
     [refused, sold, gains] = _mcp_call(
@@ -144,7 +148,7 @@ def test_sale_by_reference_and_realized_gains(
         [
             ("record_sale", sale),
             ("record_sale", {**sale, "lots": [{"lot": "SYN-0002", "quantity": "1"}]}),
-            ("realized_gains", {"account": "assets.plan", "year": TODAY.year}),
+            ("realized_gains", {"account": "assets.plan", "year": today().year}),
         ],
     )
     assert "allocation_required" in refused["error"] or "names them" in refused["error"]
@@ -162,7 +166,10 @@ def test_stale_preview_is_refused(live_server: LiveServer, tokens: dict[str, str
         [("upsert_lots", {**args, "dry_run": False, "expect_hash": preview["plan_hash"]})],
     )
     bigger = _capture_args(
-        [*_lots(2), {"external_ref": "SYN-NEW", "acquired_on": AS_OF.isoformat(), "quantity": "1"}],
+        [
+            *_lots(2),
+            {"external_ref": "SYN-NEW", "acquired_on": _as_of().isoformat(), "quantity": "1"},
+        ],
         captured_at="2026-11-03T15:00:00+00:00",
     )
     [plan] = _mcp_call(live_server.url, tokens["agent"], [("upsert_lots", bigger)])
@@ -177,7 +184,7 @@ def test_stale_preview_is_refused(live_server: LiveServer, tokens: dict[str, str
                     "account": "assets.plan",
                     "symbol": "SYNT",
                     "quantity": "1",
-                    "occurred_on": TODAY.isoformat(),
+                    "occurred_on": today().isoformat(),
                     "lots": [{"lot": "SYN-0000", "quantity": "1"}],
                 },
             ),
@@ -188,10 +195,10 @@ def test_stale_preview_is_refused(live_server: LiveServer, tokens: dict[str, str
 
 
 def test_awards_vest_and_net_worth(live_server: LiveServer, tokens: dict[str, str]) -> None:
-    vest_day = AS_OF + timedelta(days=2)
+    vest_day = _as_of() + timedelta(days=2)
     awards = {
         "account": "assets.plan",
-        "as_of": AS_OF.isoformat(),
+        "as_of": _as_of().isoformat(),
         "captured_at": "2026-11-01T16:00:00+00:00",
         "completeness": "complete",
         "awards": [
@@ -203,8 +210,8 @@ def test_awards_vest_and_net_worth(live_server: LiveServer, tokens: dict[str, st
                 "plan": "Synthetic award plan",
                 "schedule": [
                     {"vest_date": vest_day.isoformat(), "quantity": "10"},
-                    {"vest_date": (TODAY + timedelta(days=120)).isoformat(), "quantity": "10"},
-                    {"vest_date": (TODAY + timedelta(days=485)).isoformat(), "quantity": "10"},
+                    {"vest_date": (today() + timedelta(days=120)).isoformat(), "quantity": "10"},
+                    {"vest_date": (today() + timedelta(days=485)).isoformat(), "quantity": "10"},
                 ],
             }
         ],
@@ -265,7 +272,7 @@ def test_conflict_resolution_workflow(live_server: LiveServer, tokens: dict[str,
     sold_rows = [dict(r) for r in rows]
     sold_rows[1]["quantity"] = "1.125"  # SYN-0001 had 2.125
     later = _capture_args(
-        sold_rows, as_of=TODAY.isoformat(), captured_at="2026-11-04T15:00:00+00:00"
+        sold_rows, as_of=today().isoformat(), captured_at="2026-11-04T15:00:00+00:00"
     )
     [conflicted] = _mcp_call(live_server.url, tokens["agent"], [("upsert_lots", later)])
     assert conflicted["conflicts"] == 1
@@ -275,7 +282,7 @@ def test_conflict_resolution_workflow(live_server: LiveServer, tokens: dict[str,
         "symbol": "SYNT",
         "quantity": "1",
         "price": "75",
-        "trade_date": (TODAY - timedelta(days=1)).isoformat(),
+        "trade_date": (today() - timedelta(days=1)).isoformat(),
         "proceeds_to": "none",
         "lots": [{"lot": "SYN-0001", "quantity": "1"}],
     }
@@ -305,11 +312,13 @@ def test_amount_privacy_withholds_lot_basis(
         tokens["agent"],
         [("upsert_lots", {**args, "dry_run": False, "expect_hash": preview["plan_hash"]})],
     )
-    assert admin_client.put("/config", json={"privacy_amount": True}).status_code == 200
     from tests.test_mcp import _mcp_raw_call
 
     raw = _mcp_raw_call(
-        live_server.url, tokens["agent"], "list_lots", {"account": "assets.plan", "symbol": "SYNT"}
+        live_server.url,
+        tokens["agent"],
+        "list_lots",
+        {"account": "assets.plan", "symbol": "SYNT", "withhold": ["amount"]},
     )
     structured = raw.structured_content
     text = " ".join(block.text for block in raw.content) + json.dumps(structured)
@@ -326,7 +335,7 @@ def test_amount_privacy_withholds_lot_basis(
 def test_brokerage_cash_reconciliation_mcp(live_server: LiveServer, tokens: dict[str, str]) -> None:
     args = {
         "account": "assets.plan",
-        "as_of": TODAY.isoformat(),
+        "as_of": today().isoformat(),
         "statement_balance": "25",
         "component": "cash",
     }
@@ -366,7 +375,7 @@ def test_vest_requires_explicit_withholding(
                 {
                     "account": "assets.plan",
                     "award": "missing",
-                    "vest_date": TODAY.isoformat(),
+                    "vest_date": today().isoformat(),
                     "gross_quantity": "10",
                 },
             )

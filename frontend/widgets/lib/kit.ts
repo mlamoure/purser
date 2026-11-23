@@ -6,6 +6,14 @@
  * mockups do the same); text/surface colors come from theme.css vars.
  */
 
+import {
+  ESTIMATE_MARK,
+  compareMoney,
+  formatMoney,
+  formatMoneyCompact,
+  typographicMinus,
+} from "../../src/lib/money";
+
 export const CHART = {
   line: "#378ADD",
   danger: "#E24B4A",
@@ -61,45 +69,86 @@ export function clear(node: Element): void {
 }
 
 /* ----------------------------------------------------------------------- */
-/* Formatting. Amounts arrive as decimal strings (guardrail 1) and pass    */
-/* through unchanged; Number() is used only to lay out pixels and to       */
-/* format for display.                                                     */
+/* Formatting. Amounts arrive as decimal strings (guardrail 1) and are     */
+/* formatted, compared and added as strings, by the admin SPA's money      */
+/* module (#540, #550): Vite inlines it into each single-file bundle, so   */
+/* sharing it keeps the bundles self-contained (guardrail 8). The number   */
+/* conversion in num() only lays out pixels: positions, widths, scales.    */
 /* ----------------------------------------------------------------------- */
 
+export { compareMoney, moneySign, negateMoney, sumMoney } from "../../src/lib/money";
+
+/** A decimal string as a number, for pixel layout only — never to display,
+ * compare or add an amount (use money(), compareMoney, sumMoney). */
 export function num(dec: string): number {
   return Number(dec);
 }
 
-/** "-142.00" -> "−$142" · "17.99" -> "$17.99" · sign: always show +/−.
- * A missing value is an amount the user's privacy settings withheld from
- * the agent (#437): it reads "withheld", never "$NaN". */
-export function money(
-  dec: string | null | undefined,
-  opts: { sign?: boolean; cents?: boolean } = {},
-): string {
+export interface MoneyFormat {
+  /** Show "+" on a positive amount (zero never gets a sign). */
+  sign?: boolean;
+  /** Always show the minor units; by default only an amount under 1,000
+   * that is not whole once rounded shows them. */
+  cents?: boolean;
+  /** ISO 4217 code of the value's currency, from the payload; USD (the
+   * ledger's default) when it carries none. */
+  currency?: string | null;
+}
+
+/** Whether an amount shows its minor units by default: under 1,000 and not
+ * whole once rounded to them ("17.99" does; "17.999", which rounds to
+ * "18.00", and "2500.50" do not). */
+function showsCents(dec: string, currency: string | null | undefined): boolean {
+  if (compareMoney(dec, "1000") >= 0 || compareMoney(dec, "-1000") <= 0) return false;
+  const exact = formatMoney(dec, { currency, signDisplay: "never" });
+  const whole = formatMoney(dec, { currency, signDisplay: "never", places: 0 });
+  return exact.replace(/\.0+$/, "") !== whole;
+}
+
+/** "-142.00" -> "−$142" · "17.99" -> "$17.99" · "2500.50" -> "$2,501".
+ * Rounded half-up on the digit string, never through a float (guardrail 1).
+ * A malformed string shows as is rather than as a made-up amount. A missing
+ * value is an amount the user's privacy settings withheld from the agent
+ * (#437): it reads "withheld", never "$NaN". */
+export function money(dec: string | null | undefined, opts: MoneyFormat = {}): string {
   if (dec == null) return "withheld";
-  const value = Number(dec);
-  const abs = Math.abs(value);
-  const wantCents = opts.cents ?? (abs < 1000 && abs % 1 !== 0);
-  const body = abs.toLocaleString("en-US", {
-    minimumFractionDigits: wantCents ? 2 : 0,
-    maximumFractionDigits: wantCents ? 2 : 0,
-  });
-  const sign = value < 0 ? "−" : opts.sign ? "+" : "";
-  return `${sign}$${body}`;
+  const cents = opts.cents ?? showsCents(dec, opts.currency);
+  return typographicMinus(
+    formatMoney(dec, {
+      currency: opts.currency,
+      signDisplay: opts.sign ? "always" : "auto",
+      places: cents ? undefined : 0,
+    }),
+  );
 }
 
-/** Axis-compact: 2500 -> "$2.5k", 450000 -> "$450k", 1200000 -> "$1.2M". */
-export function moneyCompact(value: number): string {
-  const sign = value < 0 ? "−" : "";
-  const abs = Math.abs(value);
-  if (abs >= 1_000_000) return `${sign}$${trimZero((abs / 1_000_000).toFixed(1))}M`;
-  if (abs >= 1_000) return `${sign}$${trimZero((abs / 1_000).toFixed(1))}k`;
-  return `${sign}$${Math.round(abs)}`;
+/** An estimated amount as text (#556): "≈ −$95" — U+2248, a space, then
+ * money()'s text (a real minus sign already). For SVG labels and tooltips;
+ * estimateNode() is the same on the page and says "estimated" to a screen
+ * reader. A withheld amount reads "withheld", unmarked. */
+export function estimate(dec: string | null | undefined, opts: MoneyFormat = {}): string {
+  return dec == null ? money(dec) : `${ESTIMATE_MARK} ${money(dec, opts)}`;
 }
 
-function trimZero(fixed: string): string {
-  return fixed.endsWith(".0") ? fixed.slice(0, -2) : fixed;
+/** estimate() as a DOM node: the mark is hidden from screen readers and a
+ * visually hidden "estimated" stands in for it, so assistive technology
+ * hears "estimated −$95", not "approximately equal to". */
+export function estimateNode(dec: string | null | undefined, opts: MoneyFormat = {}): HTMLElement {
+  if (dec == null) return h("span", {}, money(dec));
+  return h(
+    "span",
+    {},
+    h("span", { "aria-hidden": "true" }, ESTIMATE_MARK),
+    h("span", { class: "visually-hidden" }, "estimated"),
+    ` ${money(dec, opts)}`,
+  );
+}
+
+/** Axis-compact, on the digit string: "2500" -> "$2.5k", "450000" ->
+ * "$450k", "-1250000" -> "−$1.25M". An axis tick is a layout position, not a
+ * ledger amount; its caller passes String(tick). */
+export function moneyCompact(dec: string, currency?: string | null): string {
+  return typographicMinus(formatMoneyCompact(dec, { currency }));
 }
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];

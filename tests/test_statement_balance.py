@@ -25,8 +25,8 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from sqlalchemy import Engine, text
 
+from tests.conftest import today
 from tests.test_mcp import (  # noqa: F401 (fixture re-export)
-    TODAY,
     LiveServer,
     _mcp_call,
     live_server,
@@ -95,7 +95,7 @@ class TestRecordStatement:
         sid = _pay_the_card(client)
         first, second = _instances(client, sid)[:2]
         assert (first["basis"], first["statement_balance"]) == ("counterparty_balance", None)
-        closed = (date.today() - timedelta(days=20)).isoformat()
+        closed = (today() - timedelta(days=20)).isoformat()
 
         resp = _record(
             client,
@@ -155,7 +155,7 @@ class TestRecordStatement:
         self, with_card: None, client: TestClient
     ) -> None:
         _card_purchase(client, "-500.00")
-        start = date.today() + timedelta(days=2)
+        start = today() + timedelta(days=2)
         sid = _card_schedule(client, rrule="FREQ=WEEKLY", dtstart=start)
         by_date = {i["date"]: i for i in _instances(client, sid)}
         target = by_date[(start + timedelta(days=7)).isoformat()]
@@ -182,7 +182,7 @@ class TestRecordStatement:
         self, with_card: None, client: TestClient
     ) -> None:
         _card_purchase(client, "-80.00")
-        start = date.today() + timedelta(days=1)
+        start = today() + timedelta(days=1)
         _card_schedule(client, rrule="FREQ=DAILY;INTERVAL=4", dtstart=start)
         resp = _record(
             client,
@@ -251,7 +251,7 @@ class TestRecordStatement:
             {
                 "transaction_id": tid,
                 "statement_balance": "300.00",
-                "statement_date": (date.today() + timedelta(days=1)).isoformat(),
+                "statement_date": (today() + timedelta(days=1)).isoformat(),
             },
             "in the future",
         )
@@ -269,13 +269,13 @@ class TestRecordStatement:
             "not a live schedule instance",
         )
         # A statement cannot close after the payment is due.
-        moved = (date.today() - timedelta(days=10)).isoformat()
+        moved = (today() - timedelta(days=10)).isoformat()
         assert client.patch(f"/transactions/{tid}", json={"date": moved}).status_code == 200
         refused(
             {
                 "transaction_id": tid,
                 "statement_balance": "300.00",
-                "statement_date": (date.today() - timedelta(days=5)).isoformat(),
+                "statement_date": (today() - timedelta(days=5)).isoformat(),
             },
             "after the payment's due date",
         )
@@ -303,7 +303,7 @@ class TestRecordStatement:
             client,
             transaction_id=tid,
             statement_balance="310.50",
-            statement_date=(date.today() - timedelta(days=3)).isoformat(),
+            statement_date=(today() - timedelta(days=3)).isoformat(),
         )
         assert again.status_code == 200, again.text
         assert (again.json()["amount"], again.json()["previous_amount"]) == (
@@ -357,7 +357,7 @@ class TestRecordStatement:
         sid = _pay_the_card(client)
         first = _instances(client, sid)[0]
         tid, slot = first["transaction_id"], first["occurrence_date"]
-        closed = (date.today() - timedelta(days=20)).isoformat()
+        closed = (today() - timedelta(days=20)).isoformat()
         recorded = _record(
             client, transaction_id=tid, statement_balance="300.00", statement_date=closed
         )
@@ -368,7 +368,7 @@ class TestRecordStatement:
                 migrated_engine,
                 account_path="assets.checking",
                 amount="-300.00",
-                on=date.today(),
+                on=today(),
                 payee="Citi Autopay",
                 description="CITI AUTOPAY",
                 status="pending",
@@ -556,7 +556,7 @@ class TestForecastBasis:
                 "account": "assets.checking",
                 "category": "expenses.housing",
                 "amount": "-42.00",
-                "date": (date.today() + timedelta(days=5)).isoformat(),
+                "date": (today() + timedelta(days=5)).isoformat(),
                 "payee": "Plumber",
                 "status": "expected",
             },
@@ -650,7 +650,7 @@ def _mcp_card(client: TestClient, *, owed: str = "412.00") -> tuple[str, list[di
             "account": "liabilities.amex",
             "category": "expenses.groceries",
             "amount": f"-{owed}",
-            "date": TODAY.isoformat(),
+            "date": today().isoformat(),
             "status": "posted",
         },
     )
@@ -661,7 +661,7 @@ def _mcp_card(client: TestClient, *, owed: str = "412.00") -> tuple[str, list[di
             "account": "assets.checking",
             "counterparty_account": "liabilities.amex",
             "rrule": "FREQ=WEEKLY",
-            "dtstart": (TODAY + timedelta(days=2)).isoformat(),
+            "dtstart": (today() + timedelta(days=2)).isoformat(),
             "amount_type": "estimated",
             "estimate_basis": "counterparty_balance",
         },
@@ -676,7 +676,7 @@ class TestMcp:
         sid, instances = _mcp_card(client)
         first = instances[0]
         due = (date.fromisoformat(first["date"]) + timedelta(days=1)).isoformat()
-        closed = (TODAY - timedelta(days=21)).isoformat()
+        closed = (today() - timedelta(days=21)).isoformat()
         args = {
             "statement_balance": "347.00",
             "account": "liabilities.amex",
@@ -721,7 +721,7 @@ class TestMcp:
             ({**args, "statement_balance": "lots"}, "decimal string"),
             ({**args, "statement_balance": "0"}, "skip_instance"),
             ({**args, "account": "assets.checking"}, "not a credit card"),
-            ({**args, "due_date": (TODAY + timedelta(days=300)).isoformat()}, "within 14 days"),
+            ({**args, "due_date": (today() + timedelta(days=300)).isoformat()}, "within 14 days"),
         ]
         results = _mcp_call(
             live_server.url,

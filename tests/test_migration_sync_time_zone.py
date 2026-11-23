@@ -6,7 +6,7 @@ the session's Postgres container."""
 import json
 import os
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -16,7 +16,7 @@ from alembic import command
 from alembic.config import Config
 
 import purser.config
-from tests.conftest import TEST_ENCRYPTION_KEY
+from tests.conftest import TEST_ENCRYPTION_KEY, today
 
 DB = "purser_sync_zone"
 
@@ -59,8 +59,7 @@ def _schedule(engine: sa.Engine) -> object:
 
 def _local(hour: int, minute: int, zone: str) -> tuple[int, int]:
     """Today's local clock reading of a UTC time of day."""
-    today = datetime.now(UTC).date()
-    at = datetime(today.year, today.month, today.day, hour, minute, tzinfo=UTC)
+    at = datetime.combine(today(), time(hour, minute), tzinfo=UTC)
     moved = at.astimezone(ZoneInfo(zone))
     return moved.hour, moved.minute
 

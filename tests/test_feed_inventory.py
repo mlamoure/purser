@@ -4,12 +4,13 @@ withheld from non-admin API tokens; the MCP summary stays small."""
 
 import json
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 from purser import db
 from purser.feed import inventory
 from tests import test_feed
+from tests.conftest import now
 from tests.test_feed import FeedHarness, account_of
 from tests.test_feed_v2 import CONN, as_v2
 
@@ -20,7 +21,7 @@ OTHER = dict(CONN, conn_id="CON-DEMO-2", name="Other Bank")
 
 
 def _days_ago(days: int) -> int:
-    return int((datetime.now(UTC) - timedelta(days=days)).timestamp())
+    return int((now() - timedelta(days=days)).timestamp())
 
 
 def _payload() -> dict[str, Any]:

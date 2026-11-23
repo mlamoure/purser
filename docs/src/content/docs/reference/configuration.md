@@ -8,6 +8,8 @@ next to the process also works). A subset can be **overridden at runtime** in
 the admin UI (under **Settings**: **General**, **Security**, **Connections**,
 **Prices**, **Categories** and **Agents & API**) or via the admin-scoped
 `/config` REST API; overrides persist in the database and win over the environment.
+**Settings -> Categories** holds the AI categorization card, whose **Test
+connection** (`POST /config/ai/test`) checks a provider setup before you save it.
 
 ## Required
 
@@ -22,8 +24,10 @@ Infrastructure identity — never runtime-editable.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PURSER_DATABASE_URL` | `postgresql+psycopg://purser:purser@localhost:5432/purser` | PostgreSQL DSN (psycopg v3 driver). |
-| `PURSER_PUBLIC_URL` | `http://localhost:8000` | External base URL of the instance. Drives cookie security (`https://` = secure cookies), the OIDC redirect URI, and the MCP endpoint's Host/Origin allowlist (requests for any other host get HTTP 421). The [Helm chart](../../how-to/kubernetes-helm/) derives it from the ingress host. Serve Purser at the root of its host (`https://purser.example.com`): a path prefix (`https://example.com/purser`) is not supported, because the web UI, its icons, the API and `/mcp/` all use root-absolute paths. |
-| `PURSER_HOST` | `0.0.0.0` | Bind address. |
+| `PURSER_PUBLIC_URL` | `http://localhost:8000` | External base URL of the instance. Drives cookie security (`https://` = secure cookies), the OIDC redirect URI, and the MCP endpoint's Host/Origin allowlist (with `PURSER_ALLOWED_HOSTS`: requests for any other host get HTTP 421, and the answer names the address to use and how to allow another name). The [Helm chart](../../how-to/kubernetes-helm/) derives it from the ingress host. Serve Purser at the root of its host (`https://purser.example.com`): a path prefix (`https://example.com/purser`) is not supported, because the web UI, its icons, the API and `/mcp/` all use root-absolute paths. |
+| `PURSER_ALLOWED_HOSTS` | unset | The machine's other names, comma-separated: exact host names or IP addresses, for example `192.168.1.20,homeserver,homeserver.local`. The MCP endpoint and the web UI's cross-site check accept them as well as the host in `PURSER_PUBLIC_URL` and `localhost`; links, connection steps and the single sign-on address keep using `PURSER_PUBLIC_URL`. The MCP endpoint accepts a name on any port; add `:port` to a name (`homeserver:8010`) only when browsers reach it on another port than `PURSER_PUBLIC_URL`'s. Wildcards are refused, because the endpoint's check exists to stop DNS rebinding, and a malformed entry stops Purser at startup with an `error:` line naming it. See [Another machine on your home network](../../how-to/docker-compose/#another-machine-on-your-home-network). |
+| `PURSER_BIND_ADDRESS` | unset (`127.0.0.1` in the Compose file) | The address the deployment publishes Purser's port on. In the Compose file it is the Docker host interface the port listens on (`127.0.0.1`: this machine only; `0.0.0.0`: the home network), and Compose passes the same value to Purser, because the app cannot see the host's port mapping from inside its container. Purser only reports it: **Settings**, **Agents & API** (How Purser is reached), `GET /config/network` and `reach` in MCP `describe`. Unset, the report says the mode is not reported instead of guessing; an `https://` `PURSER_PUBLIC_URL` is reported as a reverse proxy. See [Docker host binding](#docker-host-binding). |
+| `PURSER_HOST` | `0.0.0.0` | Bind address inside the container (or on the machine, without Docker). |
 | `PURSER_PORT` | `8000` | Bind port. |
 | `PURSER_LOG_LEVEL` | `INFO` | Log level. |
 | `PURSER_MAX_REQUEST_BYTES` | `33554432` (32 MiB) | Largest request body accepted. A bigger one is refused with 413 before it is read, signed in or not. `0` turns the limit off; a reverse proxy's own limit applies as well. |
@@ -72,12 +76,11 @@ write-only and encrypted at rest.
 | `PURSER_SESSION_IDLE_HOURS` | `8` | Sliding idle timeout for browser sessions. |
 | `PURSER_AUDIT_RETENTION_DAYS` | `90` | Audit call/change rows older than this are pruned nightly (floor 7). |
 | `PURSER_TRANSFER_AUTO_LINK` | `true` | Deterministic transfer auto-linking at import. Off = every candidate is confirm-first. |
-| `PURSER_PRIVACY_PURCHASE` | `false` | Agents receive payees as stable references (`py_...`), with descriptions, memos and bill names left out, unless a call asks for them with `include`. See [Privacy and agents](../../explanation/privacy-and-agents/). |
-| `PURSER_PRIVACY_AMOUNT` | `false` | Agents receive no single-transaction or bill amounts unless a call asks for them. Totals and balances stay exact. |
-| `PURSER_AI_PROVIDER` | `none` | AI categorization provider: `none`, `openai` (any OpenAI-compatible endpoint), or `anthropic`. |
-| `PURSER_AI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible endpoint (Ollama, LM Studio, vLLM, OpenRouter...). |
-| `PURSER_AI_API_KEY` | unset | Provider API key (write-only secret). |
-| `PURSER_AI_MODEL` | unset | Model name. |
+| `PURSER_AI_PROVIDER` | `none` | AI categorization provider: `none`; `local`, a model you run behind an OpenAI-compatible API (Ollama, LM Studio, vLLM, a llama.cpp server, a LiteLLM gateway); `openai`, a hosted OpenAI-compatible service; or `anthropic`. `local` and `openai` send the same requests; `local` needs its own `PURSER_AI_BASE_URL` and never uses the hosted default. See [Use a local model](../../how-to/local-model/) and [what Purser sends](../../explanation/privacy-and-agents/#what-purser-itself-sends-to-a-model-provider). Runtime-editable in **Settings -> Categories** (AI categorization) or `PUT /config` (`ai_provider`). |
+| `PURSER_AI_BASE_URL` | `https://api.openai.com/v1` | The OpenAI-compatible address for `local` or `openai`, usually ending in `/v1` (`http://host.docker.internal:11434/v1` for Ollama on the Docker host). The default serves `openai` only: saving `local` without an address of its own is refused with 422. Ignored for `anthropic`. |
+| `PURSER_AI_API_KEY` | unset | Provider API key (write-only secret), optional for `local`. **Clear key** on the settings card (`PUT /config` with `"ai_api_key": null`) stores "no key", which also overrides this variable; `DELETE /config/ai_api_key` returns to it. |
+| `PURSER_AI_MODEL` | unset | Model name. The settings card's **Find models** lists the server's models (`POST /config/ai/models`). |
+| `PURSER_AI_TIMEOUT_SECONDS` | `30` | Seconds to wait for one provider answer. A model on modest hardware can need 120 or more. 5 to 600 through the settings card or `PUT /config` (`ai_timeout_seconds`). |
 | `PURSER_AI_REVIEW` | `false` | Run the review pass server-side instead of waiting for a connected agent. Requires a configured provider on top of this — turning a provider on grants nothing by itself. |
 | `PURSER_REVIEW_MAX_AGE_DAYS` | `90` | Unreviewed transactions older than this are auto-marked `aged` by a nightly sweep, so the set cannot grow without bound. The count is reported rather than cleared silently. |
 | `PURSER_OIDC_ISSUER` | unset | OpenID Provider issuer URL (e.g. an Authentik instance). SSO enables when issuer, client id, and secret are all set; password login always remains as fallback. |
@@ -100,9 +103,19 @@ runtime-only — set it in **Settings -> Connections**.
 
 ## Compose extras
 
-The bundled `docker-compose.yml` also reads `POSTGRES_PASSWORD` (defaults to
-`purser`) for the sidecar database. Set it before the first start; see
-[Run with Docker Compose](../../how-to/docker-compose/#set-the-database-password).
+The bundled `docker-compose.yml` also reads settings of its own from `.env`.
+Purser itself never sees the first two; `PURSER_BIND_ADDRESS` it only reports:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `POSTGRES_PASSWORD` | `purser` | The sidecar database's password. Set it before the first start; see [Run with Docker Compose](../../how-to/docker-compose/#set-the-database-password). |
+| `PURSER_HOST_PORT` | `8000` | The port published on the Docker host. Change it when another program uses 8000; the default `PURSER_PUBLIC_URL` follows it. Not the same as `PURSER_PORT`, the port inside the container, which stays 8000. |
+| `PURSER_BIND_ADDRESS` | `127.0.0.1` | The host interface the port listens on, passed to Purser as well so it can report how it is reached. See [Docker host binding](#docker-host-binding). |
+
+Of Purser's own variables, the compose file passes `PURSER_ENCRYPTION_KEY`,
+`PURSER_PUBLIC_URL`, `PURSER_ALLOWED_HOSTS`, `PURSER_BIND_ADDRESS` and
+`PURSER_TIMEZONE` through from `.env`; set any other in
+an [override file](../../how-to/docker-compose/#keep-your-changes-in-an-override-file).
 
 ## Licence and notices
 
@@ -126,10 +139,25 @@ Third-party licences ship with every build:
 - Each MCP Apps widget carries its bundled packages' licences in a comment at
   the end of its HTML.
 
+## Removed variables
+
+Purser ignores these and logs a warning at startup while one is still set.
+
+| Variable | Replaced by |
+| --- | --- |
+| `PURSER_PRIVACY_PURCHASE` | Agents ask for privacy per call with `withhold`; see [Privacy and agents](../../explanation/privacy-and-agents/). |
+| `PURSER_PRIVACY_AMOUNT` | Agents ask for privacy per call with `withhold`; see [Privacy and agents](../../explanation/privacy-and-agents/). |
+
 ## Docker host binding
 
-The Compose file uses `PURSER_BIND_ADDRESS` (default `127.0.0.1`) for its
-published host port. This is a Compose setting, not an application setting.
-Complete first-admin setup before exposing a remote interface. Compose also
-passes `PURSER_PUBLIC_URL` through to the application; use your HTTPS URL behind
-a reverse proxy (see [Put Purser behind a reverse proxy](../../how-to/reverse-proxy/)).
+The Compose file publishes Purser on `PURSER_BIND_ADDRESS` (default
+`127.0.0.1`) and `PURSER_HOST_PORT` (default `8000`) of the Docker host. These
+are Compose settings; Compose also hands `PURSER_BIND_ADDRESS` to Purser, which
+shows the result under **Settings**, **Agents & API**: this machine only, the
+home network at `PURSER_PUBLIC_URL`, a reverse proxy, or not reported. To use Purser from another
+machine on your home network, set `PURSER_BIND_ADDRESS=0.0.0.0` and
+`PURSER_PUBLIC_URL` to the host's address (for example `http://192.168.1.20:8000`) together,
+and list the machine's other names in `PURSER_ALLOWED_HOSTS`; see
+[Another machine on your home network](../../how-to/docker-compose/#another-machine-on-your-home-network).
+Beyond the home network, keep the default binding and put your own HTTPS
+reverse proxy in front (see [Put Purser behind a reverse proxy](../../how-to/reverse-proxy/)).

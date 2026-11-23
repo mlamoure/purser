@@ -20,6 +20,7 @@ import purser.db
 from purser import crypto, digest
 from purser import suggestions as service
 from purser.models import ApiToken, Suggestion
+from tests.conftest import today
 
 
 @pytest.fixture
@@ -42,9 +43,8 @@ def _month_day(months_ago: int, day: int) -> date:
     occurrence on or before today. Anchoring on that occurrence keeps the
     newest seeded row under a month old whatever today's day of month is, so
     a monthly series never reads as lapsed (1.5 periods, #262)."""
-    today = date.today()
-    y, m = today.year, today.month
-    if day > today.day:
+    y, m = today().year, today().month
+    if day > today().day:
         y, m = (y - 1, 12) if m == 1 else (y, m - 1)
     m -= months_ago
     while m <= 0:
@@ -156,14 +156,14 @@ class TestInbox:
         assert snoozed.status_code == 200, snoozed.text
         assert snoozed.json()["suggestion"]["status"] == "open"
         until = date.fromisoformat(snoozed.json()["suggestion"]["snooze_until"])
-        assert until == date.today() + timedelta(days=30)
+        assert until == today() + timedelta(days=30)
         assert client.get("/suggestions").json() == []
         assert len(client.get("/suggestions", params={"include_snoozed": True}).json()) == 1
         # Past date -> 422; the row is still open and still not a schedule.
         assert (
             client.post(
                 f"/suggestions/{sid}/decide",
-                json={"decision": "snooze", "snooze_until": date.today().isoformat()},
+                json={"decision": "snooze", "snooze_until": today().isoformat()},
             ).status_code
             == 422
         )
@@ -404,6 +404,90 @@ class TestInbox:
         assert block["open"] == 2
         assert len(block["top"]) == 2
         assert all("headline" in t for t in block["top"])
+
+
+class TestHeadlineNames:
+    """#552: a headline reads accounts by the names people know them by, in
+    every rendering — the inbox (REST and MCP serialize), the propose and
+    detect responses and the digest — while the draft keeps the paths accept
+    applies and other calls take."""
+
+    def test_a_detected_schedule_names_its_account(
+        self, seeded: None, client: TestClient, migrated_engine: Engine, db_session: Session
+    ) -> None:
+        _seed_recurring(migrated_engine, "Netflix")
+        detected = _detect(client)
+        expected = "Netflix: monthly -15.99 on Checking with Netflix"  # a steady amount
+        assert detected["suggestions"][0]["headline"] == expected  # type: ignore[index]
+        (row,) = client.get("/suggestions").json()
+        assert row["headline"] == expected
+        assert (row["draft"]["account"], row["draft"]["category"]) == (
+            "assets.checking",
+            "expenses.uncategorized",
+        )
+        (top,) = digest.whats_new(db_session)["suggestions"]["top"]
+        assert top["headline"] == expected
+
+    def test_a_proposed_transfer_names_both_accounts(
+        self, seeded: None, client: TestClient
+    ) -> None:
+        agent = client.post("/tokens", json={"name": "agent", "scopes": ["read", "write"]})
+        proposed = client.post(
+            "/schedules",
+            json={
+                "name": "Card payment",
+                "account": "assets.checking",
+                "counterparty_account": "liabilities.citicard",
+                "rrule": "FREQ=MONTHLY;BYMONTHDAY=20",
+                "amount": "-500.00",
+                "propose": True,
+            },
+            headers={"Authorization": f"Bearer {agent.json()['token']}"},
+        )
+        assert proposed.status_code == 201, proposed.text
+        expected = "Card payment: monthly -500.00 on Checking with Citi Card"
+        assert proposed.json()["headline"] == expected
+        (row,) = client.get("/suggestions").json()
+        assert row["headline"] == expected
+        assert row["draft"]["counterparty_account"] == "liabilities.citicard"
+
+    def test_only_an_estimated_amount_is_marked(self, seeded: None, client: TestClient) -> None:
+        """#556: an estimate reads "≈ 95.00" with U+2212 for its minus (U+2248,
+        a space, then the amount with a real minus sign), the mark the admin UI and the widgets
+        show; a fixed amount stays a plain decimal string."""
+        agent = client.post("/tokens", json={"name": "agent", "scopes": ["read", "write"]})
+        headers = {"Authorization": f"Bearer {agent.json()['token']}"}
+        headlines = []
+        for name, amount in (("Electric", "-95.004"), ("Payroll", "1200.00")):
+            proposed = client.post(
+                "/schedules",
+                json={
+                    "name": name,
+                    "account": "assets.checking",
+                    "rrule": "FREQ=MONTHLY;BYMONTHDAY=3",
+                    "amount_type": "estimated",
+                    "estimate_basis": "rolling_avg_3",
+                    "amount": amount,
+                    "propose": True,
+                },
+                headers=headers,
+            )
+            assert proposed.status_code == 201, proposed.text
+            headlines.append(proposed.json()["headline"])
+        assert headlines == [
+            "Electric: monthly \u2248 \u221295.00 on Checking with Electric",
+            "Payroll: monthly \u2248 1200.00 on Checking with Payroll",
+        ]
+        assert service.estimate_text(Decimal("-0.001")) == "\u2248 0.00"  # no minus on zero
+
+    def test_a_path_no_account_carries_reads_as_words(self, db_session: Session) -> None:
+        """A path with no account behind it (a deleted category, a system
+        account) reads as its last label, never raw — like the admin UI."""
+        names = service.AccountNames(db_session)
+        assert names("equity.securities") == "Securities"
+        assert names("expenses.home_repair") == "Home repair"
+        assert names(None) == ""
+        assert service.path_leaf_label("assets.my-old_card") == "My old card"
 
 
 class TestTheLostRace:
@@ -756,7 +840,7 @@ class TestAttentionLifecycle:
         group = schedules._Group(
             account=account, counterparty=None, payee=payee, occurrences=occurrences
         )
-        detected = recurrence.detect(occurrences, today=date.today())
+        detected = recurrence.detect(occurrences, today=today())
         assert detected is not None
         draft, evidence = schedules._draft_and_evidence(group, detected)
         assert draft.amount == Decimal("-25") and draft.amount_type == "fixed"

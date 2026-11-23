@@ -11,7 +11,7 @@ import threading
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 from fastapi.testclient import TestClient
@@ -21,9 +21,8 @@ from sqlalchemy.orm import Session
 from purser import clock, db, networth
 from purser.holdings import prices
 from purser.models import Account, AuditLog, Event, HoldingsSnapshot, SecurityPrice
+from tests.conftest import now, today
 from tests.test_mcp import LiveServer, _mcp_raw, live_server, seeded_tokens  # noqa: F401
-
-TODAY = datetime.now(UTC).date()
 
 
 def _symbol(prefix: str = "F") -> str:
@@ -73,7 +72,7 @@ def _close(session: Session, symbol: str, on: date, close: str, source: str = "t
 
 
 def _ago(days: int) -> date:
-    return TODAY - timedelta(days=days)
+    return today() - timedelta(days=days)
 
 
 class TestOverlay:
@@ -289,8 +288,8 @@ class TestUnpricedEvent:
             path = account.path
             _row(session, account.id, _ago(1), fund, "548.1", "0")
             session.commit()
-        prices.run_fetch(today=TODAY)
-        prices.run_fetch(today=TODAY)  # the same state: no second line
+        prices.run_fetch(today=today())
+        prices.run_fetch(today=today())  # the same state: no second line
         (event,) = self._events()
         assert event.payload == {
             "account": path,
@@ -318,13 +317,13 @@ class TestUnpricedEvent:
                 session, symbol=fund, price_date=_ago(1), close=Decimal("20000000"), token=None
             )
             session.commit()
-        prices.run_fetch(today=TODAY)
+        prices.run_fetch(today=today())
         assert len(self._events()) == 1
         with db.get_sessionmaker()() as session:
             account_row = session.execute(select(Account).where(Account.path == path)).scalar_one()
-            _row(session, account_row.id, TODAY, fund, "99999999999999", "0")
+            _row(session, account_row.id, today(), fund, "99999999999999", "0")
             session.commit()
-        prices.run_fetch(today=TODAY)
+        prices.run_fetch(today=today())
         assert len(self._events()) == 1
 
     def test_overlapping_runs_emit_once(self, clean_db: None) -> None:
@@ -510,7 +509,7 @@ class TestSymbolSpelling:
             path = account.path
             _row(session, account.id, _ago(1), description, "12.5", "0")
             session.commit()
-        prices.run_fetch(today=TODAY)
+        prices.run_fetch(today=today())
         with db.get_sessionmaker()() as session:
             (event,) = [
                 e
@@ -624,7 +623,7 @@ class TestStaleOverlay:
                 session, symbol=fund, price_date=_ago(30), close=Decimal("23.4"), token=None
             )
             session.commit()
-        result = prices.run_fetch(today=TODAY)
+        result = prices.run_fetch(today=today())
         assert {"symbol": fund, "price_as_of": _ago(30).isoformat()} in result.stale
         status = admin_client.get("/prices/status").json()
         (row,) = [r for r in status["symbols"] if r["symbol"] == fund]
@@ -643,14 +642,14 @@ class TestEventsOnce:
         first = db.get_sessionmaker()()
         try:
             assert prices.emit_stale(first, [(symbol, None)], stale_days=7) == 1
-            prices._fetch_failed(first, "tiingo", PriceFetchError(symbol, 500, "refused"), TODAY)
+            prices._fetch_failed(first, "tiingo", PriceFetchError(symbol, 500, "refused"), today())
             results: list[int] = []
 
             def second() -> None:
                 with db.get_sessionmaker()() as session:
                     results.append(prices.emit_stale(session, [(symbol, None)], stale_days=7))
                     prices._fetch_failed(
-                        session, "tiingo", PriceFetchError(symbol, 500, "refused"), TODAY
+                        session, "tiingo", PriceFetchError(symbol, 500, "refused"), today()
                     )
                     session.commit()
 
@@ -697,7 +696,7 @@ class TestRoundTrips:
         _row(db_session, account.id, _ago(1), fund, "5", "0")
         _row(db_session, account.id, _ago(1), other, "5", "0")
         with _statements(db_session) as seen:
-            unpriced = overlay.unpriced_holdings(db_session, today=TODAY)
+            unpriced = overlay.unpriced_holdings(db_session, today=today())
         assert [u.symbol for u in unpriced if u.account_id == account.id] == [fund]
         assert len([q for q in seen if "FROM security_prices" in q]) == 1, seen
 
@@ -747,22 +746,22 @@ class TestOpenPeriodEvent:
         with db.get_sessionmaker()() as session:
             account = _feed_account(session)
             account.manual_period_open = True
-            account.holdings_source_changed_at = datetime.now(UTC) - timedelta(days=10)
+            account.holdings_source_changed_at = now() - timedelta(days=10)
             path, account_id = account.path, account.id
             fresh = _feed_account(session)  # switched back yesterday: not yet
             fresh.manual_period_open = True
-            fresh.holdings_source_changed_at = datetime.now(UTC) - timedelta(days=1)
+            fresh.holdings_source_changed_at = now() - timedelta(days=1)
             session.commit()
-        prices.run_fetch(today=TODAY)
-        prices.run_fetch(today=TODAY)  # the same state: no second line
+        prices.run_fetch(today=today())
+        prices.run_fetch(today=today())  # the same state: no second line
         with db.get_sessionmaker()() as session:
             (event,) = session.execute(
                 select(Event).where(Event.type == "holding.period_open")
             ).scalars()
             assert event.entity_id == account_id
             assert event.payload["account"] == path
-            assert event.payload["since"] == (TODAY - timedelta(days=10)).isoformat()
+            assert event.payload["since"] == (today() - timedelta(days=10)).isoformat()
             digest = whats_new(session, since_cursor=None)
         assert digest["open_manual_periods"] == [
-            {"account": path, "since": (TODAY - timedelta(days=10)).isoformat()}
+            {"account": path, "since": (today() - timedelta(days=10)).isoformat()}
         ]

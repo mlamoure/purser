@@ -4,7 +4,7 @@ contract, conflicts as 409s, lot-allocated events and realized gains.
 Synthetic fixtures only."""
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import date, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,9 +12,11 @@ from sqlalchemy import select
 
 from purser import db
 from purser.models import AuditLog
+from tests.conftest import now, today
 
-TODAY = datetime.now(UTC).date()
-AS_OF = TODAY - timedelta(days=15)
+
+def _as_of() -> date:
+    return today() - timedelta(days=15)
 
 
 def _headers(client: TestClient, scopes: list[str]) -> dict[str, str]:
@@ -37,8 +39,8 @@ def broker(admin_client: TestClient) -> str:
 
 def _body(symbol: str, rows: list[dict], **kw: object) -> dict:
     return {
-        "as_of": AS_OF.isoformat(),
-        "captured_at": datetime.now(UTC).isoformat(),
+        "as_of": _as_of().isoformat(),
+        "captured_at": now().isoformat(),
         "completeness": "complete",
         "source_note": "synthetic statement",
         "positions": [{"symbol": symbol, "lots": rows}],
@@ -119,7 +121,7 @@ def test_capture_end_to_end_and_redaction(admin_client: TestClient, broker: str)
     assert acme["cost_basis"] is None  # LOT-B has no basis
     assert acme["basis_unknown_quantity"] == "3.000000"
     page = admin_client.get(f"/positions/{acme['id']}/lots", headers=reader).json()
-    assert page["summary"]["capture"]["as_of"] == AS_OF.isoformat()
+    assert page["summary"]["capture"]["as_of"] == _as_of().isoformat()
     assert page["total"] == 3
     # Agent tokens never see the references; the owner's session does.
     assert all(lot["external_ref"] is None and lot["external_ref_withheld"] for lot in page["lots"])
@@ -137,7 +139,7 @@ def test_allocated_sale_and_realized_gains(admin_client: TestClient, broker: str
         f"/positions/{position['id']}/events",
         json={
             "kind": "sell",
-            "occurred_on": TODAY.isoformat(),
+            "occurred_on": today().isoformat(),
             "quantity": "2",
             "price": "150",
             "proceeds_to": "none",
@@ -150,7 +152,7 @@ def test_allocated_sale_and_realized_gains(admin_client: TestClient, broker: str
         f"/positions/{position['id']}/events",
         json={
             "kind": "sell",
-            "occurred_on": TODAY.isoformat(),
+            "occurred_on": today().isoformat(),
             "quantity": "2",
             "price": "150",
             "proceeds_to": "none",
@@ -160,7 +162,7 @@ def test_allocated_sale_and_realized_gains(admin_client: TestClient, broker: str
     )
     assert sold.status_code == 201, sold.text
     gains = admin_client.get(
-        f"/accounts/{broker}/realized-gains", params={"year": TODAY.year}, headers=writer
+        f"/accounts/{broker}/realized-gains", params={"year": today().year}, headers=writer
     ).json()
     assert gains["long"]["disposals"] == 1
     assert gains["long"]["proceeds"] == "300.0000"
@@ -173,7 +175,7 @@ def test_allocated_sale_and_realized_gains(admin_client: TestClient, broker: str
 
 def test_conflicts_are_409(admin_client: TestClient, broker: str) -> None:
     _commit(admin_client, broker, _body("ACME", ROWS))
-    later = (AS_OF + timedelta(days=2)).isoformat()
+    later = (_as_of() + timedelta(days=2)).isoformat()
     body = _body("ACME", [ROWS[0]], as_of=later)
     preview = admin_client.post(f"/accounts/{broker}/lot-captures", json=body).json()
     assert {c["kind"] for c in preview["symbols"][0]["conflicts"]} == {"missing_from_capture"}
@@ -192,8 +194,8 @@ def test_conflicts_are_409(admin_client: TestClient, broker: str) -> None:
 def test_awards_and_vest(admin_client: TestClient, broker: str) -> None:
     writer = _headers(admin_client, ["read", "write"])
     body = {
-        "as_of": AS_OF.isoformat(),
-        "captured_at": datetime.now(UTC).isoformat(),
+        "as_of": _as_of().isoformat(),
+        "captured_at": now().isoformat(),
         "completeness": "complete",
         "awards": [
             {
@@ -202,8 +204,8 @@ def test_awards_and_vest(admin_client: TestClient, broker: str) -> None:
                 "granted_on": "2024-03-01",
                 "granted_quantity": "40",
                 "schedule": [
-                    {"vest_date": (AS_OF + timedelta(days=3)).isoformat(), "quantity": "10"},
-                    {"vest_date": (TODAY + timedelta(days=200)).isoformat(), "quantity": "10"},
+                    {"vest_date": (_as_of() + timedelta(days=3)).isoformat(), "quantity": "10"},
+                    {"vest_date": (today() + timedelta(days=200)).isoformat(), "quantity": "10"},
                 ],
             }
         ],
@@ -221,7 +223,7 @@ def test_awards_and_vest(admin_client: TestClient, broker: str) -> None:
     assert award["grant_ref"] is None and award["grant_ref_withheld"]
     assert award["unvested_quantity"] == "20.000000"
     vest = {
-        "vest_date": (AS_OF + timedelta(days=3)).isoformat(),
+        "vest_date": (_as_of() + timedelta(days=3)).isoformat(),
         "gross_quantity": "10",
         "withheld_quantity": "4",
         "fmv": "120",

@@ -21,6 +21,7 @@ const discovered = (mappedPath: string | null) => ({
   balance: "1250.00",
   mapped_account_id: mappedPath ? "a-1" : null,
   mapped_account_path: mappedPath,
+  mapped_account_name: mappedPath ? "Everyday Checking" : null,
 });
 
 async function createAdmin(
@@ -84,7 +85,9 @@ describe("Wizard (first-run flow across the steps)", () => {
     await user.click(within(row).getByRole("button", { name: "Map" }));
     // The mapping form opens with the defaults: a new checking account.
     await user.click(screen.getByRole("button", { name: "Map account" }));
-    expect(await within(row).findByText("assets.everyday_checking")).toBeInTheDocument();
+    // The badge names the new Purser account (#552), never its path.
+    expect(await within(row).findByText("Everyday Checking")).toBeInTheDocument();
+    expect(within(row).queryByText("assets.everyday_checking")).not.toBeInTheDocument();
     expect(within(row).queryByRole("button", { name: "Map" })).not.toBeInTheDocument();
     expect(apiMock.POST).toHaveBeenCalledWith("/connections/{connection_id}/map", {
       params: { path: { connection_id: "c-1" } },
@@ -96,6 +99,8 @@ describe("Wizard (first-run flow across the steps)", () => {
           path: "assets.everyday_checking",
           currency: "USD",
         },
+        // On by default for a new account (decision 123).
+        starting_balance: true,
       },
     });
     await user.click(screen.getByRole("button", { name: "Continue" }));

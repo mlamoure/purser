@@ -1,12 +1,9 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { meQuery } from "../../lib/me";
 import { apiMock, mockApi, ok } from "../../test/api";
-import { configOut } from "../../test/fixtures";
 import { renderWithProviders } from "../../test/render";
 import AgentsApi from "./AgentsApi";
-
-const CONFIG = configOut();
 
 function renderAs(scopes: string[]) {
   const view = renderWithProviders(<AgentsApi />);
@@ -15,24 +12,32 @@ function renderAs(scopes: string[]) {
 }
 
 describe("Settings, Agents & API (#542)", () => {
-  it("shows an admin the tokens, sign-ins and the privacy defaults (#437)", async () => {
-    mockApi({ "GET /tokens": ok([]), "GET /config": ok(CONFIG), "PUT /config": ok(CONFIG) });
-    const { user } = renderAs(["read", "write", "admin"]);
+  it("shows an admin the tokens and sign-ins, and no privacy settings (#613)", async () => {
+    mockApi({
+      "GET /tokens": ok([]),
+      "GET /config/network": ok({
+        reach: "this_machine",
+        public_url: "http://localhost:8000",
+        mcp_url: "http://localhost:8000/mcp",
+        allowed_hosts: [],
+        bind_address: "127.0.0.1",
+        public_url_is_local: true,
+        request_host: "localhost:8000",
+        request_host_accepted: true,
+        guide_url: "https://docs.example.com/tutorials/ai-setup/",
+      }),
+    });
+    renderAs(["read", "write", "admin"]);
 
     expect(await screen.findByRole("heading", { name: "API tokens" })).toBeInTheDocument();
+    // How Purser is reached, next to the connection steps (#632).
+    expect(await screen.findByRole("heading", { name: "How Purser is reached" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Login sessions" })).toBeInTheDocument();
     // Session lifetime is an admin setting under Security; the list says where.
     expect(screen.getByRole("link", { name: "Security" })).toHaveAttribute("href", "/settings/security");
-
-    await user.click(await screen.findByLabelText(/Privatize the purchase/));
-    await user.click(screen.getByLabelText(/Privatize the amount/));
-    const card = screen.getByRole("heading", { name: "Privacy with agents" }).closest("div")!;
-    await user.click(within(card).getByRole("button", { name: "Save" }));
-    await waitFor(() =>
-      expect(apiMock.PUT).toHaveBeenCalledWith("/config", {
-        body: { privacy_purchase: true, privacy_amount: true },
-      }),
-    );
+    // Privacy is the agent's per-call choice now: nothing to set, no /config read.
+    expect(screen.queryByText("Privacy with agents")).not.toBeInTheDocument();
+    expect(apiMock.GET).not.toHaveBeenCalledWith("/config");
   });
 
   it("gives a member their own tokens and sign-ins without reading GET /config", async () => {
@@ -43,5 +48,8 @@ describe("Settings, Agents & API (#542)", () => {
     expect(screen.queryByText("Privacy with agents")).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Security" })).not.toBeInTheDocument();
     expect(apiMock.GET).not.toHaveBeenCalledWith("/config");
+    // The network report is admin configuration (#632).
+    expect(screen.queryByRole("heading", { name: "How Purser is reached" })).not.toBeInTheDocument();
+    expect(apiMock.GET).not.toHaveBeenCalledWith("/config/network");
   });
 });

@@ -53,14 +53,15 @@ default. The few that answer without a token are deliberate: first-run setup
 
 ## What an agent sees
 
-You choose the agent, its access scopes and your disclosure defaults. Data
-returned to an agent may enter its model's context. Two MCP settings (Settings,
-Agents & API, off by default) omit purchase details and individual amounts. An
-agent can request those fields per call; the audit log records those requests.
-These defaults do not restrict which fields a readable tool can disclose.
-External account identifiers are omitted by default from MCP responses.
-See [Privacy and agents](../../explanation/privacy-and-agents/) for the
-settings and the differences between MCP, REST and browser access.
+You choose the agent and its access scopes. Data an agent reads into its
+conversation may reach its model provider. On any MCP tool call or REST read,
+the agent can ask Purser to leave out payee names, descriptions or individual
+amounts the question does not need (`withhold`); nothing is left out unless it
+asks. This is a privacy aid, not an access control: scopes decide what a token
+can read. External account identifiers are omitted by default from MCP
+responses. The audit log records, for every call, whether privacy was used
+and whether the answer returned identifiable data. See
+[Privacy and agents](../../explanation/privacy-and-agents/) for how it works.
 
 ## No self-escalation for non-admin tokens
 
@@ -94,8 +95,9 @@ under **Technical details**, even when no category was assigned.
 Filters run on the server across the retained history, not just loaded entries.
 Use **Load older entries** to continue, or **Export CSV/JSON** for every matching
 entry. Filter URLs can be bookmarked. Dates show the browser's local timezone;
-export timestamps include their UTC offset. Account, data-type and extra-field
-filters require recorded evidence, so they cannot match older entries that lack it.
+export timestamps include their UTC offset. Account, data-type, privacy and
+external-identifier filters require recorded evidence, so they cannot match older
+entries that lack it.
 
 New records contain a field inventory and counts, not a copy of financial values.
 An inventory can be partial when a response includes free text or exceeds inventory

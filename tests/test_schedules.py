@@ -2,7 +2,7 @@
 
 import itertools
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -13,19 +13,13 @@ from sqlalchemy import Engine, text
 
 from purser import crypto
 from purser.core import forecasting as core_forecasting
+from tests.conftest import today
 
 
 def _near_term_bymonthday() -> int:
     """A BYMONTHDAY whose next two monthly occurrences always fit the 60-day
     materialization horizon, and whose first one falls in the digest's
-    seven-day bills window, regardless of the date or time zone the suite
-    runs in.
-
-    "Today" is the later of the two dates the code under test reads: the
-    schedule materializer anchors on the process-local date
-    (``date.today()``), while ``digest.whats_new`` (and net worth) read the
-    UTC date (#465). The two differ for part of every day outside UTC; the
-    later one keeps the first occurrence on or after both.
+    seven-day bills window, regardless of the date the suite runs on.
 
     Day of (today + 3), clamped to <= 28 so the day exists in every month.
     The first occurrence lands in [today, today+3] (clamping day 29-31 down
@@ -34,8 +28,7 @@ def _near_term_bymonthday() -> int:
     days failed deterministically when run just after the rule day: the
     first occurrence slid ~30 days out and the second past the horizon.
     """
-    today = max(date.today(), datetime.now(UTC).date())
-    return min((today + timedelta(days=3)).day, 28)
+    return min((today() + timedelta(days=3)).day, 28)
 
 
 def _monthly_charge_dates(today: date, count: int = 3) -> list[date]:
@@ -317,8 +310,8 @@ class TestSchedulesApi:
                 text("INSERT INTO payees (name_enc, name_bidx) VALUES (:ne, :nb) RETURNING id"),
                 {"ne": crypto.encrypt("Netflix"), "nb": crypto.blind_index("netflix")},
             ).scalar_one()
-            # Detection reads the process-local date (schedules.detect_schedules).
-            for d in _monthly_charge_dates(date.today()):
+            # Detection reads the ledger day (schedules.detect_schedules).
+            for d in _monthly_charge_dates(today()):
                 tx_id = conn.execute(
                     text(
                         "INSERT INTO transactions"
@@ -392,7 +385,7 @@ class TestSchedulesApi:
     ) -> None:
         # Biweekly with no BYDAY: without a persisted anchor the phase drifted
         # to whatever day the row was created (#221). Anchor 3 days ago.
-        anchor = date.today() - timedelta(days=3)
+        anchor = today() - timedelta(days=3)
         resp = client.post(
             "/schedules",
             json={
@@ -554,12 +547,12 @@ class TestSchedulesApi:
                 "account": "assets.checking",
                 "category": "income.salary",
                 "amount": "1000.00",
-                "date": date.today().isoformat(),
+                "date": today().isoformat(),
                 "status": "posted",
             },
         )
         # Mortgage on the 19th of next month; paycheck the day after.
-        next_month = (date.today().replace(day=1) + timedelta(days=32)).replace(day=1)
+        next_month = (today().replace(day=1) + timedelta(days=32)).replace(day=1)
         mortgage_day = next_month.replace(day=19)
         payday = next_month.replace(day=20)
         for amount, day, category, label in [
@@ -578,7 +571,7 @@ class TestSchedulesApi:
                 },
             )
 
-        days = (payday - date.today()).days + 3
+        days = (payday - today()).days + 3
         forecast = client.get(
             "/forecast", params={"account": "assets.checking", "days": days}
         ).json()
@@ -906,7 +899,7 @@ class TestTransferSchedules:
                 "account": "assets.checking",
                 "category": "income.salary",
                 "amount": "2000.00",
-                "date": date.today().isoformat(),
+                "date": today().isoformat(),
                 "status": "posted",
             },
         )
@@ -951,7 +944,7 @@ class TestTransferSchedules:
 
         # No double count: the payment is in the opening balance (posted) and
         # the expected is gone, so the forecast holds 1,500 through the due date.
-        days = (due - date.today()).days + 2
+        days = (due - today()).days + 2
         forecast = client.get(
             "/forecast", params={"account": "assets.checking", "days": max(days, 1)}
         ).json()
@@ -992,7 +985,7 @@ class TestTransferSchedules:
                     "account": "liabilities.citicard",
                     "category": "expenses.dining",
                     "amount": amount,
-                    "date": date.today().isoformat(),
+                    "date": today().isoformat(),
                     "status": "posted",
                 },
             )
@@ -1010,7 +1003,7 @@ class TestTransferSchedules:
                 "account": "liabilities.citicard",
                 "category": "expenses.dining",
                 "amount": "-60.00",
-                "date": date.today().isoformat(),
+                "date": today().isoformat(),
                 "status": "posted",
             },
         )
@@ -1051,7 +1044,7 @@ def _card_purchase(client: TestClient, amount: str, card: str = "liabilities.cit
             "account": card,
             "category": "expenses.housing",
             "amount": amount,
-            "date": date.today().isoformat(),
+            "date": today().isoformat(),
             "status": "posted",
         },
     )
@@ -1096,7 +1089,7 @@ def _transfer_create(
             from_account_ref="assets.checking",
             to_account_ref="liabilities.citicard",
             amount=Decimal(amount),
-            date=date.today(),
+            date=today(),
             description="Manual transfer",
             requested_status=core.Status(status),
             origin=core.Origin.RULE,
@@ -1209,7 +1202,7 @@ class TestTransferInstanceOverride:
                 "from_account": "assets.checking",
                 "to_account": "liabilities.citicard",
                 "amount": "100.00",
-                "date": date.today().isoformat(),
+                "date": today().isoformat(),
                 "status": "pending",
             },
         )
@@ -1642,7 +1635,7 @@ class TestResetInstance:
                 "account": "assets.checking",
                 "category": "expenses.housing",
                 "amount": "-5.00",
-                "date": date.today().isoformat(),
+                "date": today().isoformat(),
                 "status": "posted",
             },
         ).json()
@@ -1841,7 +1834,7 @@ class TestForecastProjection:
         forecast = self._forecast(client, "assets.checking", 180)
         events = [(d["date"], e) for d in forecast["days"] for e in d["events"]]  # type: ignore[index]
         assert len(events) >= 6  # six monthly occurrences over 180 days
-        horizon_edge = (date.today() + timedelta(days=60)).isoformat()
+        horizon_edge = (today() + timedelta(days=60)).isoformat()
         near = [e for d, e in events if d <= horizon_edge]
         far = [e for d, e in events if d > horizon_edge]
         assert near and all(e["projected"] is False and e["transaction_id"] for e in near)
@@ -1883,13 +1876,13 @@ class TestForecastProjection:
         instances = client.get(f"/schedules/{schedule['id']}").json()["instances"]
         skipped, moved = instances[1], instances[2]
         client.post(f"/transactions/{skipped['transaction_id']}/void")
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        yesterday = (today() - timedelta(days=1)).isoformat()
         client.patch(f"/transactions/{moved['transaction_id']}", json={"date": yesterday})
 
         forecast = self._forecast(client, "assets.checking", 90)
         by_date = {d["date"]: d["events"] for d in forecast["days"]}  # type: ignore[index]
         assert by_date[skipped["date"]] == []  # a skip never comes back, projected or not
-        today_events = by_date[date.today().isoformat()]
+        today_events = by_date[today().isoformat()]
         assert any(
             e["overdue"] is True and e["transaction_id"] == moved["transaction_id"]
             for e in today_events
@@ -1958,14 +1951,13 @@ class TestMatchedActuals:
         ).json()
         instances = client.get(f"/schedules/{schedule['id']}").json()["instances"]
         assert len(instances) >= 4
-        today = date.today()
 
         def bank(amount: str, days_ago: int, status: str = "posted") -> str:
             return _import_row(
                 migrated_engine,
                 account_path="assets.checking",
                 amount=amount,
-                on=today - timedelta(days=days_ago),
+                on=today() - timedelta(days=days_ago),
                 payee="City Utilities",
                 description="CITY UTILITIES",
                 status=status,
@@ -1992,15 +1984,15 @@ class TestMatchedActuals:
         # The successor's amount, not the superseded pending's; a still-pending
         # row and a dropped one count for nothing — posted amount wins.
         assert self._actuals(schedule["id"]) == [
-            (Decimal("-85.00"), today - timedelta(days=9)),
-            (Decimal("-50.00"), today - timedelta(days=40)),
+            (Decimal("-85.00"), today() - timedelta(days=9)),
+            (Decimal("-50.00"), today() - timedelta(days=40)),
         ]
         # A correction moves the actual to the replacement row.
         fixed = client.patch(f"/transactions/{posted}", json={"amount": "-55.00"})
         assert fixed.status_code == 200, fixed.text
         assert self._actuals(schedule["id"])[-1] == (
             Decimal("-55.00"),
-            today - timedelta(days=40),
+            today() - timedelta(days=40),
         )
         # And the estimate ('last') is the newest posted actual.
         client.post("/schedules/materialize")
@@ -2089,7 +2081,7 @@ class TestProposedMatchSettlement:
                 "account": account,
                 "category": "income.salary",
                 "amount": amount,
-                "date": (date.today() - timedelta(days=20)).isoformat(),
+                "date": (today() - timedelta(days=20)).isoformat(),
                 "status": "posted",
             },
         )
@@ -2128,13 +2120,12 @@ class TestProposedMatchSettlement:
         posted row already in the balance does not land; rejecting the
         proposal lands it on day 0 again. The proposal is the matcher's own."""
         self._opening(client, "assets.checking", "1000.00")
-        today = date.today()
-        expected_id = self._expected(client, "-180.00", today - timedelta(days=4))
+        expected_id = self._expected(client, "-180.00", today() - timedelta(days=4))
         posted_id = _import_row(
             migrated_engine,
             account_path="assets.checking",
             amount="-95.00",  # far-off amount, close payee: the review tier
-            on=today - timedelta(days=1),
+            on=today() - timedelta(days=1),
             payee="City Utilities Pmt",
             description="CITY UTILITIES PMT",
         )
@@ -2157,7 +2148,7 @@ class TestProposedMatchSettlement:
         landed = self._forecast(client, "assets.checking")
         (event,) = self._events(landed)
         assert event["transaction_id"] == expected_id and event["overdue"] is True
-        assert landed["days"][0]["date"] == today.isoformat()  # type: ignore[index]
+        assert landed["days"][0]["date"] == today().isoformat()  # type: ignore[index]
         assert Decimal(str(landed["days"][0]["balance"])) == Decimal("725.00")  # type: ignore[index]
         assert landed["coverage"]["matches_pending"] == 0  # type: ignore[index]
         assert landed["coverage"]["matches_pending_net"] is None  # type: ignore[index]
@@ -2165,13 +2156,12 @@ class TestProposedMatchSettlement:
     def test_confirmed_proposal_voids_the_instance(
         self, seeded: None, client: TestClient, migrated_engine: Engine
     ) -> None:
-        today = date.today()
-        expected_id = self._expected(client, "-200.00", today - timedelta(days=3))
+        expected_id = self._expected(client, "-200.00", today() - timedelta(days=3))
         posted_id = _import_row(
             migrated_engine,
             account_path="assets.checking",
             amount="-200.00",
-            on=today - timedelta(days=5),
+            on=today() - timedelta(days=5),
             payee="Cleaning Service Bill O",
             description="CLEANING SERVICE BILL O",
         )
@@ -2189,13 +2179,12 @@ class TestProposedMatchSettlement:
         """Not only overdue: the match window is ±5 days, so an instance due
         in three days can already hold a proposal against a future-dated
         pending row — which the opening balance includes."""
-        today = date.today()
-        expected_id = self._expected(client, "-150.00", today + timedelta(days=3))
+        expected_id = self._expected(client, "-150.00", today() + timedelta(days=3))
         pending_id = _import_row(
             migrated_engine,
             account_path="assets.checking",
             amount="-150.00",
-            on=today + timedelta(days=2),
+            on=today() + timedelta(days=2),
             payee="Eversource",
             description="EVERSOURCE",
             status="pending",
@@ -2210,13 +2199,12 @@ class TestProposedMatchSettlement:
     def test_variance_is_never_carried_as_a_remainder(
         self, seeded: None, client: TestClient, migrated_engine: Engine
     ) -> None:
-        today = date.today()
-        expected_id = self._expected(client, "-550.00", today - timedelta(days=2))
+        expected_id = self._expected(client, "-550.00", today() - timedelta(days=2))
         posted_id = _import_row(
             migrated_engine,
             account_path="assets.checking",
             amount="-500.00",
-            on=today - timedelta(days=2),
+            on=today() - timedelta(days=2),
             payee="B and B",
             description="B AND B",
         )
@@ -2269,13 +2257,12 @@ class TestProposedMatchSettlement:
         from purser import db, matching
         from purser.ledger import resolve_account
 
-        today = date.today()
-        expected_id = self._expected(client, "-60.00", today + timedelta(days=1))
+        expected_id = self._expected(client, "-60.00", today() + timedelta(days=1))
         pending_id = _import_row(
             migrated_engine,
             account_path="assets.checking",
             amount="-60.00",
-            on=today,
+            on=today(),
             payee="Gym",
             description="GYM",
             status="pending",
@@ -2304,20 +2291,19 @@ class TestProposedMatchSettlement:
         loan = client.post(
             "/accounts", json={"name": "Mortgage", "type": "loan", "path": "liabilities.mortgage"}
         ).json()
-        today = date.today()
         valued = client.post(
             f"/accounts/{loan['id']}/valuations",
-            json={"as_of": (today - timedelta(days=1)).isoformat(), "value": "-90000.00"},
+            json={"as_of": (today() - timedelta(days=1)).isoformat(), "value": "-90000.00"},
         )
         assert valued.status_code == 201, valued.text
         expected_id = self._expected(
-            client, "-400.00", today - timedelta(days=1), account="liabilities.mortgage"
+            client, "-400.00", today() - timedelta(days=1), account="liabilities.mortgage"
         )
         posted_id = _import_row(
             migrated_engine,
             account_path="liabilities.mortgage",
             amount="-400.00",
-            on=today - timedelta(days=1),
+            on=today() - timedelta(days=1),
             payee="Mortgage Servicer",
             description="MORTGAGE SERVICER",
         )
@@ -2341,15 +2327,14 @@ class TestProposedMatchSettlement:
         )
         assert resp.status_code == 201, resp.text
         self._opening(client, "assets.bills", "300.00")
-        today = date.today()
         expected_id = self._expected(
-            client, "-250.00", today - timedelta(days=2), account="assets.bills"
+            client, "-250.00", today() - timedelta(days=2), account="assets.bills"
         )
         posted_id = _import_row(
             migrated_engine,
             account_path="assets.bills",
             amount="-250.00",
-            on=today - timedelta(days=3),
+            on=today() - timedelta(days=3),
             payee="Lakeside Sewer",
             description="LAKESIDE SEWER",
         )
@@ -2400,7 +2385,6 @@ def test_every_bank_row_is_counted_exactly_once(
 
     session = db_session
     assert isinstance(session, Session)
-    today = date.today()
     try:
         suffix = uuid.uuid4().hex[:8]
         account = ledger.create_account(
@@ -2432,7 +2416,7 @@ def test_every_bank_row_is_counted_exactly_once(
         settled_ids: set[uuid.UUID] = set()
         settled_net = Decimal(0)
         for cents, offset, bank, proposal, variance in cases:
-            on = today + timedelta(days=offset)
+            on = today() + timedelta(days=offset)
             expected = row(str(account.id), cents, on, core.Status.EXPECTED, core.Origin.HUMAN)
             bank_cents = cents + variance or cents
             bank_id = None

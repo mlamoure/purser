@@ -25,6 +25,7 @@ const savings: Discovered = {
   balance: null,
   mapped_account_id: "a-2",
   mapped_account_path: "assets.rainy_day",
+  mapped_account_name: "Rainy Day Fund",
   drift_basis_pinned: false,
   ambiguous: false,
     ignored: false,
@@ -46,7 +47,9 @@ describe("MapAccountsStep", () => {
     expect(within(unmapped).getByText("unmapped")).toBeInTheDocument();
     expect(within(unmapped).getByText("1250.00")).toBeInTheDocument();
     const mapped = rowOf("ext-2"); // no name: the external id stands in
-    expect(within(mapped).getByText("assets.rainy_day")).toBeInTheDocument();
+    // The Purser account by its name (#552), never its path.
+    expect(within(mapped).getByText("Rainy Day Fund")).toBeInTheDocument();
+    expect(within(mapped).queryByText("assets.rainy_day")).not.toBeInTheDocument();
     expect(within(mapped).queryByRole("button", { name: "Map" })).not.toBeInTheDocument();
 
     await user.click(within(unmapped).getByRole("button", { name: "Map" }));
@@ -60,6 +63,7 @@ describe("MapAccountsStep", () => {
           path: "assets.everyday_checking",
           currency: "USD",
         },
+        starting_balance: true,
       }),
     );
     // The form closes once the mapping succeeds.

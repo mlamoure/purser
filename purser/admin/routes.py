@@ -510,9 +510,13 @@ class AuditOut(BaseModel):
     kind: str  # read | write (call rows) | change (per-entity before/after)
     request_id: uuid.UUID | None  # groups a call row with its change rows
     detail: dict[str, object] | None  # call rows only: method/tool, status, ms…
-    # MCP call rows only: fields the agent included beyond the user's privacy
-    # defaults (#437); null when it disclosed nothing extra.
+    # MCP call rows only: external identifiers the call asked for with include
+    # and received (#437, #613); null when it disclosed nothing extra.
     disclosed: list[str] | None = None
+    # Integration call rows (#613): fields the call asked to withhold, and the
+    # payee/description/amount fields its answer returned with real values.
+    privacy_requested: list[str] | None = None
+    identifiable: list[str] | None = None
 
 
 class AuditPage(BaseModel):
@@ -551,7 +555,13 @@ def list_audit(
     since: datetime | None = None,
     until: datetime | None = None,
     disclosed: Annotated[
-        bool, Query(description="only calls that disclosed fields beyond the privacy defaults")
+        bool, Query(description="only calls that asked for external identifiers and got them")
+    ] = False,
+    privacy_requested: Annotated[
+        bool, Query(description="only calls that asked to withhold fields (privacy used)")
+    ] = False,
+    identifiable: Annotated[
+        bool, Query(description="only calls whose answer returned payees, descriptions or amounts")
     ] = False,
     order: Annotated[str, Query(pattern="^(asc|desc)$")] = "desc",
     cursor: str | None = None,
@@ -570,6 +580,8 @@ def list_audit(
         since=since,
         until=until,
         disclosed=disclosed,
+        privacy_requested=privacy_requested,
+        identifiable=identifiable,
     )
     if cursor is not None:
         decoded = audit.decode_cursor(cursor)

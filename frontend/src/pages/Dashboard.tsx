@@ -5,7 +5,7 @@ import { api, errorDetail } from "../lib/api";
 import { formatMoney, negateMoney } from "../lib/money";
 import { formatDate } from "../lib/dates";
 import { Card, CardTitle, ErrorText } from "../components/ui";
-import { AccountsTable, NO_ACCOUNTS, useAccounts } from "../components/AccountsTable";
+import { GroupedAccountsTable, NO_ACCOUNTS, useAccounts } from "../components/AccountsTable";
 import { QueryState } from "../components/QueryState";
 import NeedsAttention from "../components/NeedsAttention";
 import FirstRunChecklist, { NewBankAccounts } from "../components/FirstRunChecklist";
@@ -72,10 +72,10 @@ export default function Dashboard() {
             All accounts
           </Link>
         </div>
-        {/* A compact summary (#542): the Accounts page has types, paths and
-            the hidden/closed toggles. */}
+        {/* A compact summary (#542), grouped by kind with subtotals (#593):
+            the Accounts page has types, paths and the hidden/closed toggles. */}
         <QueryState query={accounts} what="accounts" empty={NO_ACCOUNTS}>
-          {(rows) => <AccountsTable rows={rows} compact />}
+          {(rows) => <GroupedAccountsTable rows={rows} />}
         </QueryState>
       </Card>
     </div>

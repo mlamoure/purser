@@ -9,12 +9,16 @@ import { cn, overrideBody } from "../lib/utils";
 import { formatMoney, moneyEditText, moneySign, negateMoney } from "../lib/money";
 import { addDays, formatDate } from "../lib/dates";
 import { Badge, Button, Card, ErrorText, Input, Table, Td, Th } from "../components/ui";
-import CategorySelect from "../components/CategorySelect";
+import CategorySelect, { SECURITIES_TRADE_VALUE } from "../components/CategorySelect";
+import SplitEditor from "../components/SplitEditor";
 import { categoriesQuery, categoryValueLabel, namesFrom, usePathNames } from "../lib/names";
 import { QueryState } from "../components/QueryState";
+import { SearchHelp } from "../components/SearchHelp";
 import PositionsPanel from "./Positions";
 import { AccountIcon } from "../components/AccountIcon";
 import { AssetPanel } from "../components/AssetPanel";
+import { BalanceHistoryChart } from "../components/BalanceHistoryChart";
+import { HoldingsCard } from "../components/HoldingsCard";
 import type { components } from "../api/schema";
 
 type TransactionOut = components["schemas"]["TransactionOut"];
@@ -135,7 +139,26 @@ export default function AccountRegister() {
   return (
     <div className="space-y-6">
       <AccountHeader account={account.data} />
+      {account.data && !account.data.is_virtual && (
+        <BalanceHistoryChart
+          account={account.data}
+          onPickDate={(day) => {
+            // A day on the chart opens that day in the register (#594).
+            setTab("register");
+            setStart(day);
+            setEnd(day);
+            setOffset(0);
+          }}
+        />
+      )}
       {account.data?.type === "property" && <AssetPanel account={account.data} />}
+      {account.data?.type === "brokerage" && (
+        <HoldingsCard
+          accountId={account.data.id}
+          currency={account.data.currency}
+          onEditPositions={manualHoldings ? () => setTab("positions") : undefined}
+        />
+      )}
 
       {manualHoldings && (
         <div className="flex gap-1 border-b border-border" role="tablist">
@@ -166,16 +189,17 @@ export default function AccountRegister() {
       ) : (
         <>
           <div className="flex flex-wrap items-end gap-3">
-            <div className="grow">
+            <div className="flex grow gap-1">
               <Input
-                aria-label="Search description"
-                placeholder="Search description…"
+                aria-label="Search transactions"
+                placeholder="Search payee, description, memo…"
                 value={q}
                 onChange={(e) => {
                   setQ(e.target.value);
                   setOffset(0);
                 }}
               />
+              <SearchHelp />
             </div>
             <select
               className={selectClass}
@@ -303,6 +327,10 @@ export default function AccountRegister() {
                         key={t.id}
                         t={t}
                         accountPath={account.data?.path ?? ""}
+                        brokerageFeed={
+                          account.data?.type === "brokerage" &&
+                          account.data?.holdings_source === "feed"
+                        }
                         currency={currency}
                         candidates={candidates.data ?? []}
                         proposed={proposed.data ?? []}
@@ -368,57 +396,35 @@ export default function AccountRegister() {
   );
 }
 
-/** A split transaction's category legs (issue #274, decision 87): read-only
- * in v1, so the row shows "Split (n)" instead of a category picker; the legs
- * load from the detail's postings when opened, in posting sign (a category
- * leg of +80.00 is 80.00 of spending). */
-export function SplitLines({
-  txId,
-  count,
-  realPath,
+/** A split transaction's cell (issues #274 and #590, decisions 87 and 118):
+ * "Split (n)" — n category and account lines — opens the split editor. Seen
+ * from the register of an account one of its lines books to, the row reads
+ * "Split from <account>": the split belongs to that other account's row. */
+export function SplitCell({
+  t,
+  accountPath,
+  open,
+  onToggle,
 }: {
-  txId: string;
-  count: number;
-  realPath: string | null;
+  t: TransactionOut;
+  accountPath: string;
+  open: boolean;
+  onToggle: () => void;
 }) {
-  const [open, setOpen] = useState(false);
   const pathName = usePathNames();
-  const detail = useQuery({
-    queryKey: ["transaction", txId],
-    queryFn: async () => {
-      const { data, error } = await api.GET("/transactions/{tx_id}", {
-        params: { path: { tx_id: txId } },
-      });
-      if (error) throw new Error(errorDetail(error));
-      return data;
-    },
-    enabled: open,
-  });
-  // Every leg but the one real leg is a category line.
-  const legs = (detail.data?.postings ?? []).filter((p) => p.account_path !== realPath);
+  const elsewhere = t.split_account_path && t.split_account_path !== accountPath;
   return (
-    <span className="flex flex-col gap-1">
-      <Button
-        size="sm"
-        variant="outline"
-        title="A split row: one bank amount across several categories. Split rows are read-only."
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-      >
-        Split ({count})
-      </Button>
-      {open && (
-        <ul className="space-y-0.5 text-xs text-muted-foreground">
-          {legs.map((p) => (
-            <li key={p.id} className="flex gap-2">
-              <span className="font-mono">{formatMoney(p.amount, { currency: p.currency })}</span>
-              <span className="max-w-40 truncate">{pathName(p.account_path)}</span>
-              {p.memo ? <span className="max-w-32 truncate">· {p.memo}</span> : null}
-            </li>
-          ))}
-        </ul>
-      )}
-    </span>
+    <Button
+      size="sm"
+      variant="outline"
+      title="A split row: one bank amount across categories and accounts. Open to edit its lines."
+      aria-expanded={open}
+      onClick={onToggle}
+    >
+      {elsewhere
+        ? `Split from ${pathName(t.split_account_path)}`
+        : `Split (${t.split_lines})`}
+    </Button>
   );
 }
 
@@ -492,9 +498,22 @@ function ValueChangeCell({ t }: { t: TransactionOut }) {
   );
 }
 
+/** The PATCH body for a category cell value: "Securities trade" is sent as
+ * `securities_trade: true` (#591, decision 119), anything else as a category
+ * (with the register account, the side a transfer keeps). */
+export function categoryBody(
+  value: string,
+  accountPath: string,
+): { securities_trade: true } | { category: string; account: string } {
+  return value === SECURITIES_TRADE_VALUE
+    ? { securities_trade: true }
+    : { category: value, account: accountPath };
+}
+
 export function RegisterRow({
   t,
   accountPath,
+  brokerageFeed = false,
   currency,
   candidates,
   proposed,
@@ -503,6 +522,9 @@ export function RegisterRow({
   onCorrected,
   onUndone,
 }: {
+  /** The register is a brokerage account whose holdings come from the feed:
+   * its category picker offers "Securities trade" (#591, decision 119). */
+  brokerageFeed?: boolean;
   selection?: React.ReactNode;
   /** This row is the replacement of a posted row recategorized in this
    * session; the value is the category cell it had before (#541). */
@@ -531,17 +553,19 @@ export function RegisterRow({
   // reversal and a corrected replacement. That is the normal way to fix a
   // category, so it asks nothing first (#541); the replacement row then
   // offers "Corrected · Undo".
+  const [ruleProposed, setRuleProposed] = useState(false);
   const recategorize = useMutation({
     mutationFn: async (category: string) => {
       const { data, error: err } = await api.PATCH("/transactions/{tx_id}", {
         params: { path: { tx_id: t.id } },
-        body: { category, account: accountPath },
+        body: categoryBody(category, accountPath),
       });
       if (err) throw new Error(errorDetail(err));
       return data;
     },
     onSuccess: (data) => {
       setError(null);
+      setRuleProposed(!!data?.suggestion_id);
       if (t.status === "posted" && data?.id) onCorrected?.(data.id, categoryValue);
       refresh();
     },
@@ -554,7 +578,7 @@ export function RegisterRow({
     mutationFn: async (previous: string) => {
       const { error: err } = await api.PATCH("/transactions/{tx_id}", {
         params: { path: { tx_id: t.id } },
-        body: { category: previous, account: accountPath },
+        body: categoryBody(previous, accountPath),
       });
       if (err) throw new Error(errorDetail(err));
     },
@@ -674,7 +698,9 @@ export function RegisterRow({
 
   const categoryValue = t.is_transfer
     ? `[${t.transfer_account_path ?? ""}]`
-    : (t.category_path ?? "");
+    : t.securities_trade
+      ? SECURITIES_TRADE_VALUE
+      : (t.category_path ?? "");
   const autoLinked = t.is_transfer && t.origin === "system";
   // A split loan payment (DESIGN §3.3, decision 62) is a transfer that ALSO
   // books an interest/fee remainder to a category. The select shows the
@@ -686,6 +712,17 @@ export function RegisterRow({
       : null;
 
   const onCategoryChange = (next: string) => recategorize.mutate(next);
+  // Splits (#590): a bank pending is split once it posts (the posted row
+  // replaces it); transfers, trade cash and asset value entries never split.
+  const [splitting, setSplitting] = useState(false);
+  const canSplit =
+    t.split_lines === 0 &&
+    !t.is_transfer &&
+    !t.securities_trade &&
+    !t.value_change &&
+    !t.starting_balance &&
+    moneySign(t.amount) !== 0 &&
+    (t.status === "posted" || (t.status === "pending" && t.origin !== "import"));
 
   return (
     <>
@@ -711,8 +748,27 @@ export function RegisterRow({
               // in value (equity.revaluation) or money put in (equity.capital),
               // corrected by reversing it, so it has no category to pick.
               <ValueChangeCell t={t} />
-            ) : t.securities_trade ? (
-              // A securities trade's cash (#390, decision 103): booked to the
+            ) : t.starting_balance ? (
+              // The account's starting balance from the bank (#585, decision
+              // 123): booked to the system account equity.opening_balances
+              // and kept in step by Purser, so it has no category to pick.
+              <span
+                className="text-sm text-muted-foreground"
+                title="What the account held before its first transaction, taken from the balance the bank reported. It is neither spending nor income. Purser lowers it by itself when older history is imported; to correct the account's balance, reconcile it to a statement."
+              >
+                Starting balance
+              </span>
+            ) : t.balance_adjustment ? (
+              // Purser's post-sync balance true-up (#591, decision 119): cash
+              // put in step with the broker's balance less its holdings.
+              <span
+                className="text-sm text-muted-foreground"
+                title="Purser posted this after a sync so the account's cash plus its holdings equal the balance the broker reported (for example a buy the broker never sent as a row). It is neither spending nor income. Turn the balance true-up off in the account's settings to stop future ones."
+              >
+                Balance adjustment (invested cash)
+              </span>
+            ) : t.securities_trade && t.securities_trade_locked ? (
+              // A recorded trade's cash (#390, decision 103): booked to the
               // system account equity.securities, it moves only with its
               // trade, so it has no category to pick.
               <span
@@ -722,11 +778,18 @@ export function RegisterRow({
                 Securities trade
               </span>
             ) : t.split_lines > 0 ? (
-              <SplitLines txId={t.id} count={t.split_lines} realPath={t.account_path} />
+              <SplitCell
+                t={t}
+                accountPath={accountPath}
+                open={splitting}
+                onToggle={() => setSplitting((v) => !v)}
+              />
             ) : (
               <CategorySelect
                 value={categoryValue}
                 currentAccountPath={accountPath}
+                direction={moneySign(t.amount) > 0 ? "credit" : "debit"}
+                securitiesTrade={(brokerageFeed && !t.is_transfer) || t.securities_trade}
                 onChange={onCategoryChange}
                 disabled={recategorize.isPending || undoCorrection.isPending}
                 aria-label={`Category for ${t.payee || t.description || `the ${formatDate(t.date)} transaction`}`}
@@ -746,11 +809,20 @@ export function RegisterRow({
                 type="button"
                 className="font-medium text-primary hover:underline disabled:opacity-50"
                 disabled={undoCorrection.isPending}
-                aria-label={`Undo: back to ${categoryValueLabel(correctedFrom, pathName)}`}
+                aria-label={`Undo: back to ${categoryValueLabel(correctedFrom, pathName, moneySign(t.amount) > 0 ? "credit" : "debit")}`}
                 onClick={() => undoCorrection.mutate(correctedFrom)}
               >
                 Undo
               </button>
+            </span>
+          )}
+          {ruleProposed && (
+            <span className="mt-1 block text-xs text-muted-foreground">
+              Marked as a securities trade. A rule for rows like this one is waiting in{" "}
+              <Link to="/" className="underline">
+                Needs attention
+              </Link>
+              .
             </span>
           )}
           {splitRemainder && (
@@ -765,7 +837,10 @@ export function RegisterRow({
           )}
         </Td>
         <Td>
-          <span className="flex gap-1">
+          {/* Wrap, as the Actions cell does: in one line a row's badges
+              (posted · auto-linked · scheduled …) widened the column past the
+              table's edge and clipped the last one (#556). */}
+          <span className="flex flex-wrap gap-1">
             <Badge
               variant={
                 t.status === "posted" ? "green" : t.status === "pending" ? "amber" : "default"
@@ -840,6 +915,16 @@ export function RegisterRow({
                   ✗
                 </Button>
               </>
+            )}
+            {canSplit && !splitting && (
+              <Button
+                size="sm"
+                variant="outline"
+                title="Spread this amount over several categories or accounts"
+                onClick={() => setSplitting(true)}
+              >
+                Split…
+              </Button>
             )}
             {t.has_linked_originals && (
               <Button
@@ -916,6 +1001,22 @@ export function RegisterRow({
           </span>
         </Td>
       </tr>
+      {splitting && (
+        <tr>
+          <Td colSpan={selection ? 9 : 8}>
+            <SplitEditor
+              txId={t.id}
+              isSplit={t.split_lines > 0}
+              amount={t.amount}
+              accountPath={accountPath}
+              category={t.category_path}
+              currency={currency}
+              onClose={() => setSplitting(false)}
+              onDone={refresh}
+            />
+          </Td>
+        </tr>
+      )}
       {isInstance && picking && (
         <tr>
           <Td colSpan={selection ? 9 : 8}>
@@ -973,7 +1074,7 @@ function PaidPicker({
       // A trade's cash moves only with its trade (#390, decision 103): it
       // never settles a bill, so it is never offered here.
       return (data?.items ?? []).filter(
-        (c) => !c.schedule_id && !c.securities_trade && !c.value_change,
+        (c) => !c.schedule_id && !c.securities_trade && !c.value_change && !c.starting_balance,
       );
     },
   });
@@ -1186,6 +1287,18 @@ function AccountHeader({ account }: { account: AccountOut | undefined }) {
     onError: (e) => setError(e.message),
   });
 
+  const setBalanceTrueUp = useMutation({
+    mutationFn: async (balance_true_up: boolean) => {
+      const { error: err } = await api.PATCH("/accounts/{account_id}", {
+        params: { path: { account_id: account!.id } },
+        body: { balance_true_up },
+      });
+      if (err) throw new Error(errorDetail(err));
+    },
+    onSuccess: invalidate,
+    onError: (e) => setError(e.message),
+  });
+
   const reopen = useMutation({
     mutationFn: async () => {
       const { error: err } = await api.POST("/accounts/{account_id}/reopen", {
@@ -1314,6 +1427,20 @@ function AccountHeader({ account }: { account: AccountOut | undefined }) {
                   <option value="feed">from the feed</option>
                   <option value="manual">tracked by hand</option>
                 </select>
+              </label>
+            )}
+            {account.type === "brokerage" && account.holdings_source === "feed" && (
+              <label
+                className="flex items-center gap-2 text-sm text-muted-foreground"
+                title="After each sync, Purser compares the balance the broker reported with this account's cash plus the holdings from the same sync. When they differ by a cent or more (a buy or sell the broker never sent as a row, say), it posts one 'Balance adjustment (invested cash)' entry for the difference, which is neither spending nor income. Turning this off stops future adjustments; past ones stay."
+              >
+                <input
+                  type="checkbox"
+                  checked={account.balance_true_up}
+                  disabled={setBalanceTrueUp.isPending}
+                  onChange={(e) => setBalanceTrueUp.mutate(e.target.checked)}
+                />
+                Keep cash in step with the broker's balance
               </label>
             )}
             {account.type === "brokerage" && isAdmin && account.holdings_source === "manual" && (

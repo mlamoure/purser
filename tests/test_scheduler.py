@@ -38,7 +38,10 @@ def test_build_scheduler_registers_exactly_the_builtin_jobs(
     # Never started, so no shutdown needed; pending jobs are still listed.
     job_ids = {job.id for job in scheduler.get_jobs()}
 
-    assert job_ids == EXPECTED_JOB_IDS
+    # Plus the scheduler's own one-off check for a sync missed while Purser
+    # was not running (#584); it is not part of the registry.
+    assert job_ids == EXPECTED_JOB_IDS | {scheduler_module.STARTUP_CHECK_JOB}
+    assert {job_id for job_id, _, _ in scheduler_module._JOBS} == EXPECTED_JOB_IDS
 
 
 def test_every_job_carries_the_misfire_grace_window(
@@ -264,3 +267,298 @@ class TestSyncTimeFollowsHouseholdZone:
             assert trigger.jitter == scheduler_module.SYNC_JITTER_SECONDS
         finally:
             scheduler.shutdown(wait=False)  # type: ignore[attr-defined]
+
+
+# --------------------------------------------------------------------------
+# Runs that never happened (#584, decision 124)
+# --------------------------------------------------------------------------
+
+from datetime import UTC, datetime, timedelta  # noqa: E402
+
+from apscheduler.events import EVENT_JOB_MISSED, JobExecutionEvent  # noqa: E402
+
+
+def _missed(job_id: str) -> JobExecutionEvent:
+    return JobExecutionEvent(EVENT_JOB_MISSED, job_id, "default", datetime.now(UTC))
+
+
+@pytest.fixture
+def recorded(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """A registry of stand-in jobs that record their runs, in the real
+    registry's order, with no live scheduler."""
+    ran: list[str] = []
+
+    def job(job_id: str):  # type: ignore[no-untyped-def]
+        def run() -> None:
+            ran.append(job_id)
+
+        return run
+
+    order = [
+        "feed.sync_daily",
+        "prices.fetch_daily",
+        "matching.run_daily",
+        "schedules.materialize_daily",
+        "webhooks.delivery",
+        "sessions.cleanup",
+    ]
+    monkeypatch.setattr(scheduler_module, "_JOBS", [(i, {"hour": 6}, job(i)) for i in order])
+    monkeypatch.setattr(scheduler_module, "_active", None)
+    monkeypatch.setattr(scheduler_module, "_missed", set())
+    return ran
+
+
+class TestMissedRuns:
+    def test_a_dropped_run_is_run_once_in_the_registry_order(self, recorded: list[str]) -> None:
+        # The host slept: the scheduler drops every due job as it wakes, in
+        # whatever order it reaches them, some more than once.
+        for job_id in ("matching.run_daily", "feed.sync_daily", "matching.run_daily"):
+            scheduler_module._on_job_missed(_missed(job_id))
+
+        scheduler_module.run_missed()
+        assert recorded == ["feed.sync_daily", "matching.run_daily"]
+        # Nothing is left to run a second time.
+        scheduler_module.run_missed()
+        assert recorded == ["feed.sync_daily", "matching.run_daily"]
+
+    def test_a_job_that_runs_again_within_the_hour_is_left_alone(self, recorded: list[str]) -> None:
+        for job_id in ("webhooks.delivery", "sessions.cleanup", "not.a.job"):
+            scheduler_module._on_job_missed(_missed(job_id))
+        scheduler_module.run_missed()
+        assert recorded == []
+
+    def test_one_failing_job_does_not_stop_the_rest(
+        self, recorded: list[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def boom() -> None:
+            raise RuntimeError("synthetic")
+
+        jobs = list(scheduler_module._JOBS)
+        jobs[0] = ("feed.sync_daily", {"hour": 6}, boom)
+        monkeypatch.setattr(scheduler_module, "_JOBS", jobs)
+        for job_id in ("feed.sync_daily", "matching.run_daily"):
+            scheduler_module._on_job_missed(_missed(job_id))
+        scheduler_module.run_missed()
+        assert recorded == ["matching.run_daily"]
+
+    def test_a_live_scheduler_schedules_one_catch_up_for_the_whole_wake(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(scheduler_module, "_JOBS", [])
+        scheduler = scheduler_module.build_scheduler()
+        scheduler.start(paused=True)
+        try:
+            for job_id in ("feed.sync_daily", "matching.run_daily", "networth.materialize_daily"):
+                scheduler_module._on_job_missed(_missed(job_id))
+            catch_ups = [j for j in scheduler.get_jobs() if j.id == scheduler_module.CATCH_UP_JOB]
+            assert len(catch_ups) == 1
+            assert catch_ups[0].func is scheduler_module.run_missed
+        finally:
+            scheduler.shutdown(wait=False)
+
+
+class TestSyncSlot:
+    def _daily(self, monkeypatch: pytest.MonkeyPatch, zone: str = "UTC") -> None:
+        monkeypatch.setattr(
+            scheduler_module, "_sync_trigger", lambda: ({"hour": 6, "minute": 30}, zone)
+        )
+
+    def test_the_latest_slot_at_or_before_a_moment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._daily(monkeypatch)
+        slot = scheduler_module.sync_slot_before
+        assert slot(datetime(2026, 3, 10, 9, 0, tzinfo=UTC)) == datetime(
+            2026, 3, 10, 6, 30, tzinfo=UTC
+        )
+        assert slot(datetime(2026, 3, 10, 6, 30, tzinfo=UTC)) == datetime(
+            2026, 3, 10, 6, 30, tzinfo=UTC
+        )
+        assert slot(datetime(2026, 3, 10, 6, 29, tzinfo=UTC)) == datetime(
+            2026, 3, 9, 6, 30, tzinfo=UTC
+        )
+
+    def test_the_daily_slot_reads_in_the_household_zone(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._daily(monkeypatch, zone="America/New_York")
+        # 06:30 in New York is 11:30 UTC in winter.
+        assert scheduler_module.sync_slot_before(
+            datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
+        ) == datetime(2026, 1, 15, 11, 30, tzinfo=UTC)
+
+    def test_an_interval_preset_names_several_slots_a_day(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            scheduler_module, "_sync_trigger", lambda: ({"hour": "*/6", "minute": 30}, "UTC")
+        )
+        assert scheduler_module.sync_slot_before(
+            datetime(2026, 3, 10, 13, 0, tzinfo=UTC)
+        ) == datetime(2026, 3, 10, 12, 30, tzinfo=UTC)
+
+
+class TestStartupCheck:
+    START = datetime(2026, 3, 10, 9, 0, tzinfo=UTC)
+
+    @pytest.fixture
+    def started(self, recorded: list[str], monkeypatch: pytest.MonkeyPatch) -> list[datetime]:
+        asked: list[datetime] = []
+        monkeypatch.setattr(scheduler_module, "_started_at", self.START)
+        monkeypatch.setattr(
+            scheduler_module, "_sync_trigger", lambda: ({"hour": 6, "minute": 30}, "UTC")
+        )
+        return asked
+
+    def _owed(self, monkeypatch: pytest.MonkeyPatch, asked: list[datetime], answer: bool) -> None:
+        import purser.feed.service as feed_service
+
+        def owed(slot: datetime) -> bool:
+            asked.append(slot)
+            return answer
+
+        monkeypatch.setattr(feed_service, "sync_owed_since", owed)
+
+    def test_a_slot_missed_while_down_runs_the_sync_and_its_matching_once(
+        self, recorded: list[str], started: list[datetime], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._owed(monkeypatch, started, True)
+        scheduler_module.check_sync_at_startup()
+        # It asked about the latest slot before the process started.
+        assert started == [datetime(2026, 3, 10, 6, 30, tzinfo=UTC)]
+        assert recorded == ["feed.sync_daily", "matching.run_daily"]
+
+    def test_nothing_runs_when_every_connection_was_tried_since_the_slot(
+        self, recorded: list[str], started: list[datetime], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._owed(monkeypatch, started, False)
+        scheduler_module.check_sync_at_startup()
+        assert recorded == []
+
+    def test_a_failing_check_never_raises(
+        self, recorded: list[str], started: list[datetime], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import purser.feed.service as feed_service
+
+        def boom(slot: datetime) -> bool:
+            raise RuntimeError("database unreachable")
+
+        monkeypatch.setattr(feed_service, "sync_owed_since", boom)
+        scheduler_module.check_sync_at_startup()
+        assert recorded == []
+
+    def test_the_check_is_scheduled_once_shortly_after_start(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(scheduler_module, "_JOBS", [])
+        now = datetime(2026, 3, 10, 9, 0, tzinfo=UTC)
+        monkeypatch.setattr(scheduler_module, "_utc_now", lambda: now)
+        scheduler = scheduler_module.build_scheduler()
+        [check] = [j for j in scheduler.get_jobs() if j.id == scheduler_module.STARTUP_CHECK_JOB]
+        assert check.func is scheduler_module.check_sync_at_startup
+        assert check.trigger.run_date == now + scheduler_module.STARTUP_CHECK_DELAY
+        assert scheduler_module._started_at == now
+
+
+class TestSyncOwed:
+    """`sync_owed_since`: the stored facts the startup check reads."""
+
+    SLOT = datetime(2026, 3, 10, 6, 30, tzinfo=UTC)
+
+    @pytest.fixture
+    def session(self, db_session):  # type: ignore[no-untyped-def]
+        from sqlalchemy import update
+
+        from purser.models import Connection
+
+        # Other tests leave connections behind (the table is not reset):
+        # set them aside inside this transaction, which the fixture rolls back.
+        db_session.execute(update(Connection).values(status="disabled"))
+        return db_session
+
+    def _connection(self, session, **fields):  # type: ignore[no-untyped-def]
+        from purser.models import Connection
+
+        row = Connection(provider="simplefin", **fields)
+        session.add(row)
+        session.flush()
+        return row
+
+    def _owed(self, session) -> bool:  # type: ignore[no-untyped-def]
+        from purser.feed.service import sync_owed_since
+
+        return sync_owed_since(self.SLOT, session)
+
+    def test_no_connection_owes_nothing(self, session) -> None:  # type: ignore[no-untyped-def]
+        assert self._owed(session) is False
+
+    def test_a_fetch_before_the_slot_is_owed_and_one_after_is_not(self, session) -> None:  # type: ignore[no-untyped-def]
+        before = self.SLOT - timedelta(hours=20)
+        row = self._connection(session, created_at=before, last_fetch_at=before)
+        assert self._owed(session) is True
+        row.last_fetch_at = self.SLOT + timedelta(minutes=4)
+        session.flush()
+        assert self._owed(session) is False
+
+    def test_a_recorded_failure_since_the_slot_counts_as_an_attempt(self, session) -> None:  # type: ignore[no-untyped-def]
+        from purser.models import Event
+
+        before = self.SLOT - timedelta(days=3)
+        row = self._connection(session, status="error", created_at=before, last_fetch_at=before)
+        assert self._owed(session) is True
+        session.add(
+            Event(
+                type="sync.failed",
+                entity_type="connection",
+                entity_id=row.id,
+                at=self.SLOT + timedelta(minutes=2),
+                payload={},
+            )
+        )
+        session.flush()
+        assert self._owed(session) is False
+
+    def test_a_disabled_or_newer_connection_owes_nothing(self, session) -> None:  # type: ignore[no-untyped-def]
+        before = self.SLOT - timedelta(days=3)
+        self._connection(session, status="disabled", created_at=before, last_fetch_at=before)
+        self._connection(session, created_at=self.SLOT + timedelta(hours=1))
+        assert self._owed(session) is False
+
+
+def test_a_real_scheduler_runs_a_run_it_dropped_for_lateness_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end with APScheduler itself: a job whose run times are days in
+    the past (the host was asleep) is dropped as late, reported, and then run
+    exactly once by the catch-up, however many slots passed."""
+    import threading
+
+    from apscheduler.schedulers.background import BackgroundScheduler
+
+    ran: list[str] = []
+    done = threading.Event()
+
+    def sync() -> None:
+        ran.append("feed.sync_daily")
+        done.set()
+
+    monkeypatch.setattr(scheduler_module, "_JOBS", [("feed.sync_daily", {"hour": 6}, sync)])
+    monkeypatch.setattr(scheduler_module, "_missed", set())
+    monkeypatch.setattr(scheduler_module, "CATCH_UP_DELAY", timedelta(milliseconds=200))
+    scheduler = BackgroundScheduler(timezone="UTC", job_defaults=scheduler_module.JOB_DEFAULTS)
+    scheduler.add_listener(scheduler_module._on_job_missed, EVENT_JOB_MISSED)
+    monkeypatch.setattr(scheduler_module, "_active", scheduler)
+    # Three daily slots ago: far past the hour of grace.
+    scheduler.add_job(
+        sync,
+        "cron",
+        id="feed.sync_daily",
+        hour=6,
+        next_run_time=datetime.now(UTC) - timedelta(days=3),
+    )
+    scheduler.start()
+    try:
+        assert done.wait(timeout=15), "the dropped run was never caught up"
+        # Give a second, wrong, catch-up the time it would need to show.
+        threading.Event().wait(1.0)
+        assert ran == ["feed.sync_daily"]
+    finally:
+        scheduler.shutdown(wait=False)

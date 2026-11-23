@@ -1,7 +1,7 @@
 """Net worth engine: postings + snapshots + valuations, consistent at any T."""
 
 import base64
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 import httpx
@@ -9,10 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine
 
-# UTC, not local: the net-worth engine defaults `as_of` to
-# `datetime.now(UTC).date()`, so a local TODAY puts these fixtures a day into
-# the engine's future on any host east of UTC (issue #140).
-TODAY = datetime.now(UTC).date()
+from tests.conftest import today
 
 
 @pytest.fixture
@@ -51,23 +48,23 @@ class TestNetWorthEngine:
     def test_historical_dates_are_consistent(
         self, seeded: dict[str, str], client: TestClient
     ) -> None:
-        _income(client, "1000.00", TODAY - timedelta(days=10))
-        _income(client, "500.00", TODAY - timedelta(days=5))
+        _income(client, "1000.00", today() - timedelta(days=10))
+        _income(client, "500.00", today() - timedelta(days=5))
 
         def nw(as_of: date) -> Decimal:
             resp = client.get("/networth", params={"as_of": as_of.isoformat()})
             return Decimal(resp.json()["net_worth"])
 
-        assert nw(TODAY - timedelta(days=11)) == Decimal("0")
-        assert nw(TODAY - timedelta(days=7)) == Decimal("1000.00")
-        assert nw(TODAY) == Decimal("1500.00")
+        assert nw(today() - timedelta(days=11)) == Decimal("0")
+        assert nw(today() - timedelta(days=7)) == Decimal("1000.00")
+        assert nw(today()) == Decimal("1500.00")
         # Re-query: identical (deterministic, no drift).
-        assert nw(TODAY - timedelta(days=7)) == Decimal("1000.00")
+        assert nw(today() - timedelta(days=7)) == Decimal("1000.00")
 
     def test_property_valuation_and_loan_shape_net_worth(
         self, seeded: dict[str, str], client: TestClient
     ) -> None:
-        _income(client, "1000.00", TODAY - timedelta(days=10))
+        _income(client, "1000.00", today() - timedelta(days=10))
         house = seeded["assets.house"]
         mortgage = seeded["liabilities.mortgage"]
         # A hand-valued asset is a ledger (decision 113): its value is set by
@@ -75,7 +72,7 @@ class TestNetWorthEngine:
         r = client.post(
             f"/accounts/{house}/reconcile",
             json={
-                "as_of": (TODAY - timedelta(days=30)).isoformat(),
+                "as_of": (today() - timedelta(days=30)).isoformat(),
                 "statement_balance": "400000.00",
             },
         )
@@ -83,7 +80,7 @@ class TestNetWorthEngine:
         assert r.json()["category"] == "equity.revaluation"
         client.post(
             f"/accounts/{mortgage}/valuations",
-            json={"as_of": (TODAY - timedelta(days=30)).isoformat(), "value": "-250000.00"},
+            json={"as_of": (today() - timedelta(days=30)).isoformat(), "value": "-250000.00"},
         )
         result = client.get("/networth").json()
         assert Decimal(result["net_worth"]) == Decimal("151000.00")
@@ -96,23 +93,23 @@ class TestNetWorthEngine:
         # A change in value moves the series from its date forward only.
         r = client.post(
             f"/accounts/{house}/value-changes",
-            json={"as_of": TODAY.isoformat(), "amount": "25000.00"},
+            json={"as_of": today().isoformat(), "amount": "25000.00"},
         )
         assert r.status_code == 201, r.text
         now = client.get("/networth").json()
         assert Decimal(now["net_worth"]) == Decimal("176000.00")
         past = client.get(
-            "/networth", params={"as_of": (TODAY - timedelta(days=1)).isoformat()}
+            "/networth", params={"as_of": (today() - timedelta(days=1)).isoformat()}
         ).json()
         assert Decimal(past["net_worth"]) == Decimal("151000.00")
 
     def test_series_and_materialization(self, seeded: dict[str, str], client: TestClient) -> None:
-        _income(client, "1000.00", TODAY - timedelta(days=3))
+        _income(client, "1000.00", today() - timedelta(days=3))
         series = client.get(
             "/networth/series",
             params={
-                "start": (TODAY - timedelta(days=4)).isoformat(),
-                "end": TODAY.isoformat(),
+                "start": (today() - timedelta(days=4)).isoformat(),
+                "end": today().isoformat(),
             },
         ).json()
         assert len(series) == 5
@@ -122,8 +119,8 @@ class TestNetWorthEngine:
         resp = client.post(
             "/networth/materialize",
             params={
-                "start": (TODAY - timedelta(days=4)).isoformat(),
-                "end": TODAY.isoformat(),
+                "start": (today() - timedelta(days=4)).isoformat(),
+                "end": today().isoformat(),
             },
         )
         assert resp.status_code == 200
@@ -133,8 +130,8 @@ class TestNetWorthEngine:
             client.post(
                 "/networth/materialize",
                 params={
-                    "start": (TODAY - timedelta(days=4)).isoformat(),
-                    "end": TODAY.isoformat(),
+                    "start": (today() - timedelta(days=4)).isoformat(),
+                    "end": today().isoformat(),
                 },
             ).json()["days_materialized"]
             == 5
@@ -146,7 +143,7 @@ def _valuation(
 ) -> httpx.Response:
     return client.post(
         f"/accounts/{account_id}/valuations",
-        json={"as_of": (TODAY - timedelta(days=days_ago)).isoformat(), "value": value, **extra},
+        json={"as_of": (today() - timedelta(days=days_ago)).isoformat(), "value": value, **extra},
     )
 
 
@@ -396,7 +393,6 @@ class TestWatermarkRecompute:
         mutations followed by a consumer run, every stored net_worth_daily row
         equals a live net_worth_at() of the same day."""
         reset_db(migrated_engine)
-        today = datetime.now(UTC).date()
         with get_sessionmaker()() as session:
             token = _service_token(session)
             checking = ledger.create_account(
@@ -423,8 +419,8 @@ class TestWatermarkRecompute:
             category = ledger.ensure_category_path(
                 session, "income.nw_seed", actor_token_id=token.id
             )
-            _flat(session, token, checking, category, "1000.00", today - timedelta(days=45))
-            _flat(session, token, checking, category, "250.00", today - timedelta(days=20))
+            _flat(session, token, checking, category, "1000.00", today() - timedelta(days=45))
+            _flat(session, token, checking, category, "250.00", today() - timedelta(days=20))
             session.commit()
         assert networth.consume_watermark() > 0  # stored range exists
 
@@ -447,7 +443,7 @@ class TestWatermarkRecompute:
                         account_ref=str(checking_row.id),
                         category_ref=str(category_row.id),
                         amount=Decimal("77.77"),
-                        date=today - timedelta(days=days),
+                        date=today() - timedelta(days=days),
                         payee_name="Backdated",
                         description="backdated",
                         requested_status=core.Status.POSTED,
@@ -458,7 +454,7 @@ class TestWatermarkRecompute:
                     networth.record_valuation(
                         session,
                         account_ref=str(loan_row.id),
-                        as_of=today - timedelta(days=days),
+                        as_of=today() - timedelta(days=days),
                         value=Decimal("-300000.00") + days,
                         actor_token_id=token.id,
                     )
@@ -466,7 +462,7 @@ class TestWatermarkRecompute:
                     assets.record_value_change(
                         session,
                         account_ref=str(house_row.id),
-                        as_of=today - timedelta(days=days),
+                        as_of=today() - timedelta(days=days),
                         amount=Decimal("1000.00") + days,
                         token=token,
                     )
@@ -476,7 +472,7 @@ class TestWatermarkRecompute:
                         session,
                         tx_id=tx_id,
                         token=token,
-                        date=today - timedelta(days=days),
+                        date=today() - timedelta(days=days),
                         amount=Decimal("-33.33"),
                     )
                     posted.append(replacement.id)
@@ -497,7 +493,6 @@ class TestWatermarkRecompute:
         consumer run, series() computes the dirty range live instead of serving
         the stale stored rows."""
         reset_db(migrated_engine)
-        today = datetime.now(UTC).date()
         with get_sessionmaker()() as session:
             token = _service_token(session)
             checking = ledger.create_account(
@@ -510,7 +505,7 @@ class TestWatermarkRecompute:
             category = ledger.ensure_category_path(
                 session, "income.stale_seed", actor_token_id=token.id
             )
-            _flat(session, token, checking, category, "100.00", today - timedelta(days=10))
+            _flat(session, token, checking, category, "100.00", today() - timedelta(days=10))
             session.commit()
         networth.consume_watermark()
 
@@ -518,17 +513,17 @@ class TestWatermarkRecompute:
             token = session.execute(select(ApiToken)).scalars().first()
             checking_row = ledger.account_by_path(session, checking.path)
             category_row = ledger.account_by_path(session, "income.stale_seed")
-            _flat(session, token, checking_row, category_row, "50.00", today - timedelta(days=5))
+            _flat(session, token, checking_row, category_row, "50.00", today() - timedelta(days=5))
             session.commit()
             # No consumer has run: stored rows >= 5d ago are stale, and the
             # guard must serve live values for them.
-            rows = networth.series(session, start=today - timedelta(days=6), end=today)
+            rows = networth.series(session, start=today() - timedelta(days=6), end=today())
             by_day = {r["as_of"]: r["net_worth"] for r in rows}
-            assert by_day[today - timedelta(days=5)] == Decimal("150.00")
-            assert by_day[today] == Decimal("150.00")
+            assert by_day[today() - timedelta(days=5)] == Decimal("150.00")
+            assert by_day[today()] == Decimal("150.00")
             # The stored row itself is still the stale value until consumed.
             stored = session.execute(
-                select(NetWorthDaily).where(NetWorthDaily.as_of == today - timedelta(days=5))
+                select(NetWorthDaily).where(NetWorthDaily.as_of == today() - timedelta(days=5))
             ).scalar_one()
             assert Decimal(stored.net_worth) == Decimal("100.00")
 
@@ -542,8 +537,7 @@ class TestWatermarkRecompute:
         from purser import qif_import
 
         reset_db(migrated_engine)
-        today = datetime.now(UTC).date()
-        d_hist = today - timedelta(days=30)
+        d_hist = today() - timedelta(days=30)
         with get_sessionmaker()() as session:
             token = _service_token(session)
             checking = ledger.create_account(
@@ -556,7 +550,7 @@ class TestWatermarkRecompute:
             category = ledger.ensure_category_path(
                 session, "income.imp_seed", actor_token_id=token.id
             )
-            _flat(session, token, checking, category, "10.00", today - timedelta(days=3))
+            _flat(session, token, checking, category, "10.00", today() - timedelta(days=3))
             session.commit()
         networth.consume_watermark()
 
@@ -587,7 +581,7 @@ class TestValuationSignForEveryCaller:
     ) -> None:
         """record_valuation is the only write path for manual valuations (REST
         and MCP record_valuation), so no surface can skip the rule."""
-        on = TODAY - timedelta(days=3)
+        on = today() - timedelta(days=3)
         with pytest.raises(ledger.LedgerError, match="a positive valuation would make it an asset"):
             networth.record_valuation(
                 db_session,
@@ -621,7 +615,7 @@ class TestValuationSignForEveryCaller:
         """REST's request model refuses these before the service; MCP hands its
         decimal string straight through, so the one write path refuses what
         NUMERIC(20,4) would round away or overflow (decision 73)."""
-        on = TODAY - timedelta(days=3)
+        on = today() - timedelta(days=3)
         for figure, reason in (
             ("-400000.00001", "more than 4 decimal places"),
             ("-1e16", "out of range"),
@@ -683,7 +677,7 @@ class TestValuationTypeRuleForEveryCaller:
         """Decision 81 sits in record_valuation, so REST and MCP refuse alike,
         and it runs before decision 71's sign rule: a positive figure on a
         credit card is refused for its type, not given a sign hint."""
-        on = TODAY - timedelta(days=3)
+        on = today() - timedelta(days=3)
         for account_ref, type_ in (
             ("assets.checking", "checking"),
             ("assets.brokerage", "brokerage"),
@@ -741,7 +735,6 @@ class TestValuationTypeProperty:
         """Decision 81's promise: whenever record_valuation accepts a figure,
         net worth reads that account by its valuation, at the stored figure.
         Every other type is refused, whatever the figure and convention."""
-        today = datetime.now(UTC).date()
         with get_sessionmaker()() as session:
             try:
                 account = ledger.create_account(
@@ -755,7 +748,7 @@ class TestValuationTypeProperty:
                     stored = networth.record_valuation(
                         session,
                         account_ref=str(account.id),
-                        as_of=today - timedelta(days=days_ago),
+                        as_of=today() - timedelta(days=days_ago),
                         value=value,
                         convention=convention,
                         actor_token_id=None,
@@ -769,7 +762,7 @@ class TestValuationTypeProperty:
                 assert type_ in networth.VALUATION_TYPES
                 (entry,) = [
                     b
-                    for b in networth.net_worth_at(session, today)["breakdown"]
+                    for b in networth.net_worth_at(session, today())["breakdown"]
                     if b["account_id"] == account.id
                 ]
                 assert entry["method"] == "valuation"
@@ -812,7 +805,7 @@ class TestManualHoldings:
                 "account": "assets.broker",
                 "category": "expenses.fees",
                 "amount": "-100.00",
-                "date": (TODAY - timedelta(days=20)).isoformat(),
+                "date": (today() - timedelta(days=20)).isoformat(),
                 "status": "posted",
             },
         )
@@ -822,7 +815,7 @@ class TestManualHoldings:
             "/prices",
             json={
                 "symbol": symbol,
-                "date": (TODAY - timedelta(days=30)).isoformat(),
+                "date": (today() - timedelta(days=30)).isoformat(),
                 "close": "50",
             },
         )
@@ -832,7 +825,7 @@ class TestManualHoldings:
             json={
                 "symbol": symbol,
                 "quantity": "10",
-                "as_of": (TODAY - timedelta(days=5)).isoformat(),
+                "as_of": (today() - timedelta(days=5)).isoformat(),
             },
         )
         assert resp.status_code == 201, resp.text
@@ -845,7 +838,7 @@ class TestManualHoldings:
         assert single["balance_method"] == "postings+holdings"
         assert Decimal(single["balance"]) == Decimal("400.00")  # -100 cash + 10 x 50
         assert Decimal(single["postings_balance"]) == Decimal("-100.00")
-        assert single["balance_as_of"] == (TODAY - timedelta(days=5)).isoformat()
+        assert single["balance_as_of"] == (today() - timedelta(days=5)).isoformat()
 
         listed = {
             a["path"]: a
@@ -867,7 +860,7 @@ class TestManualHoldings:
         )
         # Before the first manual row the account has only its cash.
         before = admin_client.get(
-            "/networth", params={"as_of": (TODAY - timedelta(days=6)).isoformat()}
+            "/networth", params={"as_of": (today() - timedelta(days=6)).isoformat()}
         ).json()
         entry = next(b for b in before["breakdown"] if b["path"] == "assets.broker")
         assert Decimal(entry["value"]) == Decimal("-100.00")
@@ -879,10 +872,10 @@ class TestManualHoldings:
         assert networth.consume_watermark() >= 0
         with get_sessionmaker()() as session:
             for offset in range(15):
-                networth.materialize_day(session, TODAY - timedelta(days=offset))
+                networth.materialize_day(session, today() - timedelta(days=offset))
             session.execute(text("UPDATE balance_watermark SET networth_dirty_from = NULL"))
             session.commit()
-        backdated = TODAY - timedelta(days=12)
+        backdated = today() - timedelta(days=12)
         resp = admin_client.post(
             f"/positions/{broker['position']}/events",
             json={"kind": "set_quantity", "occurred_on": backdated.isoformat(), "quantity": "4"},
@@ -917,7 +910,7 @@ class TestManualHoldings:
             if b["path"] == "assets.broker"
         )
         assert Decimal(broker_value["value"]) == Decimal("100.00")  # -100 + 4 x 50
-        assert stored[TODAY] == Decimal(admin_client.get("/networth").json()["net_worth"])
+        assert stored[today()] == Decimal(admin_client.get("/networth").json()["net_worth"])
 
     def test_mcp_record_valuation_still_refuses_brokerage(
         self, broker: dict[str, str], admin_client: TestClient
@@ -926,6 +919,6 @@ class TestManualHoldings:
         its positions, never by a valuation row."""
         resp = admin_client.post(
             f"/accounts/{broker['account']}/valuations",
-            json={"as_of": TODAY.isoformat(), "value": "1.00"},
+            json={"as_of": today().isoformat(), "value": "1.00"},
         )
         assert resp.status_code == 422

@@ -17,6 +17,7 @@ import {
   Th,
 } from "../../components/ui";
 import { useIsAdmin } from "../../lib/useIsAdmin";
+import { ClientInstructions } from "../wizard/ClientInstructions";
 import { CopyButton } from "../wizard/CopyButton";
 
 const SCOPES = [
@@ -291,6 +292,10 @@ export default function Tokens() {
                 <code className="min-w-0 break-all text-xs">{minted}</code>
                 <CopyButton text={minted} label="Copy token" />
               </div>
+              <p className="mb-2 mt-4 text-sm font-medium text-foreground">
+                Connect an agent with it:
+              </p>
+              <ClientInstructions token={minted} />
             </div>
           )}
         </Card>

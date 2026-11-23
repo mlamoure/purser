@@ -8,7 +8,7 @@ references and dates.
 
 import threading
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -31,10 +31,11 @@ from purser.models import (
     RawFetch,
     SecurityPrice,
 )
+from tests.conftest import now, today
 
-TODAY = datetime.now(UTC).date()
-AS_OF = TODAY - timedelta(days=20)
-NOW = datetime.now(UTC)
+
+def _as_of() -> date:
+    return today() - timedelta(days=20)
 
 
 def _symbol() -> str:
@@ -72,15 +73,15 @@ def _capture(
     symbol: str,
     rows: list[captures.LotIn],
     *,
-    as_of: date = AS_OF,
+    as_of: date | None = None,
     complete: bool = True,
     captured_at: datetime | None = None,
     basis_policy: str = "keep",
 ) -> captures.LotCaptureIn:
     return captures.LotCaptureIn(
         account=str(account.id),
-        as_of=as_of,
-        captured_at=captured_at or NOW,
+        as_of=as_of or _as_of(),
+        captured_at=captured_at or now(),
         completeness="complete" if complete else "partial",
         positions=(captures.SymbolIn(symbol=symbol, lots=tuple(rows)),),
         source_note="synthetic broker page",
@@ -110,7 +111,7 @@ def test_multi_symbol_capture_projects_once_with_final_lot_basis(
     symbols = [_symbol(), _symbol()]
     db_session.add_all(
         [
-            SecurityPrice(symbol=symbol, price_date=TODAY, source="manual", close=Decimal("100"))
+            SecurityPrice(symbol=symbol, price_date=today(), source="manual", close=Decimal("100"))
             for symbol in symbols
         ]
     )
@@ -126,15 +127,15 @@ def test_multi_symbol_capture_projects_once_with_final_lot_basis(
     monkeypatch.setattr(projection, "project_account", counted)
     capture = captures.LotCaptureIn(
         account=str(account.id),
-        as_of=AS_OF,
-        captured_at=NOW,
+        as_of=_as_of(),
+        captured_at=now(),
         completeness="complete",
         positions=tuple(
             captures.SymbolIn(
                 symbol=symbol,
                 lots=(
-                    _lot("SYN-1", "2", AS_OF, "10"),
-                    _lot("SYN-2", "3", AS_OF, "20"),
+                    _lot("SYN-1", "2", _as_of(), "10"),
+                    _lot("SYN-2", "3", _as_of(), "20"),
                 ),
             )
             for symbol in symbols
@@ -146,7 +147,7 @@ def test_multi_symbol_capture_projects_once_with_final_lot_basis(
         db_session.scalars(
             select(HoldingsSnapshot).where(
                 HoldingsSnapshot.account_id == account.id,
-                HoldingsSnapshot.as_of == TODAY,
+                HoldingsSnapshot.as_of == today(),
             )
         )
     )
@@ -214,7 +215,7 @@ class TestCaptureAndBasis:
             symbol=symbol,
             quantity=Decimal("4"),
             price=Decimal("50"),
-            trade_date=TODAY - timedelta(days=2),
+            trade_date=today() - timedelta(days=2),
             proceeds_to="none",
             token=None,
             allocation=service.AllocationRequest(lots=((r2, Decimal("4")),)),
@@ -262,8 +263,8 @@ class TestCaptureAndBasis:
             account,
             symbol,
             list(reversed(first.positions[0].lots)),
-            as_of=AS_OF + timedelta(days=5),
-            captured_at=NOW + timedelta(seconds=30),
+            as_of=_as_of() + timedelta(days=5),
+            captured_at=now() + timedelta(seconds=30),
         )
         applied = _apply(db_session, again)
         assert applied.retry is False and applied.capture.repeat_of is not None
@@ -273,7 +274,7 @@ class TestCaptureAndBasis:
         )
         assert db_session.execute(select(func.count(Lot.id))).scalar_one() == lots_before
         fresh = lots.freshness(db_session, account.id, symbol)
-        assert fresh is not None and fresh.as_of == AS_OF + timedelta(days=5)
+        assert fresh is not None and fresh.as_of == _as_of() + timedelta(days=5)
 
     def test_stale_hash_is_refused(self, db_session: Session) -> None:
         account, symbol = _three_lots(db_session)
@@ -286,7 +287,7 @@ class TestCaptureAndBasis:
                 _lot("R3", "5", date(2024, 6, 5), "20"),
                 _lot("R4", "2", date(2024, 9, 5), "40"),
             ],
-            as_of=AS_OF + timedelta(days=1),
+            as_of=_as_of() + timedelta(days=1),
         )
         preview = captures.preview(db_session, capture)
         assert [c.kind for c in preview.symbols[0].plan.changes] == ["new_lot", "recount"]
@@ -297,7 +298,7 @@ class TestCaptureAndBasis:
             symbol=symbol,
             quantity=Decimal("1"),
             price=Decimal("50"),
-            trade_date=TODAY - timedelta(days=1),
+            trade_date=today() - timedelta(days=1),
             proceeds_to="none",
             token=None,
             allocation=service.AllocationRequest(method="fifo"),
@@ -308,7 +309,7 @@ class TestCaptureAndBasis:
 
     def test_decrease_missing_and_partial_are_conflicts(self, db_session: Session) -> None:
         account, symbol = _three_lots(db_session)
-        later = AS_OF + timedelta(days=3)
+        later = _as_of() + timedelta(days=3)
         decrease = _capture(
             account,
             symbol,
@@ -340,7 +341,7 @@ class TestCaptureAndBasis:
             account,
             symbol,
             [_lot("R1", "8", date(2023, 1, 5), "10")],
-            as_of=AS_OF + timedelta(days=2),
+            as_of=_as_of() + timedelta(days=2),
         )
         preview = captures.preview(db_session, capture)
         applied = captures.commit(
@@ -356,7 +357,7 @@ class TestCaptureAndBasis:
             account,
             symbol,
             [_lot("R1", "10", date(2023, 1, 5), "10")],
-            as_of=AS_OF - timedelta(days=5),
+            as_of=_as_of() - timedelta(days=5),
             complete=False,
         )
         plan = captures.preview(db_session, older).symbols[0]
@@ -385,7 +386,7 @@ class TestEntryPointsKeepInvariants:
                 symbol=symbol,
                 quantity=Decimal("1"),
                 price=Decimal("5"),
-                trade_date=TODAY,
+                trade_date=today(),
                 proceeds_to="none",
                 token=None,
             )
@@ -401,7 +402,7 @@ class TestEntryPointsKeepInvariants:
                 account_ref=str(account.id),
                 symbol=symbol,
                 quantity=Decimal("20"),
-                as_of=TODAY,
+                as_of=today(),
                 token=None,
             )
         assert exc.value.code == "coverage"
@@ -411,7 +412,7 @@ class TestEntryPointsKeepInvariants:
             db_session,
             position_id=position.id,
             kind="transfer_out",
-            occurred_on=TODAY,
+            occurred_on=today(),
             quantity=Decimal("3"),
             token=None,
             allocation=service.AllocationRequest(lots=((r1, Decimal("3")),)),
@@ -423,7 +424,7 @@ class TestEntryPointsKeepInvariants:
             db_session,
             position_id=position.id,
             kind="buy",
-            occurred_on=TODAY,
+            occurred_on=today(),
             quantity=Decimal("2"),
             price=Decimal("15"),
             token=None,
@@ -437,7 +438,7 @@ class TestEntryPointsKeepInvariants:
             db_session,
             position_id=position.id,
             kind="buy",
-            occurred_on=TODAY,
+            occurred_on=today(),
             quantity=Decimal("1"),
             token=None,
             unallocated=True,
@@ -450,7 +451,7 @@ class TestEntryPointsKeepInvariants:
                 db_session,
                 position_id=position.id,
                 kind="sell",
-                occurred_on=TODAY,
+                occurred_on=today(),
                 quantity=Decimal("25"),
                 price=Decimal("10"),
                 proceeds_to="none",
@@ -462,7 +463,7 @@ class TestEntryPointsKeepInvariants:
             db_session,
             position_id=position.id,
             kind="sell",
-            occurred_on=TODAY,
+            occurred_on=today(),
             quantity=Decimal("1"),
             price=Decimal("10"),
             proceeds_to="none",
@@ -478,7 +479,7 @@ class TestEntryPointsKeepInvariants:
             db_session,
             position_id=position.id,
             kind="buy",
-            occurred_on=TODAY - timedelta(days=3),
+            occurred_on=today() - timedelta(days=3),
             quantity=Decimal("2"),
             price=Decimal("15"),
             token=None,
@@ -488,7 +489,7 @@ class TestEntryPointsKeepInvariants:
             db_session,
             position_id=position.id,
             kind="sell",
-            occurred_on=TODAY - timedelta(days=1),
+            occurred_on=today() - timedelta(days=1),
             quantity=Decimal("1"),
             price=Decimal("20"),
             proceeds_to="none",
@@ -530,7 +531,7 @@ class TestEntryPointsKeepInvariants:
             symbol=symbol,
             quantity=Decimal("1"),
             price=Decimal("50"),
-            trade_date=TODAY,
+            trade_date=today(),
             proceeds_to="none",
             token=None,
             allocation=service.AllocationRequest(lots=((r3, Decimal("1")),)),
@@ -566,7 +567,7 @@ class TestEntryPointsKeepInvariants:
         from purser.feed import importer
 
         account, symbol = _three_lots(db_session)
-        trade = TODAY - timedelta(days=1)
+        trade = today() - timedelta(days=1)
         sale = service.record_sale(
             db_session,
             account_ref=str(account.id),
@@ -616,8 +617,8 @@ class TestAwards:
     def _awards(self, session: Session, account: Account, symbol: str, **kw):
         capture = awards.AwardCaptureIn(
             account=str(account.id),
-            as_of=kw.pop("as_of", AS_OF),
-            captured_at=kw.pop("captured_at", NOW),
+            as_of=kw.pop("as_of", _as_of()),
+            captured_at=kw.pop("captured_at", now()),
             completeness=kw.pop("completeness", "complete"),
             awards=(
                 awards.AwardIn(
@@ -629,9 +630,9 @@ class TestAwards:
                     schedule=kw.pop(
                         "schedule",
                         (
-                            awards.VestIn(AS_OF + timedelta(days=5), Decimal("25")),
-                            awards.VestIn(TODAY + timedelta(days=90), Decimal("25")),
-                            awards.VestIn(TODAY + timedelta(days=455), Decimal("25")),
+                            awards.VestIn(_as_of() + timedelta(days=5), Decimal("25")),
+                            awards.VestIn(today() + timedelta(days=90), Decimal("25")),
+                            awards.VestIn(today() + timedelta(days=455), Decimal("25")),
                         ),
                     ),
                 ),
@@ -643,16 +644,16 @@ class TestAwards:
     def test_awards_never_touch_net_worth(self, db_session: Session) -> None:
         account, symbol = _three_lots(db_session)
         db_session.add(
-            SecurityPrice(symbol=symbol, price_date=AS_OF, close=Decimal("40"), source="manual")
+            SecurityPrice(symbol=symbol, price_date=_as_of(), close=Decimal("40"), source="manual")
         )
         db_session.flush()
-        before = networth.net_worth_at(db_session, TODAY)["net_worth"]
+        before = networth.net_worth_at(db_session, today())["net_worth"]
         capture, preview = self._awards(db_session, account, symbol)
         awards.commit_awards(db_session, capture, expect_hash=preview.plan_hash, token=None)
-        assert networth.net_worth_at(db_session, TODAY)["net_worth"] == before
+        assert networth.net_worth_at(db_session, today())["net_worth"] == before
         [u] = awards.unvested(db_session, account)
         assert u.units == 75 and u.next_vest_units == 25
-        assert u.next_vest_date == TODAY + timedelta(days=90)
+        assert u.next_vest_date == today() + timedelta(days=90)
         assert u.value == Decimal("3000.0000")
 
     def test_vest_event_idempotent_and_conflicting(self, db_session: Session) -> None:
@@ -663,7 +664,7 @@ class TestAwards:
         kw = dict(
             award="G-1",
             account=str(account.id),
-            vest_date=AS_OF + timedelta(days=5),
+            vest_date=_as_of() + timedelta(days=5),
             gross_quantity=Decimal("25"),
             withheld_quantity=Decimal("9"),
             fmv=Decimal("40"),
@@ -688,7 +689,7 @@ class TestAwards:
     def test_vest_links_an_adopted_lot_without_new_shares(self, db_session: Session) -> None:
         account = _broker(db_session)
         symbol = _symbol()
-        vest_day = AS_OF - timedelta(days=5)
+        vest_day = _as_of() - timedelta(days=5)
         _apply(
             db_session,
             _capture(account, symbol, [_lot("V1", "16", vest_day, "40", acquisition="rsu_vest")]),
@@ -702,8 +703,8 @@ class TestAwards:
             vested_quantity=None,
             schedule=(
                 awards.VestIn(vest_day, Decimal("25")),
-                awards.VestIn(TODAY + timedelta(days=90), Decimal("25")),
-                awards.VestIn(TODAY + timedelta(days=455), Decimal("25")),
+                awards.VestIn(today() + timedelta(days=90), Decimal("25")),
+                awards.VestIn(today() + timedelta(days=455), Decimal("25")),
             ),
         )
         awards.commit_awards(db_session, capture, expect_hash=preview.plan_hash, token=None)
@@ -756,9 +757,9 @@ class TestAwards:
             db_session,
             account,
             symbol,
-            as_of=AS_OF + timedelta(days=1),
-            captured_at=NOW + timedelta(seconds=5),
-            schedule=(awards.VestIn(TODAY + timedelta(days=90), Decimal("25")),),
+            as_of=_as_of() + timedelta(days=1),
+            captured_at=now() + timedelta(seconds=5),
+            schedule=(awards.VestIn(today() + timedelta(days=90), Decimal("25")),),
         )
         assert {c.code for c in p2.plan.conflicts} == {"scheduled_vest_missing"}
         with pytest.raises(awards.AwardCaptureConflicts):
@@ -850,13 +851,13 @@ def test_concurrent_identical_vests_record_once(migrated_engine: Engine) -> None
     account lock, then finds the vest recorded with the same figures."""
     maker = db.get_sessionmaker()
     symbol = _symbol()
-    vest_day = TODAY - timedelta(days=1)
+    vest_day = today() - timedelta(days=1)
     with maker() as s:
         account = _broker(s)
         capture = awards.AwardCaptureIn(
             account=str(account.id),
-            as_of=TODAY - timedelta(days=3),
-            captured_at=NOW,
+            as_of=today() - timedelta(days=3),
+            captured_at=now(),
             completeness="complete",
             awards=(
                 awards.AwardIn(
@@ -894,7 +895,7 @@ def test_concurrent_identical_vests_record_once(migrated_engine: Engine) -> None
     with maker() as s:
         position = service.open_position(s, account_id, symbol)
         assert position is not None
-        assert service.quantity_on(s, position, TODAY) == 12
+        assert service.quantity_on(s, position, today()) == 12
         assert (
             s.execute(select(func.count(Lot.id)).where(Lot.position_id == position.id)).scalar_one()
             == 1
@@ -970,9 +971,9 @@ def test_random_disposals_keep_lot_invariants(db_session: Session, steps) -> Non
         account, symbol = _three_lots(db_session)
         position = _position(db_session, account, symbol)
         recorded: list[uuid.UUID] = []
-        day = AS_OF
+        day = _as_of()
         for kind, shares, method, pick in steps:
-            day = min(day + timedelta(days=1), TODAY)
+            day = min(day + timedelta(days=1), today())
             with db_session.begin_nested() as step:
                 try:
                     if kind == "reverse":
@@ -1029,7 +1030,7 @@ def test_dry_run_sale_reports_lots_and_writes_nothing(db_session: Session) -> No
         symbol=symbol,
         quantity=Decimal("3"),
         price=Decimal("50"),
-        trade_date=TODAY,
+        trade_date=today(),
         proceeds_to="none",
         token=None,
         dry_run=True,

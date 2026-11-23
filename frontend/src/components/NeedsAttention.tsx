@@ -3,11 +3,12 @@ import { Link } from "react-router-dom";
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { api, errorDetail } from "../lib/api";
 import { formatMoney } from "../lib/money";
+import { EstimatedAmount } from "./EstimatedAmount";
 import { formatDate } from "../lib/dates";
 import { SuggestionCard } from "./SuggestionCard";
 import { Badge, Button, Card, CardTitle, ErrorText } from "./ui";
 
-type Kind = "match" | "schedule" | "transfer_link" | "transfer_pair";
+type Kind = "match" | "schedule" | "transfer_link" | "transfer_pair" | "split" | "trade_rule";
 const groups: { kind: Kind; title: string; help: string }[] = [
   {
     kind: "match",
@@ -20,6 +21,11 @@ const groups: { kind: Kind; title: string; help: string }[] = [
     help: "Check whether two bank transactions are one movement between your accounts.",
   },
   {
+    kind: "split",
+    title: "Split like last time",
+    help: "Split a new bank row the way you split this payee's last one.",
+  },
+  {
     kind: "schedule",
     title: "Scheduled transactions",
     help: "Review a pattern before adding it to your forecast.",
@@ -28,6 +34,11 @@ const groups: { kind: Kind; title: string; help: string }[] = [
     kind: "transfer_link",
     title: "Transfer rules",
     help: "Review a reusable rule; creating a draft does not activate it.",
+  },
+  {
+    kind: "trade_rule",
+    title: "Securities trade rules",
+    help: "Mark rows like the one you marked as a buy or sell; creating a draft does not activate it.",
   },
 ];
 const selectClass = "h-9 min-w-0 max-w-full rounded-md border border-border bg-card px-2 text-sm";
@@ -241,7 +252,9 @@ export default function NeedsAttention() {
                 <div className="min-w-0 break-words">
                   <p className="font-medium">{b.description || b.payee || "Expected payment"}</p>
                   <p className="text-xs text-muted-foreground">
-                    {b.account_name} · {formatMoney(b.amount)} · expected {formatDate(b.date)} · {b.aging_days}{" "}
+                    {b.account_name} ·{" "}
+                    {b.amount_estimated ? <EstimatedAmount value={b.amount} /> : formatMoney(b.amount)} · expected{" "}
+                    {formatDate(b.date)} · {b.aging_days}{" "}
                     days ago
                   </p>
                   {(b.amount_estimated || b.date_estimated) && (

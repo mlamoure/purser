@@ -15,8 +15,8 @@ default; commit with the preview's ``plan_hash`` as ``expect_hash``),
 The broker's lot and grant references are account identifiers: always
 withheld unless the call includes ``external_ids``; they are still accepted
 as INPUT wherever a lot or award is named. Plan labels are narrative
-(withheld with the purchase-privacy default); per-lot basis, proceeds and
-gains are single amounts (withheld with the amount-privacy default).
+(withheld when the call passes withhold=["description"]); per-lot basis,
+proceeds and gains are single amounts (withheld with withhold=["amount"]).
 """
 
 import json
@@ -32,7 +32,6 @@ from sqlalchemy.orm import Session
 from purser import clock
 from purser.mcp import presentation
 from purser.mcp._registry import _principal, _run, _token_row, audited_tool
-from purser.mcp.privacy import NOTHING, Emits
 from purser.mcp.tools_holdings import _allocation_items, _cents, _decimal, _plain
 from purser.mcp.toolschemas import (
     CaptureAwardInput,
@@ -47,6 +46,7 @@ from purser.mcp.toolschemas import (
     TransferOutResult,
     VestStatusResult,
 )
+from purser.privacy import NOTHING, Emits
 
 _BUDGET = 1900  # characters of structuredContent JSON (< 500 tokens)
 _FIRST = 5  # changes / conflicts itemized in a capture answer
@@ -133,10 +133,9 @@ async def list_lots(
         page = lot_service.list_lots(
             session, position.id, status=status, limit=lot_service.MAX_PAGE, cursor=cursor
         )
-        states = holdings_service.position_states(
-            session, acct, stale_days=appsettings.effective().price_stale_days
+        state = holdings_service.position_state(
+            session, position, stale_days=appsettings.effective().price_stale_days
         )
-        state = next((s for s in states if s.position.id == position.id), None)
         s = page.summary
         summary: dict[str, Any] = {
             "position_id": str(position.id),

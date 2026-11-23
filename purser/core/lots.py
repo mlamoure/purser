@@ -22,15 +22,24 @@ A position's share count is still the history of its events
   the counted lots' remaining basis, unknown (None) when any of them has no
   basis or shares sit outside every lot. The running average-cost basis is
   never shown as a lot's cost.
+- A split (issue #624) takes effect at the start of its day: the remaining
+  shares of every lot counted the day before become numerator/denominator
+  shares, each lot keeping its remaining basis (so its basis per share is
+  divided by the ratio), its acquisition date and its term. The new counts
+  are apportioned by largest remainder from the rounded total, so the lots
+  of a fully allocated position still hold exactly what it holds. A lot's
+  ``quantity`` and ``basis_per_share`` stay as acquired; every count drawn
+  from it (remaining, available, a disposal) is in the shares of its day.
 
 Arithmetic runs in the 60-digit context of ``core.holdings``.
 """
 
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal, localcontext
+from fractions import Fraction
 from typing import Any
 from uuid import UUID
 
@@ -105,13 +114,34 @@ class Disposal:
 
 
 @dataclass(frozen=True)
+class SplitFact:
+    """A split of the position (``core.holdings.SPLIT``): at the start of
+    ``on`` every share becomes numerator/denominator shares."""
+
+    on: date
+    numerator: int
+    denominator: int
+
+    @property
+    def ratio(self) -> Fraction:
+        return Fraction(self.numerator, self.denominator)
+
+
+@dataclass(frozen=True)
 class Book:
-    """A position's LIVE lots and dispositions (``live`` filters them). It
-    implements ``core.holdings.LotBasis`` for the projection."""
+    """A position's LIVE lots and dispositions (``live`` filters them), and
+    its effective splits. It implements ``core.holdings.LotBasis`` for the
+    projection."""
 
     lots: tuple[LotFact, ...]
     disposals: tuple[Disposal, ...] = ()
+    splits: tuple[SplitFact, ...] = ()
     _by_lot: Mapping[UUID, tuple[Disposal, ...]] = field(
+        default_factory=dict, compare=False, repr=False
+    )
+    # With splits: each lot's remaining shares after each day that changed
+    # them, (day, remaining) in date order (``_walk``).
+    _steps: Mapping[UUID, tuple[tuple[date, Decimal], ...]] = field(
         default_factory=dict, compare=False, repr=False
     )
 
@@ -121,6 +151,47 @@ class Book:
             if d.lot_id is not None:
                 grouped[d.lot_id].append(d)
         object.__setattr__(self, "_by_lot", {k: tuple(v) for k, v in grouped.items()})
+        object.__setattr__(
+            self, "splits", tuple(sorted(self.splits, key=lambda sp: (sp.on, sp.ratio)))
+        )
+        if self.splits:
+            object.__setattr__(self, "_steps", self._walk())
+
+    def _walk(self) -> dict[UUID, tuple[tuple[date, Decimal], ...]]:
+        """Every lot's remaining shares day by day, splits included. On a
+        split's day, first (it takes effect at the start of the day) the
+        lots counted the day before are split together — their exact new
+        counts floored to six places, and the millionths left to reach the
+        rounded total (``core.holdings.split_quantity`` of their sum) go one
+        each to the largest remainders, so their sum is that total — then
+        the day's dispositions leave."""
+        remaining = {lot.id: lot.quantity for lot in self.lots}
+        steps: dict[UUID, list[tuple[date, Decimal]]] = {lot.id: [] for lot in self.lots}
+        by_day: dict[date, list[Disposal]] = defaultdict(list)
+        for d in self.disposals:
+            if d.lot_id is not None and d.lot_id in remaining:
+                by_day[d.on].append(d)
+        split_days = {sp.on: sp for sp in self.splits}
+        with localcontext() as ctx:
+            ctx.prec = _PRECISION
+            for day in sorted(set(by_day) | set(split_days)):
+                split = split_days.get(day)
+                if split is not None:
+                    before = [
+                        lot
+                        for lot in self.lots
+                        if lot.effective_on < day and remaining[lot.id] != 0
+                    ]
+                    for lot_id, after in _split_apportioned(
+                        [(lot.id, remaining[lot.id]) for lot in before], split
+                    ).items():
+                        remaining[lot_id] = after
+                        steps[lot_id].append((day, after))
+                for d in by_day.get(day, []):
+                    assert d.lot_id is not None
+                    remaining[d.lot_id] -= d.quantity
+                    steps[d.lot_id].append((day, remaining[d.lot_id]))
+        return {k: tuple(v) for k, v in steps.items()}
 
     @property
     def tracked(self) -> bool:
@@ -134,17 +205,46 @@ class Book:
 
     def remaining(self, lot: LotFact, day: date | None = None) -> Decimal:
         """What the lot has left at the end of ``day`` (after every live
-        disposition when ``day`` is None)."""
+        disposition and split when ``day`` is None), in that day's shares."""
+        steps = self._steps.get(lot.id)
+        if steps is None:
+            out = lot.quantity
+            for d in self.of(lot.id):
+                if day is None or d.on <= day:
+                    out -= d.quantity
+            return out
         out = lot.quantity
-        for d in self.of(lot.id):
-            if day is None or d.on <= day:
-                out -= d.quantity
+        for on, left in steps:
+            if day is not None and on > day:
+                break
+            out = left
         return out
+
+    def factor(self, lot: LotFact, day: date | None = None) -> Fraction:
+        """How many of ``day``'s shares one share of the lot as acquired has
+        become: the product of the ratios of the splits after it took effect
+        and by ``day`` (every split when ``day`` is None)."""
+        out = Fraction(1)
+        for sp in self.splits:
+            if sp.on > lot.effective_on and (day is None or sp.on <= day):
+                out *= sp.ratio
+        return out
+
+    def per_share(self, lot: LotFact, day: date | None = None) -> Decimal | None:
+        """The lot's basis per share in ``day``'s shares: as acquired,
+        divided by the ratio of every split since (six places, half to
+        even). None when the basis is unknown."""
+        if lot.basis_per_share is None:
+            return None
+        factor = self.factor(lot, day)
+        if factor == 1:
+            return lot.basis_per_share
+        return core.round_fraction(Fraction(lot.basis_per_share) / factor, core.PRICE_QUANT)
 
     def remaining_basis(self, lot: LotFact, day: date | None = None) -> Decimal | None:
         """The lot's cost basis less its dispositions' basis: conserved by
         construction (the disposition that empties a lot takes the remainder).
-        None when the lot's basis is unknown."""
+        None when the lot's basis is unknown. A split moves no basis."""
         if lot.cost_basis is None:
             return None
         out = lot.cost_basis
@@ -176,13 +276,49 @@ class Book:
 
     # core.holdings.LotBasis
     def change_dates(self) -> Iterable[date]:
-        return sorted({lot.effective_on for lot in self.lots} | {d.on for d in self.disposals})
+        return sorted(
+            {lot.effective_on for lot in self.lots}
+            | {d.on for d in self.disposals}
+            | {sp.on for sp in self.splits}
+        )
 
     def basis_on(self, day: date, quantity: Decimal, average: Decimal | None) -> Decimal | None:
         counted = self.counted(day)
         if not counted:
             return average
         return position_basis(self, day, quantity).basis
+
+
+def _split_apportioned(
+    remaining: Sequence[tuple[UUID, Decimal]], split: SplitFact
+) -> dict[UUID, Decimal]:
+    """The lots' counts after ``split`` (``Book._walk``). Lots holding
+    shares share the rounded total by largest remainder (ties to the earlier
+    lot); a lot below zero (an overdrawn history ``check`` will refuse) is
+    split on its own."""
+    out: dict[UUID, Decimal] = {}
+    held = [(lot_id, left) for lot_id, left in remaining if left > 0]
+    for lot_id, left in remaining:
+        if left < 0:
+            out[lot_id] = core.split_quantity(left, split.numerator, split.denominator)
+    if not held:
+        return out
+    scale = 10**6  # NUMERIC(20,6): millionths of a share
+    exact = [Fraction(left) * split.ratio * scale for _id, left in held]
+    total = int(
+        core.split_quantity(
+            sum((left for _id, left in held), Decimal(0)), split.numerator, split.denominator
+        )
+        * scale
+    )
+    floors = [int(x) for x in exact]  # toward zero: every part is positive
+    left_over = total - sum(floors)
+    order = sorted(range(len(exact)), key=lambda i: (-(exact[i] - floors[i]), i))
+    for i in order[: max(left_over, 0)]:
+        floors[i] += 1
+    for (lot_id, _left), units in zip(held, floors, strict=True):
+        out[lot_id] = (Decimal(units) / scale).quantize(core.QUANTITY_QUANT)
+    return out
 
 
 @dataclass(frozen=True)
@@ -234,11 +370,14 @@ def live(
     lots: Iterable[LotFact],
     disposals: Iterable[Disposal],
     effective_ids: Iterable[UUID],
+    splits: Iterable[SplitFact] = (),
 ) -> Book:
     """The lots whose opening event is effective (or that were adopted) and
-    the dispositions whose event is effective."""
+    the dispositions whose event is effective; ``splits`` are the effective
+    splits (``core.holdings.split_points``)."""
     ids = set(effective_ids)
     return Book(
+        splits=tuple(splits),
         lots=tuple(
             sorted(
                 (lot for lot in lots if lot.opened_by is None or lot.opened_by in ids),
@@ -329,6 +468,7 @@ def check(events: Sequence[core.Event], book: Book) -> core.Timeline:
             {p.on for p in timeline.points}
             | {lot.effective_on for lot in book.lots}
             | {d.on for d in book.disposals}
+            | {sp.on for sp in book.splits}
         )
         for day in sorted(days):
             covered = book.covered(day)
@@ -344,7 +484,7 @@ def check(events: Sequence[core.Event], book: Book) -> core.Timeline:
 
 
 def _first_negative(book: Book, lot: LotFact) -> date | None:
-    for day in sorted({d.on for d in book.of(lot.id)}):
+    for day in sorted({d.on for d in book.of(lot.id)} | {sp.on for sp in book.splits}):
         if book.remaining(lot, day) < 0:
             return day
     return None
@@ -368,18 +508,28 @@ class Allocation:
     term: str | None
 
 
-def available(book: Book, lot: LotFact) -> Decimal:
-    """What a NEW disposal may take from ``lot``: its remaining quantity
-    after every live disposition, whatever their dates (a backdated sale
-    only draws on shares no later disposal consumed)."""
-    return book.remaining(lot)
+def available(book: Book, lot: LotFact, day: date | None = None) -> Decimal:
+    """What a NEW disposal dated ``day`` may take from ``lot``: its remaining
+    quantity after every live disposition, whatever their dates (a backdated
+    sale only draws on shares no later disposal consumed), in ``day``'s
+    shares: undone by every split after ``day`` (floored to six places, so
+    never more than is there). Without later splits, simply what is left."""
+    left = book.remaining(lot)
+    later = Fraction(1)
+    for sp in book.splits:
+        if day is not None and sp.on > day and sp.on > lot.effective_on:
+            later *= sp.ratio
+    if later == 1:
+        return left
+    units = int(Fraction(left) / later * 10**6)  # toward zero
+    return (Decimal(units) / 10**6).quantize(core.QUANTITY_QUANT)
 
 
 def candidates(book: Book, day: date) -> list[LotFact]:
-    return [lot for lot in book.lots if lot.disposable_on(day) and available(book, lot) > 0]
+    return [lot for lot in book.lots if lot.disposable_on(day) and available(book, lot, day) > 0]
 
 
-def _ordered(method: str, lots: list[LotFact]) -> list[LotFact]:
+def _ordered(method: str, lots: list[LotFact], book: Book, day: date) -> list[LotFact]:
     fifo = sorted(lots, key=lambda lot: (lot.acquired_on, lot.ordinal, lot.effective_on, lot.id))
     if method == FIFO:
         return fifo
@@ -393,9 +543,11 @@ def _ordered(method: str, lots: list[LotFact]) -> list[LotFact]:
                 f"hifo ranks lots by basis per share, and {len(unknown)} lot(s) that could "
                 "be drawn on have no basis; name the lots (specific) instead",
             )
+        # Per share in the disposal day's shares: a split since one lot
+        # was acquired divides its figure, not another's (#624).
         return sorted(
             fifo,
-            key=lambda lot: -(lot.basis_per_share or Decimal(0)),
+            key=lambda lot: -(book.per_share(lot, day) or Decimal(0)),
         )
     raise LotError("method", f"lot_method must be one of: {', '.join(SELECTION_METHODS)}")
 
@@ -408,10 +560,10 @@ def select(method: str, book: Book, day: date, quantity: Decimal) -> list[tuple[
     cannot cover ``quantity``, it is refused (``insufficient_lots``)."""
     picked: list[tuple[LotFact, Decimal]] = []
     left = quantity
-    for lot in _ordered(method, candidates(book, day)):
+    for lot in _ordered(method, candidates(book, day), book, day):
         if left <= 0:
             break
-        take = min(available(book, lot), left)
+        take = min(available(book, lot, day), left)
         picked.append((lot, take))
         left -= take
     if left > 0:
@@ -456,7 +608,7 @@ def specific(
                 "cannot draw on it",
                 day,
             )
-        left = available(book, lot)
+        left = available(book, lot, day)
         if q > left:
             raise LotError(
                 "overdrawn", f"lot {lot_id} has {left} shares left; the allocation takes {q}", day
@@ -484,19 +636,30 @@ def term(acquired: date, disposed: date) -> str:
     return "long" if disposed > anniversary(acquired) else "short"
 
 
-def disposal_basis(book: Book, lot: LotFact, quantity: Decimal) -> Decimal | None:
-    """The basis ``quantity`` shares of ``lot`` carry: pro rata to the lot's
-    total, rounded to 4 places, never more than the lot has left; the
-    disposal that empties the lot takes the whole remainder, so the lot's
-    dispositions and its remaining basis always sum to its basis exactly."""
+def disposal_basis(
+    book: Book, lot: LotFact, quantity: Decimal, day: date | None = None
+) -> Decimal | None:
+    """The basis ``quantity`` shares of ``lot`` carry, disposed of on
+    ``day``: pro rata to the lot's total, rounded to 4 places, never more
+    than the lot has left; the disposal that empties the lot takes the whole
+    remainder, so the lot's dispositions and its remaining basis always sum
+    to its basis exactly. After a split the lot's shares as acquired count
+    as the ``day`` shares they became (#624)."""
     left_basis = book.remaining_basis(lot)
     if left_basis is None or lot.cost_basis is None:
         return None
-    if quantity == available(book, lot):
+    if quantity == available(book, lot, day):
         return left_basis
+    factor = book.factor(lot, day)
     with localcontext() as ctx:
         ctx.prec = _PRECISION
-        share = core.money(lot.cost_basis * quantity / lot.quantity)
+        if factor == 1:
+            share = core.money(lot.cost_basis * quantity / lot.quantity)
+        else:
+            share = core.round_fraction(
+                Fraction(lot.cost_basis) * Fraction(quantity) / (Fraction(lot.quantity) * factor),
+                core.MONEY_QUANT,
+            )
     return max(min(share, left_basis), Decimal(0))
 
 
@@ -542,7 +705,7 @@ def allocate(
         if lot is None:
             out.append(Allocation(None, q, None, part, None, None))
             continue
-        basis = disposal_basis(book, lot, q)
+        basis = disposal_basis(book, lot, q, day)
         gain = core.money(part - basis) if part is not None and basis is not None else None
         out.append(Allocation(lot, q, basis, part, gain, term(lot.acquired_on, day)))
     return out
@@ -553,6 +716,7 @@ def with_disposals(
 ) -> Book:
     """``book`` with one more event's dispositions."""
     return Book(
+        splits=book.splits,
         lots=book.lots,
         disposals=book.disposals
         + tuple(
@@ -569,7 +733,7 @@ def with_disposals(
 
 
 def with_lots(book: Book, lots: Iterable[LotFact]) -> Book:
-    return Book(lots=book.lots + tuple(lots), disposals=book.disposals)
+    return Book(lots=book.lots + tuple(lots), disposals=book.disposals, splits=book.splits)
 
 
 # --------------------------------------------------------------------------
@@ -914,7 +1078,12 @@ def plan_capture(
                 )
             )
             continue
-        if row.basis.basis_per_share is not None and not same_basis(fact, row.quantity, row.basis):
+        # Compared in as_of's shares: a split since the lot was acquired
+        # divides its basis per share (#624).
+        current = replace(fact, basis_per_share=book.per_share(fact, as_of))
+        if row.basis.basis_per_share is not None and not same_basis(
+            current, row.quantity, row.basis
+        ):
             if lot.disposed:
                 conflicts.append(
                     Conflict(

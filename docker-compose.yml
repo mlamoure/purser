@@ -2,7 +2,7 @@
 # Migrations run automatically on startup.
 #
 # This file is all an installation needs: download it from the release tag
-# (https://raw.githubusercontent.com/mlamoure/purser/v2026.11.5/docker-compose.yml)
+# (https://raw.githubusercontent.com/mlamoure/purser/v2026.11.6/docker-compose.yml)
 # into an empty directory. Compose pulls the published multi-arch image below
 # (linux/amd64 + linux/arm64) the first time it is missing locally; nothing is
 # built. In a clone of the repository, `docker compose build` builds the image
@@ -12,7 +12,7 @@
 services:
   purser:
     # Kept equal to "v" + pyproject.toml's version (tests/test_compose.py).
-    image: ghcr.io/mlamoure/purser:v2026.11.5
+    image: ghcr.io/mlamoure/purser:v2026.11.6
     build: .
     restart: unless-stopped
     cap_drop: [ALL]
@@ -26,9 +26,25 @@ services:
       # safe, and export it (or put it in .env — see .env.example). Compose
       # refuses to start without it.
       PURSER_ENCRYPTION_KEY: ${PURSER_ENCRYPTION_KEY:?generate with 'purser keygen' and record it — see https://mlamoure.github.io/purser/tutorials/ai-setup/}
-      PURSER_PUBLIC_URL: ${PURSER_PUBLIC_URL:-http://localhost:8000}
+      # The address people and agents type. Leave it alone when Purser is used
+      # only on this machine; for another machine on the home network set it
+      # to http://<this machine's address>:<port> together with
+      # PURSER_BIND_ADDRESS=0.0.0.0 (see the setup guide).
+      PURSER_PUBLIC_URL: ${PURSER_PUBLIC_URL:-http://localhost:${PURSER_HOST_PORT:-8000}}
+      # The machine's other names on the home network, exact and comma-
+      # separated (its address, its name, <name>.local): agents may connect by
+      # any of them. PURSER_PUBLIC_URL stays the address Purser gives out.
+      PURSER_ALLOWED_HOSTS: ${PURSER_ALLOWED_HOSTS:-}
+      # Purser cannot see the port mapping below from inside its container;
+      # this tells it, so Settings can show how it is reached. Keep the two
+      # defaults equal.
+      PURSER_BIND_ADDRESS: ${PURSER_BIND_ADDRESS:-127.0.0.1}
+      # The household time zone, an IANA name such as America/New_York.
+      # Settings -> General overrides it later.
+      PURSER_TIMEZONE: ${PURSER_TIMEZONE:-UTC}
     ports:
-      - "${PURSER_BIND_ADDRESS:-127.0.0.1}:8000:8000"
+      # PURSER_HOST_PORT moves Purser off 8000 when another program has it.
+      - "${PURSER_BIND_ADDRESS:-127.0.0.1}:${PURSER_HOST_PORT:-8000}:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
       interval: 30s

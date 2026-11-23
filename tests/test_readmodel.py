@@ -2,13 +2,14 @@
 read-only role, and dashboard queries actually executing."""
 
 import json
-from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
+
+from tests.conftest import today
 
 DASHBOARDS = sorted((Path(__file__).parent.parent / "grafana" / "dashboards").glob("*.json"))
 
@@ -58,7 +59,7 @@ def demo(clean_db: None, migrated_engine: Engine) -> None:
     session: Session
     with get_sessionmaker()() as session:
         seed_demo(session)
-        materialize_day(session, date.today())
+        materialize_day(session, today())
         session.commit()
 
 

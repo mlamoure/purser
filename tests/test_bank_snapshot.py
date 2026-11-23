@@ -24,6 +24,7 @@ from purser.models import (
     Transaction,
 )
 from tests import test_mcp
+from tests.conftest import now, today
 
 live_server = test_mcp.live_server
 PATH = "assets.snapshot"
@@ -224,7 +225,7 @@ def test_basis_exact_difference_even_when_other_basis_matches(
                 "category": "expenses.groceries",
                 "amount": amount,
                 # Future dates are intentionally part of the declared comparison.
-                "date": (date.today() + timedelta(days=5)).isoformat(),
+                "date": (today() + timedelta(days=5)).isoformat(),
                 "status": status,
             },
         )
@@ -321,7 +322,7 @@ def test_unavailable_states(
             account.connection_id = None
             account.external_id = None
         elif state == "account_closed":
-            account.closed_at = datetime.now(UTC)
+            account.closed_at = now()
         elif state == "connection_disabled":
             connection = session.get(Connection, connection_id)
             assert connection is not None
@@ -422,6 +423,7 @@ def test_account_type_does_not_hide_reported_balances(
         account.type = account_type
         if cash:
             account.holdings_source = "manual"
+            account.balance_true_up = False  # feed holdings only (decision 119)
             account.feed_balance_is_cash = True
         session.commit()
     result = _snapshot(admin_client, account_id, _token(admin_client, ["read"]))

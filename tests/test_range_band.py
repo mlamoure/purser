@@ -20,6 +20,7 @@ from sqlalchemy import Engine, text
 
 from purser import crypto
 from purser.core import forecasting as core_forecasting
+from tests.conftest import today
 from tests.test_mcp import (
     LiveServer,
     live_server,
@@ -218,7 +219,7 @@ def _settle_history(
 
 
 def _past(weeks: int) -> date:
-    return date.today() - timedelta(weeks=weeks)
+    return today() - timedelta(weeks=weeks)
 
 
 def _events(client: TestClient, account: str, days: int) -> tuple[dict[str, Any], list[Any]]:
@@ -310,7 +311,7 @@ class TestServiceBands:
                 "account": "assets.checking",
                 "category": "expenses.housing",
                 "amount": "-42.00",
-                "date": (date.today() + timedelta(days=4)).isoformat(),
+                "date": (today() + timedelta(days=4)).isoformat(),
                 "payee": "Plumber",
                 "status": "expected",
             },
@@ -396,7 +397,7 @@ class TestServiceBands:
                 # One occurrence in 2 days, the next a quarter later: the
                 # nightly scan's 30 days see exactly one.
                 "rrule": "FREQ=MONTHLY;INTERVAL=3",
-                "dtstart": (date.today() + timedelta(days=2)).isoformat(),
+                "dtstart": (today() + timedelta(days=2)).isoformat(),
                 "amount_type": "estimated",
                 "amount": "-1000.00",
                 "estimate_basis": "rolling_avg_3",
@@ -452,7 +453,7 @@ def _mcp_estimated(
             "account": "assets.checking",
             "category": "expenses.groceries",
             "rrule": rrule,
-            "dtstart": (dtstart or date.today()).isoformat(),
+            "dtstart": (dtstart or today()).isoformat(),
             "amount_type": "estimated",
             "amount": amount,
             "estimate_basis": "rolling_avg_3",
@@ -490,7 +491,7 @@ class TestMcpBand:
             amount="-1000.00",
             history=["-900.00", "-1500.00"],
             rrule="FREQ=MONTHLY;INTERVAL=3",
-            dtstart=date.today() + timedelta(days=2),
+            dtstart=today() + timedelta(days=2),
         )
         client.post(
             "/schedules",

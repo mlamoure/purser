@@ -195,6 +195,12 @@
             ],
             "title": "Balance Method"
           },
+          "balance_true_up": {
+            "default": false,
+            "description": "Brokerage accounts whose holdings come from the feed: after each sync, post a labelled balance adjustment so cash plus holdings equal the broker's balance. Always false on other accounts.",
+            "title": "Balance True Up",
+            "type": "boolean"
+          },
           "bank_snapshot": {
             "$ref": "#/components/schemas/BankSnapshot"
           },
@@ -511,6 +517,12 @@
             ],
             "title": "Balance Method"
           },
+          "balance_true_up": {
+            "default": false,
+            "description": "Brokerage accounts whose holdings come from the feed: after each sync, post a labelled balance adjustment so cash plus holdings equal the broker's balance. Always false on other accounts.",
+            "title": "Balance True Up",
+            "type": "boolean"
+          },
           "closed_at": {
             "anyOf": [
               {
@@ -805,6 +817,18 @@
             "description": "A hand-valued asset (type property) only: what it is, a label and an icon. Absent leaves it unchanged. Write scope.",
             "title": "Asset Kind"
           },
+          "balance_true_up": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A brokerage account whose holdings come from the feed only (422 otherwise): after each sync, Purser compares the balance the broker reported with the account's cash plus the holdings from the same fetch and, when they differ by a cent or more, posts one labelled 'Balance adjustment' against Securities trade (equity.securities) for the difference, so a buy row the broker never sent cannot leave the account overstated. On by default; false stops future adjustments (past ones stay). Absent leaves it unchanged. Write scope.",
+            "title": "Balance True Up"
+          },
           "description": {
             "anyOf": [
               {
@@ -1048,6 +1072,16 @@
             "title": "Outcome",
             "type": "string"
           },
+          "privacy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PrivacyRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "request_id": {
             "anyOf": [
               {
@@ -1095,6 +1129,7 @@
           "outcome",
           "identity",
           "sharing",
+          "privacy",
           "extra_fields",
           "requested_extra",
           "before_after",
@@ -1191,6 +1226,256 @@
           "amount"
         ],
         "title": "ActualOut",
+        "type": "object"
+      },
+      "AiCheckIn": {
+        "additionalProperties": false,
+        "description": "The provider setup to check. Each absent field falls back to the saved\nsetting, so the settings card can check what is in its form before it is\nsaved. Nothing here is stored.",
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A key to use instead of the stored one; never stored by this call.",
+            "title": "Api Key"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "enum": [
+                  "openai",
+                  "local",
+                  "anthropic"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          },
+          "timeout_seconds": {
+            "anyOf": [
+              {
+                "maximum": 600.0,
+                "minimum": 5.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timeout Seconds"
+          },
+          "use_stored_key": {
+            "default": true,
+            "description": "With no api_key: send the stored key (true) or no key at all (false). The stored key goes only to the saved provider and base URL: checking any other sends no key, and the answer says so (`key_sent`, `message`).",
+            "title": "Use Stored Key",
+            "type": "boolean"
+          }
+        },
+        "title": "AiCheckIn",
+        "type": "object"
+      },
+      "AiDisclosureOut": {
+        "description": "What one AI capability sends to the provider, in plain words\n(``ai_providers.DISCLOSURES``, pinned to the prompt builders by a test).",
+        "properties": {
+          "capability": {
+            "enum": [
+              "categorize",
+              "review"
+            ],
+            "title": "Capability",
+            "type": "string"
+          },
+          "sends": {
+            "description": "Each item sent, as a phrase.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Sends",
+            "type": "array"
+          },
+          "when": {
+            "description": "The situation, e.g. 'To categorize a transaction ...'.",
+            "title": "When",
+            "type": "string"
+          }
+        },
+        "required": [
+          "capability",
+          "when",
+          "sends"
+        ],
+        "title": "AiDisclosureOut",
+        "type": "object"
+      },
+      "AiModelsOut": {
+        "properties": {
+          "key_sent": {
+            "description": "Whether the request carried an API key.",
+            "title": "Key Sent",
+            "type": "boolean"
+          },
+          "listed": {
+            "description": "False when the server offers no model list (HTTP 404/405).",
+            "title": "Listed",
+            "type": "boolean"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "models": {
+            "description": "Model ids, sorted; at most 500.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Models",
+            "type": "array"
+          }
+        },
+        "required": [
+          "listed",
+          "models",
+          "key_sent",
+          "message"
+        ],
+        "title": "AiModelsOut",
+        "type": "object"
+      },
+      "AiTestOut": {
+        "properties": {
+          "answered": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The model replied with the JSON Purser asks for.",
+            "title": "Answered"
+          },
+          "authenticated": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "None when the server's answers do not say.",
+            "title": "Authenticated"
+          },
+          "elapsed_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How long the model took to answer.",
+            "title": "Elapsed Ms"
+          },
+          "key_sent": {
+            "title": "Key Sent",
+            "type": "boolean"
+          },
+          "message": {
+            "description": "What happened, in one or two sentences; never the key.",
+            "title": "Message",
+            "type": "string"
+          },
+          "model_listed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "None when the server offers no model list.",
+            "title": "Model Listed"
+          },
+          "network": {
+            "description": "Where the server's address resolves; a 'local' provider on the public internet gets a warning.",
+            "enum": [
+              "this_machine",
+              "private_network",
+              "public_internet",
+              "unknown"
+            ],
+            "title": "Network",
+            "type": "string"
+          },
+          "ok": {
+            "description": "Reachable, authenticated, and the model answered as expected.",
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "reachable": {
+            "title": "Reachable",
+            "type": "boolean"
+          },
+          "warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Warning"
+          }
+        },
+        "required": [
+          "ok",
+          "reachable",
+          "authenticated",
+          "model_listed",
+          "answered",
+          "network",
+          "key_sent",
+          "elapsed_ms",
+          "message",
+          "warning"
+        ],
+        "title": "AiTestOut",
         "type": "object"
       },
       "AmountEvidence": {
@@ -1637,9 +1922,37 @@
             "title": "Id",
             "type": "string"
           },
+          "identifiable": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Identifiable"
+          },
           "kind": {
             "title": "Kind",
             "type": "string"
+          },
+          "privacy_requested": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Privacy Requested"
           },
           "request_id": {
             "anyOf": [
@@ -2443,6 +2756,111 @@
         "title": "BackfillRequest",
         "type": "object"
       },
+      "BackingCandidate": {
+        "properties": {
+          "amount": {
+            "title": "Amount",
+            "type": "string"
+          },
+          "backing": {
+            "description": "already backs this split",
+            "title": "Backing",
+            "type": "boolean"
+          },
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "exact": {
+            "description": "its amount is exactly the `amount` asked for",
+            "title": "Exact",
+            "type": "boolean"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "payee": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payee"
+          },
+          "status": {
+            "description": "pending | posted, or merged for a row backing this split",
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "date",
+          "amount",
+          "status",
+          "payee",
+          "description",
+          "backing",
+          "exact"
+        ],
+        "title": "BackingCandidate",
+        "type": "object"
+      },
+      "BackingCandidates": {
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Amount"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/BackingCandidate"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "window_days": {
+            "title": "Window Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "account",
+          "window_days",
+          "amount",
+          "candidates"
+        ],
+        "title": "BackingCandidates",
+        "type": "object"
+      },
       "BalanceAsOf": {
         "description": "Point-in-time balance from the stored running-balance table\n(decision 37: chain-head pending+posted register semantics), or the\nlatest valuation for open loan accounts (decision 42).",
         "properties": {
@@ -2488,6 +2906,130 @@
         "title": "BalanceAsOf",
         "type": "object"
       },
+      "BalanceHistoryOut": {
+        "description": "One account's reported end-of-day balance over a window, sampled for\na chart (#594). Unlike ``/balance/series`` (postings, per change), every\npoint here is the overlay-aware balance the account header shows.",
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "change": {
+            "title": "Change",
+            "type": "string"
+          },
+          "change_pct": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Change Pct"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "current": {
+            "title": "Current",
+            "type": "string"
+          },
+          "end": {
+            "format": "date",
+            "title": "End",
+            "type": "string"
+          },
+          "first_activity": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Activity"
+          },
+          "high": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HistoryPoint"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "interval_days": {
+            "title": "Interval Days",
+            "type": "integer"
+          },
+          "low": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HistoryPoint"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "method": {
+            "title": "Method",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "points": {
+            "items": {
+              "$ref": "#/components/schemas/HistoryPoint"
+            },
+            "title": "Points",
+            "type": "array"
+          },
+          "range": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Range"
+          },
+          "start": {
+            "format": "date",
+            "title": "Start",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "path",
+          "currency",
+          "range",
+          "start",
+          "end",
+          "method",
+          "interval_days",
+          "points",
+          "current",
+          "change",
+          "change_pct",
+          "low",
+          "high",
+          "first_activity"
+        ],
+        "title": "BalanceHistoryOut",
+        "type": "object"
+      },
       "BalancePoint": {
         "properties": {
           "balance": {
@@ -2500,26 +3042,38 @@
             "type": "string"
           },
           "delta": {
-            "title": "Delta",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delta"
           },
           "transaction_id": {
-            "format": "uuid",
-            "title": "Transaction Id",
-            "type": "string"
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transaction Id"
           }
         },
         "required": [
           "date",
-          "balance",
-          "delta",
-          "transaction_id"
+          "balance"
         ],
         "title": "BalancePoint",
         "type": "object"
       },
       "BalanceSeries": {
-        "description": "Full-resolution balance history: one point per stored change, which is\nthe grain the running-balance store keeps and the register shows.",
+        "description": "Full-resolution balance history: one point per stored change, which is\nthe grain the running-balance store keeps and the register shows. It is\nthe postings history for every account type (decision 129): ``opening``\nplus every ``delta`` equals the last point.",
         "properties": {
           "account_id": {
             "format": "uuid",
@@ -2562,6 +3116,20 @@
           "truncated": {
             "title": "Truncated",
             "type": "boolean"
+          },
+          "withheld": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Withheld"
           }
         },
         "required": [
@@ -3537,6 +4105,13 @@
             "title": "Ai Api Key Set",
             "type": "boolean"
           },
+          "ai_disclosure": {
+            "items": {
+              "$ref": "#/components/schemas/AiDisclosureOut"
+            },
+            "title": "Ai Disclosure",
+            "type": "array"
+          },
           "encryption": {
             "$ref": "#/components/schemas/EncryptionStatus"
           },
@@ -3567,6 +4142,7 @@
           "values",
           "overridden",
           "ai_api_key_set",
+          "ai_disclosure",
           "oidc_client_secret_set",
           "price_api_key_set",
           "sync_reschedule_live",
@@ -3588,6 +4164,7 @@
                 "type": "null"
               }
             ],
+            "description": "Write-only. null stores 'no key' (DELETE returns to the env key).",
             "title": "Ai Api Key"
           },
           "ai_base_url": {
@@ -3618,6 +4195,7 @@
                 "enum": [
                   "none",
                   "openai",
+                  "local",
                   "anthropic"
                 ],
                 "type": "string"
@@ -3626,7 +4204,22 @@
                 "type": "null"
               }
             ],
+            "description": "none (off) \u00b7 local: a model you run behind an OpenAI-compatible API (needs ai_base_url; the key is optional) \u00b7 openai: a hosted OpenAI-compatible service \u00b7 anthropic.",
             "title": "Ai Provider"
+          },
+          "ai_timeout_seconds": {
+            "anyOf": [
+              {
+                "maximum": 600.0,
+                "minimum": 5.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Seconds to wait for one provider answer.",
+            "title": "Ai Timeout Seconds"
           },
           "audit_retention_days": {
             "anyOf": [
@@ -3748,28 +4341,6 @@
             ],
             "title": "Price Stale Days"
           },
-          "privacy_amount": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Privacy Amount"
-          },
-          "privacy_purchase": {
-            "anyOf": [
-              {
-                "type": "boolean"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Privacy Purchase"
-          },
           "session_idle_hours": {
             "anyOf": [
               {
@@ -3854,6 +4425,10 @@
             "title": "Ai Provider",
             "type": "string"
           },
+          "ai_timeout_seconds": {
+            "title": "Ai Timeout Seconds",
+            "type": "integer"
+          },
           "audit_retention_days": {
             "title": "Audit Retention Days",
             "type": "integer"
@@ -3911,14 +4486,6 @@
             "title": "Price Stale Days",
             "type": "integer"
           },
-          "privacy_amount": {
-            "title": "Privacy Amount",
-            "type": "boolean"
-          },
-          "privacy_purchase": {
-            "title": "Privacy Purchase",
-            "type": "boolean"
-          },
           "session_idle_hours": {
             "title": "Session Idle Hours",
             "type": "integer"
@@ -3942,11 +4509,10 @@
         "required": [
           "sync_schedule",
           "transfer_auto_link",
-          "privacy_purchase",
-          "privacy_amount",
           "ai_provider",
           "ai_model",
           "ai_base_url",
+          "ai_timeout_seconds",
           "grafana_url",
           "session_ttl_days",
           "session_idle_hours",
@@ -4258,6 +4824,18 @@
             "description": "transfer_link accepts: how many historical pairs activating that rule would link now \u2014 the count its activation asks you to confirm.",
             "title": "Projected Links"
           },
+          "projected_matches": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "trade_rule accepts: how many live rows the rule selects now \u2014 what its apply-history dry run would offer to mark as securities trades.",
+            "title": "Projected Matches"
+          },
           "rule": {
             "anyOf": [
               {
@@ -4267,7 +4845,7 @@
                 "type": "null"
               }
             ],
-            "description": "the transfer_link rule an accept produced \u2014 a DRAFT. It links nothing until activated with POST /rules/{rule_id}/state {state: active, confirm_links: projected_links}."
+            "description": "the rule an accept produced \u2014 a DRAFT. A transfer_link rule links nothing until activated with POST /rules/{rule_id}/state {state: active, confirm_links: projected_links}; a trade_rule's categorize rule marks nothing until activated (POST /rules/{rule_id}/state {state: active}), and history only through apply-history."
           },
           "schedule": {
             "anyOf": [
@@ -4279,6 +4857,19 @@
               }
             ],
             "description": "the schedule an accept produced (active, materialized)"
+          },
+          "split_transaction_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "split accepts: the split row (a posted row's replacement)",
+            "title": "Split Transaction Id"
           },
           "suggestion": {
             "$ref": "#/components/schemas/SuggestionOut"
@@ -4324,7 +4915,7 @@
                 "type": "null"
               }
             ],
-            "description": "draft fields to change before applying (edit_then_accept). A schedule takes any draft field; a transfer_link takes amount_exact (a decimal string), window_days (0 to 14) and effective_from (YYYY-MM-DD) \u2014 its pair and payee are what it proposes.",
+            "description": "draft fields to change before applying (edit_then_accept). A schedule takes any draft field; a transfer_link takes amount_exact (a decimal string), window_days (0 to 14) and effective_from (YYYY-MM-DD) \u2014 its pair and payee are what it proposes. A split takes lines (the draft's line shape); a trade_rule takes match_field, match_mode, match_text and direction (debit, credit or null) \u2014 its account is what it proposes.",
             "title": "Edits"
           },
           "note": {
@@ -4340,7 +4931,7 @@
           },
           "reject_scope": {
             "default": "exact",
-            "description": "exact = just this suggestion. counterparty = never suggest this (account, counterparty/payee) again \u2014 for a transfer_link, this account pair with any payee. A match and a transfer_pair reject exactly.",
+            "description": "exact = just this suggestion. counterparty = never suggest this (account, counterparty/payee) again \u2014 for a transfer_link, this account pair with any payee; for a trade_rule, any trade rule for this account. A match and a transfer_pair reject exactly.",
             "enum": [
               "exact",
               "counterparty"
@@ -4689,6 +5280,17 @@
             ],
             "title": "Mapped Account Id"
           },
+          "mapped_account_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mapped Account Name"
+          },
           "mapped_account_path": {
             "anyOf": [
               {
@@ -4721,6 +5323,16 @@
               }
             ],
             "title": "Org"
+          },
+          "proposal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProposalOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -5734,6 +6346,25 @@
         "title": "HealthOut",
         "type": "object"
       },
+      "HistoryPoint": {
+        "properties": {
+          "balance": {
+            "title": "Balance",
+            "type": "string"
+          },
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          }
+        },
+        "required": [
+          "date",
+          "balance"
+        ],
+        "title": "HistoryPoint",
+        "type": "object"
+      },
       "HoldingOut": {
         "properties": {
           "account_id": {
@@ -5865,6 +6496,299 @@
           "market_value"
         ],
         "title": "HoldingOut",
+        "type": "object"
+      },
+      "HoldingsSummaryLineOut": {
+        "properties": {
+          "cost_basis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Basis"
+          },
+          "gain_pct": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gain Pct"
+          },
+          "in_transit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "In Transit"
+          },
+          "market_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Market Value"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "no_price": {
+            "title": "No Price",
+            "type": "boolean"
+          },
+          "position_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position Id"
+          },
+          "price": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price"
+          },
+          "price_as_of": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price As Of"
+          },
+          "price_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Source"
+          },
+          "quantity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quantity"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "stale_price": {
+            "title": "Stale Price",
+            "type": "boolean"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          },
+          "unpriceable": {
+            "title": "Unpriceable",
+            "type": "boolean"
+          },
+          "unrealized_gain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unrealized Gain"
+          },
+          "value_out_of_range": {
+            "title": "Value Out Of Range",
+            "type": "boolean"
+          },
+          "weight_pct": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weight Pct"
+          }
+        },
+        "required": [
+          "symbol",
+          "name",
+          "source",
+          "position_id",
+          "quantity",
+          "price",
+          "price_as_of",
+          "price_source",
+          "market_value",
+          "cost_basis",
+          "unrealized_gain",
+          "gain_pct",
+          "weight_pct",
+          "in_transit",
+          "stale_price",
+          "no_price",
+          "unpriceable",
+          "value_out_of_range"
+        ],
+        "title": "HoldingsSummaryLineOut",
+        "type": "object"
+      },
+      "HoldingsSummaryOut": {
+        "description": "One brokerage account's newest holdings as a table (#595). Every\nfigure is computed server-side; ``cash`` plus ``market_value`` is\n``total``, the account's reported balance.",
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "cash": {
+            "title": "Cash",
+            "type": "string"
+          },
+          "cash_weight_pct": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cash Weight Pct"
+          },
+          "closed": {
+            "title": "Closed",
+            "type": "boolean"
+          },
+          "cost_basis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Basis"
+          },
+          "gain_pct": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gain Pct"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/HoldingsSummaryLineOut"
+            },
+            "title": "Lines",
+            "type": "array"
+          },
+          "market_value": {
+            "title": "Market Value",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "string"
+          },
+          "unrealized_gain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unrealized Gain"
+          }
+        },
+        "required": [
+          "account_id",
+          "as_of",
+          "source",
+          "closed",
+          "cash",
+          "cash_weight_pct",
+          "market_value",
+          "cost_basis",
+          "unrealized_gain",
+          "gain_pct",
+          "total",
+          "lines"
+        ],
+        "title": "HoldingsSummaryOut",
         "type": "object"
       },
       "IgnoreOut": {
@@ -7499,6 +8423,175 @@
         "title": "ManualMatchRequest",
         "type": "object"
       },
+      "MapAccountItem": {
+        "description": "One line of a mapping batch. Everything but ``ref`` is optional: what\nis left out takes the plan's proposal.",
+        "properties": {
+          "account": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Map onto this existing open account (path or id) instead of a new one.",
+            "title": "Account"
+          },
+          "action": {
+            "anyOf": [
+              {
+                "enum": [
+                  "map",
+                  "ignore"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Default: the plan's own action (map, or ignore a duplicate).",
+            "title": "Action"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "ref": {
+            "description": "The delivered account's `ref` from the plan.",
+            "title": "Ref",
+            "type": "string"
+          },
+          "replace_feed": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "With `account`: map onto it although it already takes another bank account's feed, which then waits to be mapped again (decision 134). Admin scope only; without it a line onto an account that has a feed is refused, naming that feed.",
+            "title": "Replace Feed"
+          },
+          "starting_balance": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Start the account from the bank's balance (decision 123). Default: yes for a new checking, savings, cash or credit-card account, no for an existing one.",
+            "title": "Starting Balance"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "checking, savings, credit_card, cash, brokerage, loan or property. It cannot be changed after mapping.",
+            "title": "Type"
+          }
+        },
+        "required": [
+          "ref"
+        ],
+        "title": "MapAccountItem",
+        "type": "object"
+      },
+      "MapAccountsOut": {
+        "properties": {
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plan"
+          },
+          "results": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Results"
+          }
+        },
+        "title": "MapAccountsOut",
+        "type": "object"
+      },
+      "MapAccountsRequest": {
+        "properties": {
+          "accounts": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/MapAccountItem"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The lines to apply. Omit to get the plan and write nothing.",
+            "title": "Accounts"
+          },
+          "dry_run": {
+            "default": false,
+            "description": "Check the lines and answer what they would do, unwritten.",
+            "title": "Dry Run",
+            "type": "boolean"
+          }
+        },
+        "title": "MapAccountsRequest",
+        "type": "object"
+      },
       "MapRequest": {
         "properties": {
           "account_id": {
@@ -7530,6 +8623,11 @@
           "external_id": {
             "title": "External Id",
             "type": "string"
+          },
+          "starting_balance": {
+            "default": false,
+            "title": "Starting Balance",
+            "type": "boolean"
           }
         },
         "required": [
@@ -7902,6 +9000,85 @@
         "title": "NetWorthOut",
         "type": "object"
       },
+      "NetworkOut": {
+        "description": "How this Purser is reached (#632, decision 117). Instance identity,\nread from the environment at startup: nothing here is editable at\nruntime, and switching is done on the host (the setup guide).",
+        "properties": {
+          "allowed_hosts": {
+            "description": "PURSER_ALLOWED_HOSTS: other names agents may use (#633).",
+            "items": {
+              "type": "string"
+            },
+            "title": "Allowed Hosts",
+            "type": "array"
+          },
+          "bind_address": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "PURSER_BIND_ADDRESS as the deployment reports it; null when it does not.",
+            "title": "Bind Address"
+          },
+          "guide_url": {
+            "description": "The setup guide's section on reaching Purser from another machine.",
+            "title": "Guide Url",
+            "type": "string"
+          },
+          "mcp_url": {
+            "description": "Where agents connect: the public URL plus /mcp.",
+            "title": "Mcp Url",
+            "type": "string"
+          },
+          "public_url": {
+            "description": "PURSER_PUBLIC_URL: the address Purser gives out.",
+            "title": "Public Url",
+            "type": "string"
+          },
+          "public_url_is_local": {
+            "description": "PURSER_PUBLIC_URL names localhost, so other machines cannot use it.",
+            "title": "Public Url Is Local",
+            "type": "boolean"
+          },
+          "reach": {
+            "description": "this_machine: the port is published on loopback only. home_network: on another address (PURSER_BIND_ADDRESS=0.0.0.0), over plain HTTP. reverse_proxy: PURSER_PUBLIC_URL is https, so something in front of Purser terminates TLS. unknown: the deployment does not report how it publishes the port (Compose passes PURSER_BIND_ADDRESS); not guessed.",
+            "enum": [
+              "this_machine",
+              "home_network",
+              "reverse_proxy",
+              "unknown"
+            ],
+            "title": "Reach",
+            "type": "string"
+          },
+          "request_host": {
+            "description": "The address (Host) this request was sent to.",
+            "title": "Request Host",
+            "type": "string"
+          },
+          "request_host_accepted": {
+            "description": "Whether agents can connect at request_host: the public URL's host, an allowed name or a loopback name. False means the web UI is open at an address the MCP endpoint refuses with 421.",
+            "title": "Request Host Accepted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "reach",
+          "public_url",
+          "mcp_url",
+          "allowed_hosts",
+          "bind_address",
+          "public_url_is_local",
+          "request_host",
+          "request_host_accepted",
+          "guide_url"
+        ],
+        "title": "NetworkOut",
+        "type": "object"
+      },
       "OriginalOut": {
         "properties": {
           "amount": {
@@ -8110,6 +9287,22 @@
       },
       "PositionEventCreate": {
         "properties": {
+          "cash_in_lieu": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`split` only: the cash the broker paid for the fractional share the split left. The fraction leaves in a `sell` recorded with the split (its proceeds are this amount) and reversed with it; `settle_on`, `transaction_id`, `force_cash`, `lot_method` and `lots` apply to that sale.",
+            "title": "Cash In Lieu"
+          },
           "cost_basis": {
             "anyOf": [
               {
@@ -8187,13 +9380,14 @@
             "title": "Gross Quantity"
           },
           "kind": {
-            "description": "`set_quantity` (the absolute share count on that date), `buy` or `sell` (a change by `quantity`), `vest` (the NET shares an award vest delivered; `price` is the fair market value per share) or `transfer_out` (shares that left with no price and no cash).",
+            "description": "`set_quantity` (the absolute share count on that date), `buy` or `sell` (a change by `quantity`), `vest` (the NET shares an award vest delivered; `price` is the fair market value per share), `transfer_out` (shares that left with no price and no cash) or `split` (every share becomes `split_numerator` / `split_denominator` shares at the start of `occurred_on`, the effective date).",
             "enum": [
               "set_quantity",
               "buy",
               "sell",
               "vest",
-              "transfer_out"
+              "transfer_out",
+              "split"
             ],
             "title": "Kind",
             "type": "string"
@@ -8300,8 +9494,12 @@
               },
               {
                 "type": "string"
+              },
+              {
+                "type": "null"
               }
             ],
+            "description": "Required for every kind but `split`, which takes a ratio instead.",
             "title": "Quantity"
           },
           "replaces": {
@@ -8341,6 +9539,34 @@
               }
             ],
             "title": "Source Note"
+          },
+          "split_denominator": {
+            "anyOf": [
+              {
+                "maximum": 1000000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`split` only: the old shares that become `split_numerator` new ones.",
+            "title": "Split Denominator"
+          },
+          "split_numerator": {
+            "anyOf": [
+              {
+                "maximum": 1000000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`split` only: new shares for every `split_denominator` old ones (2 for a 2:1 forward split, 1 for a 1:10 reverse split).",
+            "title": "Split Numerator"
           },
           "transaction_id": {
             "anyOf": [
@@ -8386,8 +9612,7 @@
         },
         "required": [
           "kind",
-          "occurred_on",
-          "quantity"
+          "occurred_on"
         ],
         "title": "PositionEventCreate",
         "type": "object"
@@ -8452,13 +9677,26 @@
             "title": "Id",
             "type": "string"
           },
+          "in_lieu_of": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "In Lieu Of"
+          },
           "kind": {
             "enum": [
               "set_quantity",
               "buy",
               "sell",
               "vest",
-              "transfer_out"
+              "transfer_out",
+              "split"
             ],
             "title": "Kind",
             "type": "string"
@@ -8582,6 +9820,28 @@
             ],
             "title": "Source Note"
           },
+          "split_denominator": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Split Denominator"
+          },
+          "split_numerator": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Split Numerator"
+          },
           "transaction_id": {
             "anyOf": [
               {
@@ -8629,6 +9889,16 @@
       "PositionEventResult": {
         "description": "The event written and the position after it.",
         "properties": {
+          "cash_in_lieu": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PositionEventOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "event": {
             "$ref": "#/components/schemas/PositionEventOut"
           },
@@ -9059,6 +10329,55 @@
         "title": "PotentialNetWorthOut",
         "type": "object"
       },
+      "PresentIn": {
+        "properties": {
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "transaction_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Transaction Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "transaction_ids"
+        ],
+        "title": "PresentIn",
+        "type": "object"
+      },
+      "PresentOut": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "count"
+        ],
+        "title": "PresentOut",
+        "type": "object"
+      },
       "PriceCreate": {
         "properties": {
           "close": {
@@ -9223,6 +10542,110 @@
           "last_failure"
         ],
         "title": "PriceStatusOut",
+        "type": "object"
+      },
+      "PrivacyRecord": {
+        "description": "What a call row says about privacy (#613): the fields the call asked to\nwithhold, the fields its answer left out, and the payee, description and\namount fields it returned with real values.",
+        "properties": {
+          "identifiable": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Identifiable",
+            "type": "array"
+          },
+          "requested": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Requested",
+            "type": "array"
+          },
+          "withheld": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Withheld",
+            "type": "array"
+          }
+        },
+        "required": [
+          "requested",
+          "withheld",
+          "identifiable"
+        ],
+        "title": "PrivacyRecord",
+        "type": "object"
+      },
+      "ProposalOut": {
+        "description": "What Purser proposes for a delivered bank account nothing takes yet\n(decision 126), from what the feed states about it. The feed carries no\naccount type, so ``type_basis`` says what the type rests on: `name` (the\nbank's own words), `holdings` (the name says nothing and the feed lists\nholdings), `balance` (a debt, with or without credit left) or `default`\n(nothing says; offered as checking). ``confident`` is false when the type\ndeserves a second look, and ``note`` says why when the name names a cash\nproduct but the feed lists holdings for it too.",
+        "properties": {
+          "action": {
+            "enum": [
+              "map",
+              "ignore",
+              "blocked"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "confident": {
+            "title": "Confident",
+            "type": "boolean"
+          },
+          "duplicate_of": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duplicate Of"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "starting_balance": {
+            "title": "Starting Balance",
+            "type": "boolean"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          },
+          "type_basis": {
+            "title": "Type Basis",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "name",
+          "type",
+          "type_basis",
+          "confident",
+          "path",
+          "starting_balance"
+        ],
+        "title": "ProposalOut",
         "type": "object"
       },
       "QifImportRequest": {
@@ -10130,6 +11553,12 @@
             "title": "Priority",
             "type": "integer"
           },
+          "securities_trade": {
+            "default": false,
+            "description": "categorize rules only, in place of category_id: mark matching rows as a securities trade (the system account equity.securities, never spending or income). The rule must name account_ids, every one a brokerage account whose holdings come from the feed (422 otherwise): Purser never decides on its own which rows are trades.",
+            "title": "Securities Trade",
+            "type": "boolean"
+          },
           "type": {
             "enum": [
               "categorize",
@@ -10205,6 +11634,12 @@
           "priority": {
             "title": "Priority",
             "type": "integer"
+          },
+          "securities_trade": {
+            "default": false,
+            "description": "categorize rules that mark matching rows as a securities trade (equity.securities) rather than a category.",
+            "title": "Securities Trade",
+            "type": "boolean"
           },
           "state": {
             "title": "State",
@@ -10611,6 +12046,18 @@
               }
             ],
             "title": "Priority"
+          },
+          "securities_trade": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "categorize rules only, in place of category_id: mark matching rows as a securities trade (the system account equity.securities, never spending or income). The rule must name account_ids, every one a brokerage account whose holdings come from the feed (422 otherwise): Purser never decides on its own which rows are trades. true sets that target; to change it back, send a category_id instead.",
+            "title": "Securities Trade"
           },
           "window_days": {
             "anyOf": [
@@ -11578,6 +13025,249 @@
         "title": "SlotOut",
         "type": "object"
       },
+      "SplitIn": {
+        "additionalProperties": false,
+        "properties": {
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/SplitLineIn"
+            },
+            "maxItems": 50,
+            "minItems": 2,
+            "title": "Lines",
+            "type": "array"
+          }
+        },
+        "required": [
+          "lines"
+        ],
+        "title": "SplitIn",
+        "type": "object"
+      },
+      "SplitLineIn": {
+        "additionalProperties": false,
+        "properties": {
+          "amount": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "description": "the line's share of the row's amount, in the flat form's sign (negative = money out); the lines sum to the row's amount",
+            "title": "Amount"
+          },
+          "backing_ids": {
+            "description": "account line only: bank rows on that account whose amounts sum exactly to the line's leg (its amount, negated); they are merged into the split. At most 50 across the split's lines",
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Backing Ids",
+            "type": "array"
+          },
+          "category": {
+            "description": "category path or id, or '[account path or id]' for an account line",
+            "title": "Category",
+            "type": "string"
+          },
+          "memo": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memo"
+          }
+        },
+        "required": [
+          "category",
+          "amount"
+        ],
+        "title": "SplitLineIn",
+        "type": "object"
+      },
+      "SplitLineOut": {
+        "description": "One line of a split (decision 118): a category, or an `[Account]`\nline booking a leg on another account, which `backing_ids` \u2014 that\naccount's bank rows merged into the split \u2014 may back.",
+        "properties": {
+          "amount": {
+            "description": "the line's share of the row's amount (flat-form sign)",
+            "title": "Amount",
+            "type": "string"
+          },
+          "backing_ids": {
+            "description": "bank rows backing an account line's leg",
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Backing Ids",
+            "type": "array"
+          },
+          "kind": {
+            "enum": [
+              "category",
+              "account"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "memo": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Memo"
+          },
+          "target": {
+            "description": "category path, or [account path] for an account line",
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target",
+          "kind",
+          "amount"
+        ],
+        "title": "SplitLineOut",
+        "type": "object"
+      },
+      "SplitOut": {
+        "properties": {
+          "account_path": {
+            "title": "Account Path",
+            "type": "string"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/SplitLineOut"
+            },
+            "title": "Lines",
+            "type": "array"
+          }
+        },
+        "required": [
+          "account_path",
+          "lines"
+        ],
+        "title": "SplitOut",
+        "type": "object"
+      },
+      "SplitResult": {
+        "description": "What a split write did (or, with `dry_run`, would do).",
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "amount": {
+            "title": "Amount",
+            "type": "string"
+          },
+          "backing_added": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Backing Added",
+            "type": "array"
+          },
+          "backing_restored": {
+            "description": "rows that backed the split before and come back",
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Backing Restored",
+            "type": "array"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/SplitLineOut"
+            },
+            "title": "Lines",
+            "type": "array"
+          },
+          "replaces_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replaces Id"
+          },
+          "restored_ids": {
+            "description": "the clones those rows came back as",
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Restored Ids",
+            "type": "array"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "transaction_id": {
+            "description": "the split row now (a posted row's replacement)",
+            "format": "uuid",
+            "title": "Transaction Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transaction_id",
+          "account",
+          "amount"
+        ],
+        "title": "SplitResult",
+        "type": "object"
+      },
       "StaleOut": {
         "properties": {
           "price_as_of": {
@@ -11601,6 +13291,121 @@
           "price_as_of"
         ],
         "title": "StaleOut",
+        "type": "object"
+      },
+      "StartingBalanceRequest": {
+        "properties": {
+          "dry_run": {
+            "default": false,
+            "description": "Return exactly what the call would do, refusals included, without writing anything.",
+            "title": "Dry Run",
+            "type": "boolean"
+          }
+        },
+        "title": "StartingBalanceRequest",
+        "type": "object"
+      },
+      "StartingBalanceResult": {
+        "description": "An account's starting balance from the bank, after the call (or, with\n``dry_run``, what it would be). Amounts are in ledger sign: a card is\nnegative when money is owed.",
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "amount": {
+            "title": "Amount",
+            "type": "string"
+          },
+          "bank_balance": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bank Balance"
+          },
+          "bank_balance_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bank Balance Date"
+          },
+          "basis": {
+            "anyOf": [
+              {
+                "enum": [
+                  "posted_only",
+                  "pending_inclusive"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Basis"
+          },
+          "dry_run": {
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "entry_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entry Date"
+          },
+          "status": {
+            "enum": [
+              "set",
+              "unchanged",
+              "removed",
+              "none"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "transaction_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transaction Id"
+          }
+        },
+        "required": [
+          "account_id",
+          "status",
+          "amount",
+          "entry_date",
+          "basis",
+          "bank_balance",
+          "bank_balance_date",
+          "transaction_id",
+          "dry_run"
+        ],
+        "title": "StartingBalanceResult",
         "type": "object"
       },
       "StateChange": {
@@ -11924,8 +13729,17 @@
             "title": "Schedule",
             "type": "integer"
           },
+          "split": {
+            "title": "Split",
+            "type": "integer"
+          },
           "total": {
             "title": "Total",
+            "type": "integer"
+          },
+          "trade_rule": {
+            "default": 0,
+            "title": "Trade Rule",
             "type": "integer"
           },
           "transfer_link": {
@@ -11942,7 +13756,8 @@
           "schedule",
           "transfer_link",
           "match",
-          "transfer_pair"
+          "transfer_pair",
+          "split"
         ],
         "title": "SuggestionCountsOut",
         "type": "object"
@@ -11977,7 +13792,7 @@
           },
           "draft": {
             "additionalProperties": true,
-            "description": "The typed draft accept applies unchanged. schedule: name, account, counterparty_account, rrule, dtstart, amount_type, amount, estimate_basis, payee, category, autopost_policy. transfer_link: from_account, to_account, payee, payee_id, amount_exact, window_days, effective_from. match: expected_id, posted_id, account, label, expected_date, expected_amount, posted_date, posted_amount, variance (posted - expected). transfer_pair: outgoing_id, incoming_id, from_account, to_account, amount (moved, positive), outgoing_date, incoming_date, date_gap_days, outgoing_description, incoming_description.",
+            "description": "The typed draft accept applies unchanged. schedule: name, account, counterparty_account, rrule, dtstart, amount_type, amount, estimate_basis, payee, category, autopost_policy. transfer_link: from_account, to_account, payee, payee_id, amount_exact, window_days, effective_from. match: expected_id, posted_id, account, label, expected_date, expected_amount, posted_date, posted_amount, variance (posted - expected). transfer_pair: outgoing_id, incoming_id, from_account, to_account, amount (moved, positive), outgoing_date, incoming_date, date_gap_days, outgoing_description, incoming_description. split: transaction_id, template_id, account, date, amount, template_amount, payee, lines ({target, amount, memo, backing_ids}). trade_rule: account, account_id, match_field, match_mode, match_text, direction.",
             "title": "Draft",
             "type": "object"
           },
@@ -11999,6 +13814,7 @@
             "type": "object"
           },
           "headline": {
+            "description": "One line to show or relay, with accounts by name (#552); the draft keeps their paths, which accept applies and other calls take.",
             "title": "Headline",
             "type": "string"
           },
@@ -12008,12 +13824,14 @@
             "type": "string"
           },
           "kind": {
-            "description": "schedule: a recurring bill or transfer to expect (draft = a schedule). transfer_link: proposed by a manual transfer confirm (draft = a transfer_link rule for that account pair, scoped to the payee and its aliases). match: an open match proposal pairing an expected row with a bank row (draft = the pair; accept confirms it, reject rejects it for good). transfer_pair: a transfer candidate, two bank rows of exactly opposite amounts on two accounts that nothing links automatically (draft = the pair; accept confirms the transfer, reject remembers it is not one).",
+            "description": "schedule: a recurring bill or transfer to expect (draft = a schedule). transfer_link: proposed by a manual transfer confirm (draft = a transfer_link rule for that account pair, scoped to the payee and its aliases). match: an open match proposal pairing an expected row with a bank row (draft = the pair; accept confirms it, reject rejects it for good). transfer_pair: a transfer candidate, two bank rows of exactly opposite amounts on two accounts that nothing links automatically (draft = the pair; accept confirms the transfer, reject remembers it is not one). split: split like last time? A new bank row from a payee whose last split a person or an agent made (draft = the row and the lines to apply; accept splits it). trade_rule: proposed by marking a row a securities trade (draft = a categorize rule that marks rows like it on that brokerage account as a securities trade).",
             "enum": [
               "schedule",
               "transfer_link",
               "match",
-              "transfer_pair"
+              "transfer_pair",
+              "split",
+              "trade_rule"
             ],
             "title": "Kind",
             "type": "string"
@@ -12069,7 +13887,7 @@
             "title": "Snooze Until"
           },
           "source": {
-            "description": "detected | agent | account_added | confirm",
+            "description": "detected | agent | account_added | confirm | mark",
             "title": "Source",
             "type": "string"
           },
@@ -12286,6 +14104,14 @@
       },
       "SyncOut": {
         "properties": {
+          "balance_true_ups": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/TrueUpOut"
+            },
+            "title": "Balance True Ups",
+            "type": "array"
+          },
           "errors": {
             "items": {
               "type": "string"
@@ -12796,7 +14622,7 @@
         "type": "object"
       },
       "TransactionDetail": {
-        "description": "Full detail: postings and provenance links.",
+        "description": "Full detail: postings and provenance links; `split` lists a split's\nlines with their backing rows.",
         "properties": {
           "account_path": {
             "anyOf": [
@@ -12830,6 +14656,12 @@
               }
             ],
             "title": "Balance"
+          },
+          "balance_adjustment": {
+            "default": false,
+            "description": "Purser's post-sync balance true-up of a brokerage account (decision 119): cash put in step with the broker's balance less its holdings, against equity.securities. The register labels it 'Balance adjustment (invested cash)'.",
+            "title": "Balance Adjustment",
+            "type": "boolean"
           },
           "category_path": {
             "anyOf": [
@@ -13009,7 +14841,14 @@
           },
           "securities_trade": {
             "default": false,
+            "description": "The row is a securities trade (a buy or sell: its other leg is the system account equity.securities, never spending or income). See securities_trade_locked.",
             "title": "Securities Trade",
+            "type": "boolean"
+          },
+          "securities_trade_locked": {
+            "default": false,
+            "description": "A securities trade whose cash a recorded trade holds (a position event, decision 103): it moves only with that trade \u2014 reverse the trade to correct it. false on a row a person, an agent or a rule marked (PATCH it with a category to change it back) and on a balance adjustment.",
+            "title": "Securities Trade Locked",
             "type": "boolean"
           },
           "source_fetch_id": {
@@ -13024,15 +14863,55 @@
             ],
             "title": "Source Fetch Id"
           },
+          "split": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SplitOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "split_account_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The account a split transaction splits (its real leg keeps the bank's amount); null for every other row.",
+            "title": "Split Account Path"
+          },
           "split_lines": {
             "default": 0,
-            "description": "Category legs of a split transaction (one real leg plus two or more category legs, decision 87); 0 for every other row. Split rows are read-only.",
+            "description": "Lines of a split transaction (category and [Account] lines, decisions 87 and 118); 0 for every other row.",
             "title": "Split Lines",
             "type": "integer"
+          },
+          "starting_balance": {
+            "default": false,
+            "title": "Starting Balance",
+            "type": "boolean"
           },
           "status": {
             "title": "Status",
             "type": "string"
+          },
+          "suggestion_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "PATCH with securities_trade=true: the trade_rule suggestion the mark proposed (or refreshed) in the inbox \u2014 a rule that marks rows like this one. Null when it proposed none (no payee or description, or a rule or rejection covers it).",
+            "title": "Suggestion Id"
           },
           "superseded_by": {
             "anyOf": [
@@ -13088,7 +14967,7 @@
         "type": "object"
       },
       "TransactionOut": {
-        "description": "Flat view: the real-account delta plus category path.\n\nWith a perspective account (the register view: `GET /transactions?account=X`)\nthe amount is that account's signed leg; without one, transfers present\ntheir outgoing side with a positive amount (the historical shape).\n\nA row is a transfer only when its postings are a shape Purser creates\n(DESIGN \u00a73.3): a plain transfer, or a split loan payment \u2014 whose\n`category_path` is the interest/fee category and `remainder_amount` that\nposting's amount. Any other multi-posting row is not a transfer.\n\nA split transaction (one real leg plus several category legs, such as an\nimported Quicken split; decision 87) has `category_path` null and\n`split_lines` set to its category-leg count; the legs are in the detail's\n`postings`. Split rows are read-only.",
+        "description": "Flat view: the real-account delta plus category path.\n\nWith a perspective account (the register view: `GET /transactions?account=X`)\nthe amount is that account's signed leg; without one, transfers present\ntheir outgoing side with a positive amount (the historical shape).\n\nA row is a transfer only when its postings are a shape Purser creates\n(DESIGN \u00a73.3): a plain transfer, or a split loan payment \u2014 whose\n`category_path` is the interest/fee category and `remainder_amount` that\nposting's amount. Any other multi-posting row is not a transfer.\n\nA split transaction (decisions 87 and 118) has `category_path` null,\n`split_lines` set to its line count (category and `[Account]` lines) and\n`split_account_path` set to the account it splits \u2014 the real leg that\nkeeps the bank's amount. It is never a transfer. Seen from another\naccount one of its lines books to, the row shows that line's leg. The\ndetail's `split` lists the lines; `PUT /transactions/{id}/split` edits\nthem and `DELETE /transactions/{id}/split` removes the split.",
         "properties": {
           "account_path": {
             "anyOf": [
@@ -13122,6 +15001,12 @@
               }
             ],
             "title": "Balance"
+          },
+          "balance_adjustment": {
+            "default": false,
+            "description": "Purser's post-sync balance true-up of a brokerage account (decision 119): cash put in step with the broker's balance less its holdings, against equity.securities. The register labels it 'Balance adjustment (invested cash)'.",
+            "title": "Balance Adjustment",
+            "type": "boolean"
           },
           "category_path": {
             "anyOf": [
@@ -13259,14 +15144,38 @@
           },
           "securities_trade": {
             "default": false,
+            "description": "The row is a securities trade (a buy or sell: its other leg is the system account equity.securities, never spending or income). See securities_trade_locked.",
             "title": "Securities Trade",
             "type": "boolean"
           },
+          "securities_trade_locked": {
+            "default": false,
+            "description": "A securities trade whose cash a recorded trade holds (a position event, decision 103): it moves only with that trade \u2014 reverse the trade to correct it. false on a row a person, an agent or a rule marked (PATCH it with a category to change it back) and on a balance adjustment.",
+            "title": "Securities Trade Locked",
+            "type": "boolean"
+          },
+          "split_account_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The account a split transaction splits (its real leg keeps the bank's amount); null for every other row.",
+            "title": "Split Account Path"
+          },
           "split_lines": {
             "default": 0,
-            "description": "Category legs of a split transaction (one real leg plus two or more category legs, decision 87); 0 for every other row. Split rows are read-only.",
+            "description": "Lines of a split transaction (category and [Account] lines, decisions 87 and 118); 0 for every other row.",
             "title": "Split Lines",
             "type": "integer"
+          },
+          "starting_balance": {
+            "default": false,
+            "title": "Starting Balance",
+            "type": "boolean"
           },
           "status": {
             "title": "Status",
@@ -13380,6 +15289,18 @@
               }
             ],
             "title": "Payee"
+          },
+          "securities_trade": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "true marks a row on a brokerage account whose holdings come from the feed as a securities trade (a buy or sell: booked to the system account equity.securities, never spending or income), in place of `category`; the response's suggestion_id names the rule it proposes in the inbox. To change a marked row back, send the category it should have (false needs that category). Refused (422) on any other account, a transfer, a split, an expected row and a recorded trade's cash.",
+            "title": "Securities Trade"
           }
         },
         "title": "TransactionUpdate",
@@ -13535,6 +15456,33 @@
           "merged_transaction_id"
         ],
         "title": "TransferPairDecisionOut",
+        "type": "object"
+      },
+      "TrueUpOut": {
+        "description": "A balance true-up this sync posted (#591, decision 119).",
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "amount": {
+            "description": "Signed, in ledger sign: the cash the account's postings were short (+) or over (-) against the broker's balance less its holdings.",
+            "title": "Amount",
+            "type": "string"
+          },
+          "transaction_id": {
+            "format": "uuid",
+            "title": "Transaction Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "amount",
+          "transaction_id"
+        ],
+        "title": "TrueUpOut",
         "type": "object"
       },
       "UnlinkResult": {
@@ -14595,7 +16543,7 @@
     },
     "summary": "The privately hosted finance back-end, designed for use by your personal AI Agent.",
     "title": "Purser",
-    "version": "2026.11.5"
+    "version": "2026.11.6"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -14910,6 +16858,28 @@
               "title": "Include Vests",
               "type": "boolean"
             }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
+            }
           }
         ],
         "responses": {
@@ -15003,9 +16973,122 @@
         ]
       }
     },
+    "/accounts/{account_id}/balance/history": {
+      "get": {
+        "description": "Balance history for a chart: the account's reported end-of-day\nbalance (holdings added for brokerage, valuations for loans) on dates\nsampled across the window \u2014 daily for a year at the default cap,\nweekly for five. ``start`` clamps forward to the account's first\nactivity. ``change``, ``change_pct`` and the extremes are computed\nserver-side. For every stored change of the postings basis, use\n``/balance/series``.",
+        "operationId": "balance_history_accounts__account_id__balance_history_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "named window ending today; start/end override it",
+            "in": "query",
+            "name": "range",
+            "required": false,
+            "schema": {
+              "default": "1y",
+              "description": "named window ending today; start/end override it",
+              "enum": [
+                "1m",
+                "3m",
+                "6m",
+                "ytd",
+                "1y",
+                "5y",
+                "all"
+              ],
+              "title": "Range",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "start",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start"
+            }
+          },
+          {
+            "description": "defaults to the ledger day",
+            "in": "query",
+            "name": "end",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "defaults to the ledger day",
+              "title": "End"
+            }
+          },
+          {
+            "in": "query",
+            "name": "max_points",
+            "required": false,
+            "schema": {
+              "default": 400,
+              "maximum": 1000,
+              "minimum": 2,
+              "title": "Max Points",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BalanceHistoryOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Balance History",
+        "tags": [
+          "accounts"
+        ]
+      }
+    },
     "/accounts/{account_id}/balance/series": {
       "get": {
-        "description": "Balance history for one account over ``[start, end]``, one point per\ntransaction that moved it, plus the ``opening`` balance carried into the\nwindow.\n\nREST is not token-budgeted, so this is the full per-change series \u2014 the\ndownsampled, narrated form is MCP ``balance_history``. Both compose on\nthe same service functions, so they can never disagree. ``truncated`` is\nset rather than silently dropping the tail past 5000 points.",
+        "description": "Balance history for one account over ``[start, end]``, one point per\ntransaction that moved it, plus the ``opening`` balance carried into the\nwindow, so ``opening`` plus every ``delta`` equals the last point.\n\nThis is the postings history for every account type (``method`` is\nalways ``postings``): a brokerage account's points and opening are its\ncash, a loan's its postings. A holdings market value or a valuation has\nno per-transaction grain; for the balance the account reports day by\nday (holdings added, valuations used), read ``/balance/history``.\n\nREST is not token-budgeted, so this is the full per-change series.\n``truncated`` is set rather than silently dropping the tail past 5000\npoints.\n\n``withhold=amount`` collapses it to one end-of-day balance per day, with\nno deltas or transaction ids: per change, the deltas are the amounts and\nthe balances give them away by subtraction (#613).",
         "operationId": "balance_series_accounts__account_id__balance_series_get",
         "parameters": [
           {
@@ -15054,6 +17137,28 @@
               ],
               "description": "defaults to the ledger day",
               "title": "End"
+            }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
             }
           }
         ],
@@ -15270,6 +17375,50 @@
         "summary": "Dispose Asset",
         "tags": [
           "assets"
+        ]
+      }
+    },
+    "/accounts/{account_id}/holdings/summary": {
+      "get": {
+        "description": "The account's newest holdings set, from the feed or tracked by hand,\nwith each line's unrealized gain (amount and percent) and share of the\naccount, a cash line and totals. Lines are largest first. ``cost_basis``\nand ``unrealized_gain`` total only the lines whose gain is known, so a\nline without a basis never counts as all gain. Brokerage accounts only.",
+        "operationId": "holdings_summary_accounts__account_id__holdings_summary_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HoldingsSummaryOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Holdings Summary",
+        "tags": [
+          "positions"
         ]
       }
     },
@@ -15672,6 +17821,105 @@
         ]
       }
     },
+    "/accounts/{account_id}/starting-balance": {
+      "delete": {
+        "description": "Take an account's starting balance out again: the entry is reversed to\nzero and Purser stops keeping it. ``status: none`` when there was none.",
+        "operationId": "remove_starting_balance_accounts__account_id__starting_balance_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "dry_run",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Dry Run",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartingBalanceResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove Starting Balance",
+        "tags": [
+          "accounts"
+        ]
+      },
+      "post": {
+        "description": "Start a bank-fed checking, savings, cash or credit-card account from\nthe balance its bank reported in the latest sync (decision 123).\n\nA bank feed delivers about three months of transactions and no balance\nfrom before them. Purser posts ONE entry for the difference between the\nbank's balance and the account's ledger, against the system account\n``equity.opening_balances`` (neither income nor spending), dated the day\nbefore the account's earliest transaction. It chooses the date, the sign\nand the basis; the caller passes none of them.\n\nPurser then keeps the entry in step: when older history arrives (an\nimport, a backfill), it gives way by exactly those rows, so no balance on\nor after the account's first feed transaction changes. It is not a\nreconciliation: no claim is recorded and ``reconciled_through`` does not\nmove.\n\nSafe to repeat: an account that has one is answered with it (``status:\nunchanged``). Mapping a new account in the UI does this by default.",
+        "operationId": "set_starting_balance_accounts__account_id__starting_balance_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartingBalanceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartingBalanceResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "The bank's balance cannot be used. `detail.code` names why: `account_type` (not a checking, savings, cash or credit-card account), `not_connected`, `connection_disabled`, `account_closed`, `no_snapshot`, `account_missing`, `ambiguous_account`, `no_bank_balance`, `currency_unknown`, `currency_mismatch`, `stale_balance` (sync the connection first) or `reconciled` (the account is reconciled to a statement and differs from the bank; reconcile a later statement instead)."
+          }
+        },
+        "summary": "Set Starting Balance",
+        "tags": [
+          "accounts"
+        ]
+      }
+    },
     "/accounts/{account_id}/valuations": {
       "get": {
         "operationId": "list_valuations_accounts__account_id__valuations_get",
@@ -15977,14 +18225,38 @@
             }
           },
           {
-            "description": "only calls that disclosed fields beyond the privacy defaults",
+            "description": "only calls that asked for external identifiers and got them",
             "in": "query",
             "name": "disclosed",
             "required": false,
             "schema": {
               "default": false,
-              "description": "only calls that disclosed fields beyond the privacy defaults",
+              "description": "only calls that asked for external identifiers and got them",
               "title": "Disclosed",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "only calls that asked to withhold fields (privacy used)",
+            "in": "query",
+            "name": "privacy_requested",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "only calls that asked to withhold fields (privacy used)",
+              "title": "Privacy Requested",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "only calls whose answer returned payees, descriptions or amounts",
+            "in": "query",
+            "name": "identifiable",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "only calls whose answer returned payees, descriptions or amounts",
+              "title": "Identifiable",
               "type": "boolean"
             }
           },
@@ -16176,6 +18448,26 @@
               "default": false,
               "title": "Extra",
               "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "privacy",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "requested",
+                    "identifiable"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Privacy"
             }
           },
           {
@@ -16406,6 +18698,26 @@
               "default": false,
               "title": "Extra",
               "type": "boolean"
+            }
+          },
+          {
+            "in": "query",
+            "name": "privacy",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "requested",
+                    "identifiable"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Privacy"
             }
           },
           {
@@ -17045,6 +19357,28 @@
               "title": "Award Id",
               "type": "string"
             }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
+            }
           }
         ],
         "responses": {
@@ -17555,6 +19889,112 @@
         ]
       }
     },
+    "/config/ai/models": {
+      "post": {
+        "description": "The models the provider offers, for picking one (#640). One GET to the\nserver's model list; a server without one says so instead of failing.\nThe stored key is sent only to the saved provider and base URL (#667).",
+        "operationId": "ai_models_config_ai_models_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiCheckIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiModelsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ai Models",
+        "tags": [
+          "config"
+        ]
+      }
+    },
+    "/config/ai/test": {
+      "post": {
+        "description": "Test connection (#640): reachable, authenticated, and the model\nanswers in the JSON shape Purser parses. At most two requests to the\nprovider; messages never contain the key or the provider's reply. The\nstored key is sent only to the saved provider and base URL (#667).",
+        "operationId": "ai_test_config_ai_test_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AiCheckIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AiTestOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ai Test",
+        "tags": [
+          "config"
+        ]
+      }
+    },
+    "/config/network": {
+      "get": {
+        "description": "How Purser is reached, the address agents connect to, and whether the\naddress this request used is one agents can use (#632). Admin scope:\ninstance configuration, like the rest of /config.",
+        "operationId": "get_network_config_network_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NetworkOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Network",
+        "tags": [
+          "config"
+        ]
+      }
+    },
     "/config/{key}": {
       "delete": {
         "operationId": "reset_config_config__key__delete",
@@ -17683,6 +20123,48 @@
           }
         },
         "summary": "Feed Inventory",
+        "tags": [
+          "connections"
+        ]
+      }
+    },
+    "/connections/map-accounts": {
+      "post": {
+        "description": "Map the bank accounts SimpleFIN delivers onto ledger accounts, in one\nbatch (decision 126; write scope).\n\nWithout ``accounts`` it answers the **plan** and writes nothing: for each\ndelivered account no ledger account takes, a proposed name, type and\nledger path, derived from what the feed states (its name, its bank, its\nbalance and whether it lists holdings; the feed carries no type). A\nduplicate, the same account through a second login at the same bank, is\nproposed as ``ignore``.\n\nWith ``accounts`` it applies those lines: each names a delivered account\nby its ``ref`` and takes the proposal unless it overrides a field. The\nwhole batch is checked first and lands whole or not at all; ``dry_run``\nanswers the same without writing. Mapping imports what was already\nfetched and, by default, starts a cash or card account from the bank's\nbalance. **An account's type cannot be changed afterwards**, so confirm\nthe plan with the person before applying it.\n\nA line onto an existing account that already takes a feed is refused,\nnaming that feed, unless it says ``replace_feed`` and the token is an\nadmin's (decision 134); such a line names the feed it replaces in\n``replaces``, the dry run included.\n\nThe bank's account ids and balances are never part of the answer.",
+        "operationId": "map_accounts_connections_map_accounts_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MapAccountsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MapAccountsOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Map Accounts",
         "tags": [
           "connections"
         ]
@@ -18064,6 +20546,28 @@
               "title": "Limit",
               "type": "integer"
             }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
+            }
           }
         ],
         "responses": {
@@ -18124,6 +20628,28 @@
               "minimum": 1,
               "title": "Days",
               "type": "integer"
+            }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
             }
           }
         ],
@@ -18451,6 +20977,28 @@
               "title": "Lot Id",
               "type": "string"
             }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
+            }
           }
         ],
         "responses": {
@@ -18685,6 +21233,30 @@
     "/matching/proposed": {
       "get": {
         "operationId": "list_proposed_matching_proposed_get",
+        "parameters": [
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "content": {
@@ -18699,6 +21271,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
         "summary": "List Proposed",
@@ -18756,6 +21338,28 @@
               ],
               "description": "only pairs whose newer leg is at most this many days old (0 = dated today, at most 36500); omit for the whole history",
               "title": "Lookback Days"
+            }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
             }
           }
         ],
@@ -18850,6 +21454,28 @@
               ],
               "title": "Direction",
               "type": "string"
+            }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
             }
           }
         ],
@@ -19040,6 +21666,28 @@
               "default": false,
               "title": "Include Archived",
               "type": "boolean"
+            }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
             }
           }
         ],
@@ -19530,7 +22178,7 @@
     },
     "/position-events/{event_id}/reverse": {
       "post": {
-        "description": "Reverse an event (corrections are reversals, never edits). Refused when\nthe remaining history would go below zero on some date. A trade's cash\ngoes with it, through the reversal pair every posted correction uses:\nPurser's own cash row is corrected to zero, and a linked row gets its\ncategory back. The body (a `note`) is optional.",
+        "description": "Reverse an event (corrections are reversals, never edits). Refused when\nthe remaining history would go below zero on some date. A trade's cash\ngoes with it, through the reversal pair every posted correction uses:\nPurser's own cash row is corrected to zero, and a linked row gets its\ncategory back. Reversing a split reverses its cash-in-lieu sale too\n(`cash_in_lieu` in the answer); that sale is never reversed alone. The\nbody (a `note`) is optional.",
         "operationId": "reverse_position_event_position_events__event_id__reverse_post",
         "parameters": [
           {
@@ -19660,6 +22308,28 @@
               "title": "Position Id",
               "type": "string"
             }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
+            }
           }
         ],
         "responses": {
@@ -19694,7 +22364,7 @@
         ]
       },
       "post": {
-        "description": "Record a `set_quantity`, `buy`, `sell`, `vest` or `transfer_out`.\n\nOn a position that tracks lots, a `sell` or `transfer_out` names the\nlots it draws on (`lot_method` or `lots`; 422 `allocation_required`\notherwise), a `buy` opens a lot unless `unallocated`, and every write is\nrefused (422 with `detail.code`) that would leave a lot below zero or\nthe lots holding more than the position on any day. The whole history is checked\nafter it: an event that would leave the position below zero on ANY date\n(a backdated sell, say) is refused with 422 naming that date. Any event,\na backdate or not, that would leave this position holding shares on a\nday a CLOSED position in the same symbol held them or sold out is\nrefused with 409 (positions never overlap).\n\nA sale moves its net proceeds to the account's cash unless `proceeds_to`\nis `none`; a buy takes its cost from the cash only with `funded_from`\n`cash`. That cash is one posted system row against `equity.securities`\n(it joins the unreviewed set), or an existing row linked with\n`transaction_id`. When the account already shows a posted one-sided row\nof exactly that amount around the settlement date, the call is refused\nwith 409 naming it, so the cash is never counted twice: link that row,\nor pass `force_cash` when it is a different payment.",
+        "description": "Record a `set_quantity`, `buy`, `sell`, `vest`, `transfer_out` or\n`split`.\n\nA `split` takes `split_numerator` and `split_denominator` (2 and 1 for a\n2:1 forward split, 1 and 10 for a 1:10 reverse one): at the start of\n`occurred_on` every share held the day before becomes that ratio of\nshares (six places), each lot keeping its total basis, acquisition date\nand term. With `cash_in_lieu`, the fractional share left leaves in a\n`sell` whose proceeds are that amount (`cash_in_lieu` in the answer),\nreversed with the split. Reversing the split restores the shares, the\nlots and the cash exactly.\n\nOn a position that tracks lots, a `sell` or `transfer_out` names the\nlots it draws on (`lot_method` or `lots`; 422 `allocation_required`\notherwise), a `buy` opens a lot unless `unallocated`, and every write is\nrefused (422 with `detail.code`) that would leave a lot below zero or\nthe lots holding more than the position on any day. The whole history is checked\nafter it: an event that would leave the position below zero on ANY date\n(a backdated sell, say) is refused with 422 naming that date. Any event,\na backdate or not, that would leave this position holding shares on a\nday a CLOSED position in the same symbol held them or sold out is\nrefused with 409 (positions never overlap).\n\nA sale moves its net proceeds to the account's cash unless `proceeds_to`\nis `none`; a buy takes its cost from the cash only with `funded_from`\n`cash`. That cash is one posted system row against `equity.securities`\n(it joins the unreviewed set), or an existing row linked with\n`transaction_id`. When the account already shows a posted one-sided row\nof exactly that amount around the settlement date, the call is refused\nwith 409 naming it, so the cash is never counted twice: link that row,\nor pass `force_cash` when it is a different payment.",
         "operationId": "record_position_event_positions__position_id__events_post",
         "parameters": [
           {
@@ -19807,6 +22477,28 @@
                 }
               ],
               "title": "Cursor"
+            }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
             }
           }
         ],
@@ -20053,6 +22745,28 @@
               ],
               "title": "Type"
             }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
+            }
           }
         ],
         "responses": {
@@ -20087,6 +22801,7 @@
         ]
       },
       "post": {
+        "description": "Create a rule, a draft unless `activate`. `securities_trade` makes a\ncategorize rule mark its rows as a securities trade (decision 119).",
         "operationId": "create_rule_rules_post",
         "requestBody": {
           "content": {
@@ -20395,6 +23110,28 @@
               ],
               "title": "Status"
             }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
+            }
           }
         ],
         "responses": {
@@ -20512,6 +23249,28 @@
               "format": "uuid",
               "title": "Transaction Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
             }
           }
         ],
@@ -20677,6 +23436,28 @@
               "title": "Schedule Id",
               "type": "string"
             }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
+            }
           }
         ],
         "responses": {
@@ -20826,6 +23607,28 @@
               "format": "date",
               "title": "Occurrence Date",
               "type": "string"
+            }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
             }
           }
         ],
@@ -21055,7 +23858,9 @@
                     "schedule",
                     "transfer_link",
                     "match",
-                    "transfer_pair"
+                    "transfer_pair",
+                    "split",
+                    "trade_rule"
                   ],
                   "type": "string"
                 },
@@ -21131,6 +23936,28 @@
               "minimum": 0,
               "title": "Offset",
               "type": "integer"
+            }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
             }
           }
         ],
@@ -21230,6 +24057,28 @@
               "title": "Suggestion Id",
               "type": "string"
             }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
+            }
           }
         ],
         "responses": {
@@ -21262,7 +24111,7 @@
     },
     "/suggestions/{suggestion_id}/decide": {
       "post": {
-        "description": "accept / edit_then_accept apply the draft: a schedule suggestion\ncreates the schedule (active, materialized); a transfer_link suggestion\ncreates the rule as a DRAFT and returns `projected_links` \u2014 activate it\nthrough POST /rules/{rule_id}/state with that count confirmed. reject is\ndurable and scoped; snooze hides it until a date. Nothing ever\nauto-accepts, and nothing here activates a rule. A match suggestion's\naccept confirms the proposal (marking its bank row reviewed) and reject\nrejects it for good; it has nothing to edit. If its proposal is already\ngone the suggestion is withdrawn and the call answers 422. A\ntransfer_pair suggestion's accept confirms the transfer (as POST\n/matching/confirm-transfer does: `transfer` names the merged row and the\ntransfer_link suggestion it proposed) and reject remembers that the pair\nis not a transfer \u2014 the automatic link paths leave it alone too; nothing\nto edit, and a pair whose rows moved on withdraws it with a 422.",
+        "description": "accept / edit_then_accept apply the draft: a schedule suggestion\ncreates the schedule (active, materialized); a transfer_link suggestion\ncreates the rule as a DRAFT and returns `projected_links` \u2014 activate it\nthrough POST /rules/{rule_id}/state with that count confirmed; a trade_rule\nsuggestion creates its categorize rule as a DRAFT and returns\n`projected_matches` (activate it, then apply-history to mark history,\ndry run first). reject is\ndurable and scoped; snooze hides it until a date. Nothing ever\nauto-accepts, and nothing here activates a rule. A match suggestion's\naccept confirms the proposal (marking its bank row reviewed) and reject\nrejects it for good; it has nothing to edit. If its proposal is already\ngone the suggestion is withdrawn and the call answers 422. A\ntransfer_pair suggestion's accept confirms the transfer (as POST\n/matching/confirm-transfer does: `transfer` names the merged row and the\ntransfer_link suggestion it proposed) and reject remembers that the pair\nis not a transfer \u2014 the automatic link paths leave it alone too; nothing\nto edit, and a pair whose rows moved on withdraws it with a 422. A split\nsuggestion's accept splits the row with the draft's lines (or the\nedited `lines`, edit_then_accept) through PUT /transactions/{id}/split;\na row that stopped being splittable answers 422.",
         "operationId": "decide_suggestions__suggestion_id__decide_post",
         "parameters": [
           {
@@ -21504,7 +24353,7 @@
             }
           },
           {
-            "description": "substring match on description",
+            "description": "search: words all found in payee, description or memo (\"a phrase\", -word excludes; payee:, desc:, memo: scope one; payee:py_... is that payee), plus account:, category:, amount:>100 (magnitude; is:debit or is:credit for direction), amount:10..20, date:2026-10, date:2026-01..2026-03, status:pending,posted, is:unreviewed. A malformed clause is a 422.",
             "in": "query",
             "name": "q",
             "required": false,
@@ -21517,7 +24366,7 @@
                   "type": "null"
                 }
               ],
-              "description": "substring match on description",
+              "description": "search: words all found in payee, description or memo (\"a phrase\", -word excludes; payee:, desc:, memo: scope one; payee:py_... is that payee), plus account:, category:, amount:>100 (magnitude; is:debit or is:credit for direction), amount:10..20, date:2026-10, date:2026-01..2026-03, status:pending,posted, is:unreviewed. A malformed clause is a 422.",
               "title": "Q"
             }
           },
@@ -21636,6 +24485,28 @@
               "title": "Offset",
               "type": "integer"
             }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
+            }
           }
         ],
         "responses": {
@@ -21752,6 +24623,48 @@
         ]
       }
     },
+    "/transactions/present": {
+      "post": {
+        "description": "Show the person transactions without passing their details through\nthe caller (#613; the MCP `present` tool). Returns a link that opens\nthose rows, in full detail and in the order given, for the signed-in\nperson in Purser's web app; an integration replies with the link instead\nof repeating payees, descriptions or amounts. Up to 50 ids; the note (200\ncharacters or fewer) is shown above the rows. The link carries only ids\nand the note. A read: nothing changes.",
+        "operationId": "present_transactions_present_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PresentIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PresentOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Present",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
     "/transactions/review-batch": {
       "get": {
         "description": "The same payload the MCP tool serves \u2014 one service function, so REST\nand MCP can never disagree about what a reviewer sees.",
@@ -21793,6 +24706,28 @@
               "default": true,
               "title": "Include Guidance",
               "type": "boolean"
+            }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
             }
           }
         ],
@@ -21850,7 +24785,7 @@
     },
     "/transactions/selection": {
       "get": {
-        "description": "The rows an agent showed the user with MCP `present` (#437), in full\ndetail and in the order given. A signed-in person's view: the point of\n`present` is that the values reach the user without passing through the\nmodel, so an API token is refused.",
+        "description": "The rows an agent showed the person with `present` (MCP tool or\n`POST /transactions/present`; #437, #613), in full detail and in the\norder given. A signed-in person's view: the point of `present` is that\nthe values reach the person without passing through the model, so an API\ntoken is refused.",
         "operationId": "selection_transactions_selection_get",
         "parameters": [
           {
@@ -21955,6 +24890,28 @@
               "title": "Tx Id",
               "type": "string"
             }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
+            }
           }
         ],
         "responses": {
@@ -21985,7 +24942,7 @@
         ]
       },
       "patch": {
-        "description": "pending/expected edit in place; posted becomes an atomic\nreversal + replacement pair. category='[account]'\nconverts the row to a transfer; a plain category on a transfer converts\nit back (send `account` = the side that keeps the row). An amount on an\nexpected/pending transfer is the leg of `account` (a schedule instance\ndefaults to its schedule's account) and moves both legs, never the\ndirection; a posted or bank-linked transfer is refused with how to\ncorrect it.",
+        "description": "pending/expected edit in place; posted becomes an atomic\nreversal + replacement pair. category='[account]'\nconverts the row to a transfer; a plain category on a transfer converts\nit back (send `account` = the side that keeps the row). An amount on an\nexpected/pending transfer is the leg of `account` (a schedule instance\ndefaults to its schedule's account) and moves both legs, never the\ndirection; a posted or bank-linked transfer is refused with how to\ncorrect it. securities_trade=true marks a feed-holdings brokerage row a\nsecurities trade and proposes a rule for rows like it in the inbox\n(`suggestion_id`).",
         "operationId": "update_transaction_transactions__tx_id__patch",
         "parameters": [
           {
@@ -22119,6 +25076,228 @@
           }
         },
         "summary": "Reset Instance",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/transactions/{tx_id}/split": {
+      "delete": {
+        "description": "Remove a split: the row goes back to one category (the uncategorized\nplaceholder unless `category` names one) and every backing row comes\nback exactly as it was.",
+        "operationId": "unsplit_transaction_transactions__tx_id__split_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tx_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tx Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "the row's category afterwards; default the uncategorized placeholder",
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the row's category afterwards; default the uncategorized placeholder",
+              "title": "Category"
+            }
+          },
+          {
+            "in": "query",
+            "name": "dry_run",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Dry Run",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SplitResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Unsplit Transaction",
+        "tags": [
+          "transactions"
+        ]
+      },
+      "put": {
+        "description": "Split a row across categories and `[Account]` lines, or replace the\nlines of a split (decision 118). The row keeps its real leg at the\nbank's amount; the lines must sum to it. An account line's\n`backing_ids` merge that account's bank rows into the split, so nothing\nis counted twice; rows that backed it before and are not named again\ncome back. A posted row becomes a reversal + replacement; a manual\npending row changes in place; a bank pending is refused until it posts.\n`dry_run` validates and writes nothing.",
+        "operationId": "split_transaction_transactions__tx_id__split_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tx_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tx Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SplitIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SplitResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Split Transaction",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/transactions/{tx_id}/split/candidates": {
+      "get": {
+        "description": "Bank rows that could back an account line of this row's split: live\nsingle rows on that account within 7 days of the row, nearest amount\nthen nearest date first; the rows already backing it come first.",
+        "operationId": "split_backing_candidates_transactions__tx_id__split_candidates_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tx_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tx Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "the account line's account (path or id)",
+            "in": "query",
+            "name": "account",
+            "required": true,
+            "schema": {
+              "description": "the account line's account (path or id)",
+              "title": "Account",
+              "type": "string"
+            }
+          },
+          {
+            "description": "the leg the line books on that account (its amount, negated)",
+            "in": "query",
+            "name": "amount",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the leg the line books on that account (its amount, negated)",
+              "title": "Amount"
+            }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackingCandidates"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Split Backing Candidates",
         "tags": [
           "transactions"
         ]

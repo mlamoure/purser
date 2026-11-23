@@ -103,6 +103,16 @@ rule you write. That includes transfers: confirming a transfer by hand teaches
 Purser no hidden payee-to-account mapping — it proposes a `transfer_link` rule
 (see [A pair scoped to a payee](#a-pair-scoped-to-a-payee)).
 
+### Mark securities trades
+
+A categorize rule can mark rows as a securities trade (a buy or sell, never
+spending or income) with `securities_trade: true` in place of `category_id`.
+It must name its accounts in `account_ids`, every one a brokerage account
+whose holdings come from the feed; Purser never decides by itself which rows
+are trades. Marking one row by hand proposes such a rule in the suggestions
+inbox. See
+[Mark brokerage buys and sells](../../how-to/brokerage-trades/#let-a-rule-mark-the-next-ones).
+
 ## Rules beat learned memory
 
 For categorization the order is:
@@ -124,7 +134,10 @@ Applying a rename to history does not rewrite your transactions. It aliases
 the payee itself, pointing the raw payees at the friendly one. Nothing about
 any posted row changes, and because payee memory counts rows across the whole
 alias group, consolidating several descriptors onto one payee makes that
-payee's memory stronger for everything that already happened.
+payee's memory stronger for everything that already happened. A
+[split like last time](../../how-to/split-transactions/#split-like-last-time)
+card reads the same group, so a split made under one descriptor is offered
+for rows under the others.
 
 Clearing the alias undoes it.
 
@@ -287,8 +300,9 @@ even with `include_user_categorized`. Transfers its predicate matches are left
 out of `matched` and reported as `skipped_transfers`. Rows in a different
 currency from the rule's category are left out the same way and reported as
 `skipped_currency`: a transaction keeps one currency. Split transactions (one
-bank amount across several categories, from a QIF import) are read-only and
-left out the same way, reported as `skipped_splits`. A rule whose category
+bank amount across several categories and accounts; see
+[Split a transaction](../../how-to/split-transactions/)) keep their lines and
+are left out the same way, reported as `skipped_splits`. A rule whose category
 is an `[account]` leaves out a row whose only counterpart in that account is
 the other side of a pair you said is not a transfer, reported as
 `skipped_not_a_transfer`. That is the one count where the real run can
@@ -305,7 +319,8 @@ Three MCP tools mirror this: `list_rules` shows the active set in evaluation
 order, `preview_rule` dry-runs a predicate, and `propose_rule` creates one: a draft,
 or an active rule with `activate=true` when you asked the agent for it. There
 is no MCP tool to activate a draft later; that happens on the Rules page or
-over REST.
+over REST. `propose_rule(securities_trade=true, account=...)` writes a rule
+that marks rows as a securities trade.
 
 For a pair, pass `pair_accounts` (two account paths) to `preview_rule` and
 `propose_rule`, with an optional `window_days`. The preview's `links` is the

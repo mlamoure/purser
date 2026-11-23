@@ -32,6 +32,7 @@ from purser.models import (
     TransactionReview,
     User,
 )
+from tests.conftest import today
 
 # A single-account QIF (parser's __default__ account); two plain rows.
 SINGLE_QIF = """!Type:Bank
@@ -141,7 +142,7 @@ def test_delete_unlinks_merge_and_counterpart_survives(db_session: Session) -> N
         account_ref=str(dupe.id),
         category_ref=str(cat.id),
         amount=Decimal("-100.00"),
-        date=date.today(),
+        date=today(),
         description="transfer to checking",
         requested_status=core.Status.POSTED,
         origin=core.Origin.IMPORT,
@@ -153,7 +154,7 @@ def test_delete_unlinks_merge_and_counterpart_survives(db_session: Session) -> N
         account_ref=str(checking.id),
         category_ref=str(cat.id),
         amount=Decimal("100.00"),
-        date=date.today(),
+        date=today(),
         description="transfer from dupe",
         requested_status=core.Status.POSTED,
         origin=core.Origin.IMPORT,

@@ -265,3 +265,46 @@ def test_refuses_unsafe_values(args: list[str], message: str) -> None:
     result = _render(*args)
     assert result.returncode != 0
     assert message in result.stderr
+
+
+def _api_env(docs: list[dict[str, Any]]) -> dict[str, str]:
+    (api,) = [
+        d
+        for d in docs
+        if d["kind"] == "Deployment"
+        and d["metadata"]["labels"].get("app.kubernetes.io/component") == "api"
+    ]
+    (c,) = api["spec"]["template"]["spec"]["containers"]
+    return {e["name"]: e.get("value", "") for e in c.get("env", [])}
+
+
+@needs_helm
+@pytest.mark.parametrize(
+    ("args", "reach"),
+    [
+        ([], "unknown"),
+        (
+            ["--set", "ingress.enabled=true", "--set", "ingress.host=purser.example.com"],
+            "reverse_proxy",
+        ),
+        (
+            [
+                "--set",
+                "env.PURSER_BIND_ADDRESS=0.0.0.0",
+                "--set",
+                "env.PURSER_PUBLIC_URL=http://192.0.2.10:8000",
+            ],
+            "home_network",
+        ),
+    ],
+)
+def test_the_chart_reports_how_purser_is_reached(args: list[str], reach: str) -> None:
+    """Settings shows how Purser is reached (#632). The chart's equivalent of
+    Compose's PURSER_BIND_ADDRESS: with an ingress, the https public URL it
+    derives reports a reverse proxy; without one the Service and the network
+    decide, so the chart reports nothing (never a guess) unless env says."""
+    from purser.network import reach_mode
+
+    env = _api_env(_docs(*_external(), *args))
+    public = env.get("PURSER_PUBLIC_URL", "http://localhost:8000")
+    assert reach_mode(public, env.get("PURSER_BIND_ADDRESS")) == reach

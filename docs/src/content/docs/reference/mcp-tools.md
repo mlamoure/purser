@@ -54,16 +54,21 @@ because a note was tidied.
 One account's balance over time, in a single call. period = 30d | 90d
 | 1y | all (or pass start and end for an explicit window, which wins).
 Adaptive density chosen server-side and reported in `density` — 30d is a
-true daily series. `low`/`high` are the lowest and highest END-OF-DAY
-balance over EVERY day with activity in the window, not just the returned
-points, so they stay true under downsampling, and the order of one day's
-rows (pay posted before its deductions) never creates one; `movers` names
-the biggest balance movements. Full per-transaction resolution is behind
-series_uri. This is the historical counterpart to forecast_balance; for
+true daily series. `series`, `current`, `low` and `high` are the balance
+the account reports, by `method`: postings, postings+holdings (brokerage:
+cash plus holdings market value) or valuation (loan). `low`/`high` are
+the lowest and highest END-OF-DAY balance over EVERY day with activity in
+the window (a transaction, and for brokerage a holdings snapshot, for a
+loan a valuation), not just the returned points, so they stay true under
+downsampling, and the order of one day's rows (pay posted before its
+deductions) never creates one; `movers` names the biggest balance
+movements. Full per-transaction resolution is behind series_uri: the
+postings history, so for brokerage it is the cash alone and for a loan
+its postings. This is the historical counterpart to forecast_balance; for
 the whole portfolio use net_worth.
 Never reconstruct a balance series by walking transactions.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -71,7 +76,7 @@ include: fields to return although the user's privacy defaults withhold them —
 | `period` | string | no | `"90d"` |
 | `start` | string \| null | no | `null` |
 | `end` | string \| null | no | `null` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## confirm_transfer
 
@@ -202,7 +207,12 @@ activates it on the Rules page, confirming that count. edit_then_accept
 applies it with `edits` (schedule draft fields: name, rrule, dtstart,
 amount, amount_type, estimate_basis, payee, category,
 counterparty_account, autopost_policy; transfer_link: amount_exact as a
-decimal string, window_days 0 to 14, effective_from YYYY-MM-DD). A match
+decimal string, window_days 0 to 14, effective_from YYYY-MM-DD;
+trade_rule: match_field, match_mode, match_text, direction). A trade_rule
+suggestion becomes a DRAFT categorize rule marking rows as a securities
+trade (rule.projected_matches is how many live rows it selects); it
+marks nothing until activated, and history only through apply-history
+(dry run first). A match
 suggestion: accept confirms the proposal (match{id,state,variance} in
 the result) and reject rejects it for good — the matcher never proposes
 that pair again; it has nothing to edit, and a proposal already gone
@@ -211,14 +221,20 @@ accept merges the two rows into one transfer, as confirm_transfer does
 (transfer{merged_transaction_id, suggestion_id} — the transfer_link rule
 the confirm proposed, when it proposed one), and reject means "not a
 transfer": nothing ever links that pair automatically; it has nothing to
-edit, and a pair whose rows moved on withdraws it with an error. reject
+edit, and a pair whose rows moved on withdraws it with an error. A split
+suggestion: accept splits the row with the draft's lines (as
+split_transaction does; split{transaction_id} in the result) and
+edit_then_accept with edits={"lines": [...]} (same line shape as
+split_transaction) applies changed lines; reject (reject_scope=
+counterparty: never for this payee on this account). reject
 is durable — reject_scope=counterparty means never suggest this
 payee/counterparty on this account again (for a transfer_link: this
-account pair, any payee; a match or transfer_pair rejects exactly);
+account pair, any payee; for a trade_rule: any trade rule for this
+account; a match or transfer_pair rejects exactly);
 snooze hides it until snooze_until (YYYY-MM-DD, default 30 days).
 Nothing auto-accepts.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -228,18 +244,19 @@ include: fields to return although the user's privacy defaults withhold them —
 | `note` | string \| null | no | `null` |
 | `reject_scope` | string | no | `"exact"` |
 | `snooze_until` | string \| null | no | `null` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## describe
 
-Orient in one round-trip: data model, conventions, scopes, category
+Orient in one round-trip: data model, conventions, scopes, how Purser
+is reached (this_machine, home_network, reverse_proxy or unknown), category
 tree, and account list. Call this first in a fresh session.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## detect_schedules
 
@@ -249,12 +266,12 @@ payees by cadence, and transfers — card/loan payments, contributions — by
 counterparty account. Nothing activates; rejected patterns and pairs a
 schedule already covers are skipped. account narrows the scan.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `account` | string \| null | no | `null` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## dispose_asset
 
@@ -269,7 +286,7 @@ an entry on the asset is dated after as_of. dry_run=true answers the
 same without writing; read value_before back to the user first: a value
 equal to the whole asset means no proceeds were recorded (a write-off).
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -277,7 +294,7 @@ include: fields to return although the user's privacy defaults withhold them —
 | `as_of` | string | yes | — |
 | `note` | string \| null | no | `null` |
 | `dry_run` | boolean | no | `false` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## end_schedule
 
@@ -303,7 +320,8 @@ feed account no ledger account takes, e.g. a newly opened one; one the
 user chose to ignore is not listed), stale Nd
 (the bank balance has not updated for N days), an act.* code (the bank
 failed to deliver it), ambiguous_id. Account numbers are never shown.
-Use it for "did a new account show up?" or "which bank needs me?".
+Use it for "did a new account show up?" or "which bank needs me?". A
+not_connected account carries a ref: map_feed_accounts maps it.
 
 ## forecast_balance
 
@@ -343,14 +361,14 @@ resources/read, or read_series where only tools are forwarded. Renders
 as the forecast widget in MCP Apps hosts. Looking BACKWARD is
 balance_history(account, period).
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `account` | string | yes | — |
 | `days` | integer | no | `30` |
 | `materiality` | string \| null | no | `null` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## get_schedule_occurrence
 
@@ -364,25 +382,29 @@ obligation, never posted cash. pending_review means a proposed match,
 not a confirmation. A backfilled original is the first retained snapshot,
 not a reconstructed historical estimate. No bank fetch or writes.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `transaction_id` | string \| null | no | `null` |
 | `schedule_id` | string \| null | no | `null` |
 | `occurrence_date` | string \| null | no | `null` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## get_transaction
 
-Full detail for one transaction: postings and provenance links.
+Full detail for one transaction: postings and provenance links. A
+split also carries `split`: its account and its lines ({category,
+amount, memo?, backing_ids?} — the shape split_transaction takes, so an
+edit can start from it; backing_ids are the bank rows merged into an
+account line).
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `transaction_id` | string | yes | — |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## list_accounts
 
@@ -403,7 +425,7 @@ revalue_after_days carries value_stale=true and last_valued. Every asset
 carries gain (the sum of its changes in value) and money_put_in (its
 purchase and transfers); together they are its value.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+include: ["external_ids"] returns the bank's account and connection identifiers, which are left out unless asked for.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -427,7 +449,9 @@ figure is the scheduled units only, not the whole balance. capture says
 when the broker's awards were last captured. next_cursor continues the
 same listing (same account, symbol and award).
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
+
+include: ["external_ids"] returns the bank's account and connection identifiers, which are left out unless asked for.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -435,6 +459,7 @@ include: fields to return although the user's privacy defaults withhold them —
 | `symbol` | string \| null | no | `null` |
 | `award` | string \| null | no | `null` |
 | `cursor` | string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 | `include` | array of string \| null | no | `null` |
 
 ## list_categories
@@ -508,7 +533,9 @@ status, remaining, basis_per_share (null: unknown), and term_if_sold_today
 (long only after the one-year anniversary). status is open (default),
 closed, voided, reversed or all. next_cursor pages.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
+
+include: ["external_ids"] returns the bank's account and connection identifiers, which are left out unless asked for.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -516,6 +543,7 @@ include: fields to return although the user's privacy defaults withhold them —
 | `symbol` | string | yes | — |
 | `status` | string | no | `"open"` |
 | `cursor` | string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 | `include` | array of string \| null | no | `null` |
 
 ## list_memories
@@ -524,7 +552,7 @@ Your recorded financial context — nuances you told Purser to remember.
 Filter by account or category path / payee to pull what is relevant to a
 row. Drafts are excluded by default and are never served as context.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -532,7 +560,7 @@ include: fields to return although the user's privacy defaults withhold them —
 | `payee` | string \| null | no | `null` |
 | `include_drafts` | boolean | no | `false` |
 | `limit` | integer | no | `10` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## list_recurring
 
@@ -547,11 +575,11 @@ are listed; patterns awaiting a decision live in the suggestions inbox
 — suggestions_open counts them (list_suggestions kind=schedule).
 Renders as the recurring-radar widget in MCP Apps hosts.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## list_rules
 
@@ -567,13 +595,13 @@ history counts once), once per link (merge or absorb) a transfer_link
 rule made. Previews and the projected link count at activation never
 count, and an unlink does not take a count back.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `state` | string \| null | no | `null` |
 | `type` | string \| null | no | `null` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## list_schedules
 
@@ -581,12 +609,12 @@ Bill/income schedules with next due dates. name is the label (memo,
 else payee, else the transfer counterparty); payee and memo are the
 fields create_schedule and update_schedule take.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `status` | string \| null | no | `null` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## list_suggestions
 
@@ -600,8 +628,18 @@ dates and amounts on `account`, and the variance; confidence = the match
 score). kind='transfer_pair': two bank rows of exactly opposite amounts
 on two accounts, close in date, that nothing links automatically — is it
 one transfer? (draft = both rows, from_account/to_account, amount, the
-dates and both bank texts). Omit kind for all. Each row carries a
-one-line headline, the typed draft accept would apply unchanged, an
+dates and both bank texts). kind='split': "split like last time?" — a new
+bank row from a payee whose last split a person or agent made (draft =
+the row, the template split, and the lines to apply: the template's,
+with the amount difference on its largest category line, and an account
+line's one exact backing row when there is exactly one). kind='trade_rule':
+a rule proposed because a row was marked a securities trade — it would
+mark rows like it on that brokerage account the same way (draft =
+account, match_field, match_mode, match_text, direction). Omit kind for
+all. Each row carries a
+one-line headline naming accounts as people know them (the draft keeps
+their paths, which other tools take), the typed draft accept would apply
+unchanged, an
 evidence summary (count, first/last, amount range, latest amount and
 possible price change, cadence, and the
 proposing agent's note if it left one), and a confidence (null for
@@ -612,7 +650,7 @@ many wait; `offset` skips the rows of earlier pages to reach the rest.
 Decide with decide_suggestion; GET /suggestions/{id} has the
 full evidence.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -621,7 +659,7 @@ include: fields to return although the user's privacy defaults withhold them —
 | `include_snoozed` | boolean | no | `false` |
 | `limit` | integer | no | `10` |
 | `offset` | integer | no | `0` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## list_unmatched
 
@@ -634,12 +672,52 @@ list_suggestions (kind='match') for decide_suggestion; match with
 expected_id = transaction_id and posted_id = proposed_posted_id also
 confirms it.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `direction` | string | no | `"expected"` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
+
+## map_feed_accounts
+
+Map the bank accounts SimpleFIN delivers onto ledger accounts (write
+scope). A delivered account is not in Purser, and nothing from it is
+imported, until it is mapped; feed_status lists the ones waiting as
+not_connected.
+Call it with no arguments first: it answers the plan and writes nothing.
+Each line is one waiting account with Purser's proposal: name, type, path
+and whether to start from the bank's balance. SimpleFIN states no account
+type, so type_basis says what the type rests on: name (the bank's own
+words), holdings (the name says nothing and the feed lists holdings),
+balance (a debt, with or without credit left) or default (nothing says;
+offered as checking). A line with confident=false needs the person's
+answer; its note says so when the bank names a cash product but also
+lists holdings in it (ask whether it is an investment account, which is
+type brokerage). A line with action=ignore is
+the same account arriving through a second login at the same bank
+(duplicate_of names the first); action=blocked cannot be mapped yet.
+Show the person the plan and get their yes before applying it: AN
+ACCOUNT'S TYPE CANNOT BE CHANGED AFTER MAPPING, and undoing a mapping
+needs the delete-account command on the host.
+Then call it with accounts=[{"ref": ...}, ...], one line per account to
+act on. A line with only ref takes the proposal. Override any of name,
+type (checking, savings, credit_card, cash, brokerage, loan, property),
+path, starting_balance; give account (a path or id) to map onto an
+existing open account instead of a new one (refused, naming its feed,
+when that account already takes a feed: replacing one, replace_feed=true,
+needs an admin token, so ask the person to do it in Purser);
+action="ignore" leaves the account out of Purser. The whole batch is
+checked first and lands whole or not at all; dry_run=true answers the
+same without writing. Mapping imports what was already fetched, and
+starting_balance (the default for a new checking, savings, cash or
+credit-card account) makes the account match the bank at once. The
+bank's account ids and balances are never shown.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `accounts` | array of object \| null | no | `null` |
+| `dry_run` | boolean | no | `false` |
 
 ## mark_reviewed
 
@@ -664,13 +742,13 @@ proposal in place too, and can pair a bank row a rejected proposal
 named. A posted row proposed for a different expected is refused,
 naming it.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `expected_id` | string | yes | — |
 | `posted_id` | string | yes | — |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## net_worth
 
@@ -684,13 +762,13 @@ change. all starts at the earliest ledger activity, at most ten years
 back. Renders as the net-worth widget in MCP Apps hosts. For ONE
 account's history use balance_history.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `as_of` | string \| null | no | `null` |
 | `period` | string \| null | no | `null` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## override_instance
 
@@ -703,14 +781,14 @@ transfer schedule both legs move. A credit card's statement balance
 goes to record_statement_balance instead: it addresses the payment by
 card and due date and keeps the statement on the instance.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `transaction_id` | string | yes | — |
 | `amount` | string \| null | no | `null` |
 | `date` | string \| null | no | `null` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## present
 
@@ -738,7 +816,7 @@ no text predicate; amount_exact, effective_from (YYYY-MM-DD) and
 window_days (0 to 14, default 3: how many days apart the two legs may
 post) narrow or widen it.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -751,7 +829,7 @@ include: fields to return although the user's privacy defaults withhold them —
 | `pair_accounts` | array of string \| null | no | `null` |
 | `window_days` | integer \| null | no | `null` |
 | `effective_from` | string \| null | no | `null` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## propose_memory
 
@@ -785,9 +863,14 @@ the rule declare a transfer. A transfer_link names pair_accounts (two
 account references) and may set window_days, 0 to 14 (default 3): how
 many days apart the pair's two legs may post and still link. Keep it as
 narrow as the bank's actual delay — a wider window reaches more history.
-Preview first.
+securities_trade=true (categorize, in place of category) marks matching
+rows as a securities trade — a buy or sell, never spending or income —
+and needs `account`: a brokerage account whose holdings come from the
+feed. Purser never decides by itself which rows are trades; brokers word
+them differently ("YOU BOUGHT", "Buy", "Reinvestment"), so match on the
+wording this broker uses. Preview first.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -806,7 +889,8 @@ include: fields to return although the user's privacy defaults withhold them —
 | `note` | string \| null | no | `null` |
 | `priority` | integer | no | `100` |
 | `activate` | boolean | no | `false` |
-| `include` | array of string \| null | no | `null` |
+| `securities_trade` | boolean | no | `false` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## read_series
 
@@ -820,11 +904,14 @@ the compact answer is not enough — a 365-day forecast is about 6k
 tokens. A body over 200,000 characters is refused; narrow the window (a
 shorter horizon or period). purser:// URIs only.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
+
+include: ["external_ids"] returns the bank's account and connection identifiers, which are left out unless asked for.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `uri` | string | yes | — |
+| `withhold` | array of string \| null | no | `null` |
 | `include` | array of string \| null | no | `null` |
 
 ## realized_gains
@@ -967,7 +1054,7 @@ first). Use the broker's own lot choice when it shows one. A method never
 takes unallocated shares. The answer's lots summarizes the dispositions
 (basis, proceeds and realized gain where known, terms).
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -985,7 +1072,47 @@ include: fields to return although the user's privacy defaults withhold them —
 | `force_cash` | boolean | no | `false` |
 | `lots` | array of object \| null | no | `null` |
 | `lot_method` | string \| null | no | `null` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
+
+## record_split
+
+Record a stock split of symbol on a manually tracked brokerage
+account (write scope). ratio is new:old shares — '2:1' for a 2-for-1
+forward split, '1:10' for a 1-for-10 reverse split; effective_date
+(YYYY-MM-DD, today or earlier) is the first day the shares trade split.
+At the start of that day every share held the day before becomes that
+many (six decimal places); each lot keeps its total basis, acquisition
+date and term, so its basis per share is divided by the ratio. Value
+stays continuous: a close from before the split is divided by the ratio.
+
+cash_in_lieu (a decimal string, in cents): the cash the broker paid for
+the fractional share the split left. The fraction leaves in a sale whose
+proceeds are exactly that cash, recorded and later reversed with the
+split; settle_date, transaction_id (link the broker's own cash row),
+force_cash and, on a position that tracks lots, lots or lot_method
+(fifo, lifo, hifo) apply to it as in record_sale, including the
+cash_already_recorded refusal. A wrong split is undone with
+reverse_position_event(event_id), which restores the shares, the lots
+and the cash exactly; then record the right one. Refused when the
+position holds nothing the day before, for a second split on one day,
+and for cash_in_lieu when the split leaves a whole number of shares.
+
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `account` | string | yes | — |
+| `symbol` | string | yes | — |
+| `ratio` | string | yes | — |
+| `effective_date` | string | yes | — |
+| `cash_in_lieu` | string \| null | no | `null` |
+| `settle_date` | string \| null | no | `null` |
+| `transaction_id` | string \| null | no | `null` |
+| `force_cash` | boolean | no | `false` |
+| `lots` | array of object \| null | no | `null` |
+| `lot_method` | string \| null | no | `null` |
+| `note` | string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## record_statement_balance
 
@@ -1003,7 +1130,7 @@ basis 'statement'. Recording again replaces the figure; reset_instance
 hands the payment back to the current-balance estimate. Credit cards
 only: for a loan payment or any other bill, use override_instance.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -1011,7 +1138,7 @@ include: fields to return although the user's privacy defaults withhold them —
 | `account` | string | yes | — |
 | `due_date` | string | yes | — |
 | `statement_date` | string \| null | no | `null` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## record_transfer_out
 
@@ -1076,7 +1203,7 @@ an improvement paid in cash (never a gain). An improvement paid from a
 tracked account is a transfer to the asset (update_transaction with
 category="[asset path]"), not a value change.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -1086,7 +1213,7 @@ include: fields to return although the user's privacy defaults withhold them —
 | `note` | string \| null | no | `null` |
 | `reference` | string \| null | no | `null` |
 | `kind` | string | no | `"revaluation"` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## record_vest
 
@@ -1164,12 +1291,12 @@ back the rule's date (its slot), name, payee and current estimate, then
 follows the rule again. If the rule no longer has that slot, or
 estimates nothing, the instance is dropped instead (status void).
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `transaction_id` | string | yes | — |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## reverse_position_event
 
@@ -1183,7 +1310,9 @@ date, when the event is already reversed or is itself a reversal, and
 when the position is closed: a closed position is reopened first (REST
 PATCH /positions/{id} with closed=false). A trade's cash row in
 review_batch (flag securities_trade) is corrected this way, never with
-update_transaction or confirm_transfer. note says why (optional).
+update_transaction or confirm_transfer. Reversing a split (record_split)
+reverses its cash-in-lieu sale with it; that sale is never reversed
+alone. note says why (optional).
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -1200,12 +1329,12 @@ Purser corrects it through a reversal pair, so the history keeps both;
 amount in the answer is what was taken back and balance the asset's value
 now. Record the right figure afterwards if there is one.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `transaction_id` | string | yes | — |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## review_batch
 
@@ -1218,19 +1347,21 @@ Check `context` before clearing rows: it says which surfaces were actually
 available. If one you needed was absent, escalate rather than clear.
 Rows the backend reviewer handed back appear under `escalated` first.
 Fix what is wrong with update_transaction/confirm_transfer, then
-mark_reviewed — except a row flagged securities_trade: its `locked`
-names the trade (event_id, position_id) whose cash it is, and the
-guidance says how such a row is corrected. Set include_guidance=false on
+mark_reviewed — except a row flagged securities_trade with `locked`:
+it names the trade (event_id, position_id) whose cash it is, and the
+guidance says how such a row is corrected. securities_trade without
+`locked` was marked by a person, an agent or a rule (a category changes
+it back); balance_adjustment is Purser's brokerage cash true-up. Set include_guidance=false on
 later pages.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `limit` | integer | no | `10` |
 | `account` | string \| null | no | `null` |
 | `include_guidance` | boolean | no | `true` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## search_docs
 
@@ -1260,11 +1391,17 @@ money left it); with no perspective it is the outgoing leg's amount and
 category; a split loan payment (confirm_transfer with remainder_category)
 carries its interest/fee category as `category` and that posting's amount
 as `remainder`. Other multi-posting rows are not transfers. A split row
-(one real leg, several category legs, e.g. an imported Quicken split)
-carries `split` — its number of category legs — and no `category`; its
-legs are in get_transaction. Split rows are read-only.
+carries `split` — its number of lines (categories and [account] lines)
+— and no `category`, and is never a transfer; get_transaction lists its
+lines, split_transaction edits them.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+q: words, all found in payee, description or memo ("a phrase"; -word
+excludes; payee:, desc:, memo: scope one; payee:py_... is that payee),
+plus account:, category:, amount:>100 (magnitude; is:debit|credit for
+direction), amount:10..20, date:2026-10 or date:2026-01..2026-03,
+status:pending,posted, is:unreviewed.
+
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -1277,7 +1414,37 @@ include: fields to return although the user's privacy defaults withhold them —
 | `status` | array of string \| null | no | `null` |
 | `limit` | integer | no | `20` |
 | `offset` | integer | no | `0` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
+
+## set_starting_balance
+
+Start a bank-fed checking, savings, cash or credit-card account from
+the balance its bank reported in the latest sync (write scope). Use it
+when account_balance shows bank_snapshot.comparison.difference far from
+zero on an account that has no starting balance yet: a bank feed brings
+about three months of transactions and nothing from before them.
+You pass only the account. Purser takes the bank's figure, date, sign and
+basis, and posts ONE entry for the difference against the system account
+equity.opening_balances (neither income nor spending), dated the day
+before the account's earliest transaction; it lands in the review set.
+Afterwards the comparison's difference is zero. Purser keeps the entry in
+step by itself: when older history is imported it gives way by exactly
+those rows, so do not correct it. Mapping a new account in the UI does
+this by default, so most accounts already have one.
+Safe to repeat: status is set (this call), unchanged (it already had
+one), removed or none. Amounts are ledger sign (a card is negative when
+owed). It is refused, with the reason, when the bank's balance cannot be
+used (no balance, stale, another currency, not this account type) or when
+the account is reconciled to a statement and differs from the bank:
+reconcile a later statement with reconcile_account then.
+remove=true takes the starting balance out again. dry_run=true answers
+the same without writing.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `account` | string | yes | — |
+| `remove` | boolean | no | `false` |
+| `dry_run` | boolean | no | `false` |
 
 ## skip_instance
 
@@ -1304,7 +1471,7 @@ when rows truncate. Totals are positive-for-spend (category-leg
 convention); search_transactions amounts are negative-for-spend.
 Renders as the spending widget in MCP Apps hosts.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -1314,7 +1481,40 @@ include: fields to return although the user's privacy defaults withhold them —
 | `category` | string \| null | no | `null` |
 | `period` | string \| null | no | `null` |
 | `baseline` | string \| null | no | `null` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
+
+## split_transaction
+
+Split a transaction across categories and accounts, Quicken style, or
+replace the lines of a split (write scope). Each line is
+{category, amount, memo?, backing_ids?}: category is a category path
+(expenses.taxes.federal) or an account in brackets ([assets.retirement_401k])
+for money that went to another account; amount is the line's share of
+the row's amount in the row's sign (negative = money out) and the lines
+must add up to the row's amount exactly — two to 50 lines, none zero,
+never the row's own account; a memo is at most 500 characters. A
+paycheck deposit of 2500.00: gross income.salary 4000.00, taxes
+-900.00, [401k] -600.00 (the 401k account then shows +600.00). An
+account line's backing_ids name that account's own bank rows (summing
+exactly to the line's leg, i.e. its amount negated; at most 50 across
+the lines): they are merged into the split so the money is not counted
+twice; unbacked, the leg is Purser's own. The result lists, for each
+unbacked account line, exact-amount candidates to back it. The row
+keeps the bank's amount; a posted row becomes a reversal + replacement
+(transaction_id in the result is the new row), a pending one you
+entered changes in place, and the bank's pending row is refused until
+it posts. dry_run=true validates and writes nothing. A split is never a
+transfer; unsplit_transaction removes it and restores every backing
+row.
+
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `transaction_id` | string | yes | — |
+| `lines` | array of object | yes | — |
+| `dry_run` | boolean | no | `false` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## trigger_sync
 
@@ -1324,6 +1524,23 @@ connection_id to sync every active connection.
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `connection_id` | string \| null | no | `null` |
+
+## unsplit_transaction
+
+Remove a split (write scope): the row goes back to a single category —
+category, else the uncategorized placeholder — and every bank row that
+backed an account line comes back exactly as it was (restored_ids). A
+posted split becomes a reversal + replacement (transaction_id is the new
+row). dry_run=true writes nothing.
+
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `transaction_id` | string | yes | — |
+| `category` | string \| null | no | `null` |
+| `dry_run` | boolean | no | `false` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## update_account
 
@@ -1335,6 +1552,12 @@ names the hand-valued asset that secures it (its path or id; "" clears
 it), so the asset reports its equity. revalue_after_days, on an asset,
 is how many days its value may go without an update before Purser calls
 it stale (asset.stale, whats_new.stale_assets); 0 turns that off.
+balance_true_up, on a brokerage account whose holdings come from the
+feed, switches the balance true-up (on by default): after each sync
+Purser posts a labelled "Balance adjustment" against Securities trade so
+the account's cash plus holdings equal the balance the broker reported
+in the same fetch (it covers a buy row the broker never sent). false
+stops future adjustments; past ones stay.
 name is the display name only: the account's path, which tools, rules
 and outside integrations use to find it, never changes, so a rename breaks
 nothing that refers to the account. The name is also
@@ -1364,6 +1587,7 @@ app too.
 | `asset_kind` | string \| null | no | `null` |
 | `secured_by` | string \| null | no | `null` |
 | `revalue_after_days` | integer \| null | no | `null` |
+| `balance_true_up` | boolean \| null | no | `null` |
 
 ## update_award_vest
 
@@ -1396,7 +1620,7 @@ never posts cash or confirms later occurrences. Link a real posted
 payment with match instead; ambiguous candidates require review. Original
 estimates and superseded confirmations remain available in Purser.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -1406,7 +1630,7 @@ include: fields to return although the user's privacy defaults withhold them —
 | `schedule_id` | string \| null | no | `null` |
 | `occurrence_date` | string \| null | no | `null` |
 | `clear` | array of string \| null | no | `null` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
 
 ## update_schedule
 
@@ -1455,6 +1679,16 @@ date or category edit pins it (the rule stops re-estimating it; undo
 with reset_instance); a description or payee edit is a label and does
 not.
 
+securities_trade=true (in place of category) marks a row on a brokerage
+account whose holdings come from the feed as a securities trade — a buy
+or sell ("YOU BOUGHT", "Buy", "Reinvestment"…), never spending or
+income; the shares are already in the feed's holdings. Purser never
+guesses which rows are trades. The result's suggestion_id is the rule
+the mark proposes in the inbox (rows like this one, on this account).
+To change a marked row back, send the category it should have. Refused
+on other accounts, transfers, splits, expected rows, and the cash of a
+trade recorded with record_sale (reverse that trade instead).
+
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `transaction_id` | string | yes | — |
@@ -1463,6 +1697,7 @@ not.
 | `payee` | string \| null | no | `null` |
 | `description` | string \| null | no | `null` |
 | `account` | string \| null | no | `null` |
+| `securities_trade` | boolean \| null | no | `null` |
 
 ## upsert_awards
 
@@ -1580,10 +1815,10 @@ first call without a cursor looks back 7 days. Every line carries its
 entity id so you can drill without a search. Narrate this in your own
 voice; the digest widget is the visual receipt.
 
-include: fields to return although the user's privacy defaults withhold them — any of payee, description, amount, external_ids. Ask only for what the user's question needs; a response names what it withheld in `withheld`.
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `since_cursor` | string \| null | no | `null` |
 | `materiality` | string \| null | no | `null` |
-| `include` | array of string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |

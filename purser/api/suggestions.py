@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from purser import rules as rules_service
 from purser import suggestions as service
 from purser.admin.auth import ReadToken, WriteToken
+from purser.api.disclosure import NOTHING, Emits, disclose
 from purser.api.matching import MatchOut
 from purser.api.rules import RuleOut, _Accounts
 from purser.api.schedules import ScheduleOut
@@ -31,7 +32,9 @@ DbSession = Annotated[Session, Depends(get_session)]
 
 router = APIRouter(prefix="/suggestions", tags=["suggestions"])
 
-SuggestionKind = Literal["schedule", "transfer_link", "match", "transfer_pair"]
+SuggestionKind = Literal[
+    "schedule", "transfer_link", "match", "transfer_pair", "split", "trade_rule"
+]
 SuggestionStatus = Literal["open", "accepted", "rejected", "withdrawn"]
 
 
@@ -46,7 +49,11 @@ class SuggestionOut(BaseModel):
             "(draft = the pair; accept confirms it, reject rejects it for good). "
             "transfer_pair: a transfer candidate, two bank rows of exactly opposite amounts on "
             "two accounts that nothing links automatically (draft = the pair; accept confirms "
-            "the transfer, reject remembers it is not one)."
+            "the transfer, reject remembers it is not one). "
+            "split: split like last time? A new bank row from a payee whose last split a person "
+            "or an agent made (draft = the row and the lines to apply; accept splits it). "
+            "trade_rule: proposed by marking a row a securities trade (draft = a categorize "
+            "rule that marks rows like it on that brokerage account as a securities trade)."
         )
     )
     status: str = Field(
@@ -55,9 +62,14 @@ class SuggestionOut(BaseModel):
         "stopped being a candidate or was linked automatically; a detected schedule "
         "pattern is no longer supported by current history)"
     )
-    source: str = Field(description="detected | agent | account_added | confirm")
+    source: str = Field(description="detected | agent | account_added | confirm | mark")
     confidence: str | None
-    headline: str
+    headline: str = Field(
+        description=(
+            "One line to show or relay, with accounts by name (#552); the draft keeps their "
+            "paths, which accept applies and other calls take."
+        )
+    )
     draft: dict[str, Any] = Field(
         description=(
             "The typed draft accept applies unchanged. schedule: name, account, "
@@ -67,7 +79,10 @@ class SuggestionOut(BaseModel):
             "posted_id, account, label, expected_date, expected_amount, posted_date, "
             "posted_amount, variance (posted - expected). transfer_pair: outgoing_id, "
             "incoming_id, from_account, to_account, amount (moved, positive), outgoing_date, "
-            "incoming_date, date_gap_days, outgoing_description, incoming_description."
+            "incoming_date, date_gap_days, outgoing_description, incoming_description. split: "
+            "transaction_id, template_id, account, date, amount, template_amount, payee, lines "
+            "({target, amount, memo, backing_ids}). trade_rule: account, account_id, "
+            "match_field, match_mode, match_text, direction."
         )
     )
     evidence_summary: dict[str, Any]
@@ -91,7 +106,9 @@ class DecisionRequest(BaseModel):
             "draft fields to change before applying (edit_then_accept). A schedule takes any "
             "draft field; a transfer_link takes amount_exact (a decimal string), window_days "
             "(0 to 14) and effective_from (YYYY-MM-DD) — its pair and payee are what it "
-            "proposes."
+            "proposes. A split takes lines (the draft's line shape); a trade_rule takes "
+            "match_field, match_mode, match_text and direction (debit, credit or null) — its "
+            "account is what it proposes."
         ),
     )
     note: str | None = None
@@ -99,7 +116,8 @@ class DecisionRequest(BaseModel):
         default="exact",
         description=(
             "exact = just this suggestion. counterparty = never suggest this (account, "
-            "counterparty/payee) again — for a transfer_link, this account pair with any payee. "
+            "counterparty/payee) again — for a transfer_link, this account pair with any payee; "
+            "for a trade_rule, any trade rule for this account. "
             "A match and a transfer_pair reject exactly."
         ),
     )
@@ -128,9 +146,11 @@ class DecisionOut(BaseModel):
     rule: RuleOut | None = Field(
         default=None,
         description=(
-            "the transfer_link rule an accept produced — a DRAFT. It links nothing until "
+            "the rule an accept produced — a DRAFT. A transfer_link rule links nothing until "
             "activated with POST /rules/{rule_id}/state {state: active, confirm_links: "
-            "projected_links}."
+            "projected_links}; a trade_rule's categorize rule marks nothing until activated "
+            "(POST /rules/{rule_id}/state {state: active}), and history only through "
+            "apply-history."
         ),
     )
     projected_links: int | None = Field(
@@ -138,6 +158,13 @@ class DecisionOut(BaseModel):
         description=(
             "transfer_link accepts: how many historical pairs activating that rule would link "
             "now — the count its activation asks you to confirm."
+        ),
+    )
+    projected_matches: int | None = Field(
+        default=None,
+        description=(
+            "trade_rule accepts: how many live rows the rule selects now — what its "
+            "apply-history dry run would offer to mark as securities trades."
         ),
     )
     match: MatchOut | None = Field(
@@ -151,6 +178,9 @@ class DecisionOut(BaseModel):
             "suggestion the confirm proposed"
         ),
     )
+    split_transaction_id: uuid.UUID | None = Field(
+        default=None, description="split accepts: the split row (a posted row's replacement)"
+    )
 
 
 def _handle(exc: LedgerError) -> HTTPException:
@@ -161,11 +191,51 @@ def _handle(exc: LedgerError) -> HTTPException:
     return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
 
 
-def suggestion_out(session: Session, row: Any, *, with_evidence: bool = False) -> SuggestionOut:
-    return SuggestionOut(**service.serialize(session, row, with_evidence=with_evidence))
+def suggestion_out(
+    session: Session,
+    row: Any,
+    *,
+    with_evidence: bool = False,
+    names: service.AccountNames | None = None,
+) -> SuggestionOut:
+    return SuggestionOut(
+        **service.serialize(session, row, with_evidence=with_evidence, names=names)
+    )
 
 
-@router.get("")
+@router.get(
+    "",
+    dependencies=[
+        disclose(
+            Emits(
+                payee=True,
+                narrative=True,
+                rule_text=True,
+                description=(
+                    "[].draft.name",
+                    "[].draft.label",
+                    "[].draft.memo",
+                    "[].draft.description",
+                    "[].draft.outgoing_description",
+                    "[].draft.incoming_description",
+                    "[].evidence_summary.note",
+                    "[].draft.lines[].memo",
+                    "[].draft.match_text",
+                ),
+                amount=(
+                    "[].draft.amount",
+                    "[].draft.expected_amount",
+                    "[].draft.posted_amount",
+                    "[].draft.variance",
+                    "[].draft.template_amount",
+                    "[].draft.lines[].amount",
+                    "[].evidence_summary.amount_range",
+                    "[].evidence_summary.latest_amount",
+                ),
+            )
+        )
+    ],
+)
 def list_suggestions(
     token: ReadToken,
     session: DbSession,
@@ -200,7 +270,8 @@ def list_suggestions(
         )
     except LedgerError as exc:
         raise _handle(exc) from exc
-    return [suggestion_out(session, r) for r in rows]
+    names = service.AccountNames(session)
+    return [suggestion_out(session, r, names=names) for r in rows]
 
 
 class SuggestionCountsOut(BaseModel):
@@ -212,9 +283,11 @@ class SuggestionCountsOut(BaseModel):
     transfer_link: int
     match: int
     transfer_pair: int
+    split: int
+    trade_rule: int = 0
 
 
-@router.get("/counts")
+@router.get("/counts", dependencies=[disclose(NOTHING)])
 def suggestion_counts(
     token: ReadToken, session: DbSession, account: str | None = None
 ) -> SuggestionCountsOut:
@@ -228,7 +301,51 @@ def suggestion_counts(
     return SuggestionCountsOut(total=sum(counts.values()), **counts)
 
 
-@router.get("/{suggestion_id}")
+@router.get(
+    "/{suggestion_id}",
+    dependencies=[
+        disclose(
+            Emits(
+                payee=True,
+                narrative=True,
+                rule_text=True,
+                description=(
+                    "draft.name",
+                    "draft.label",
+                    "draft.memo",
+                    "draft.description",
+                    "draft.outgoing_description",
+                    "draft.incoming_description",
+                    "evidence_summary.note",
+                    "draft.lines[].memo",
+                    "draft.match_text",
+                    # The full evidence only this route returns (#648 M2): a
+                    # match card's bank row text, an agent proposal's note.
+                    "evidence.occurrences[].description",
+                    "evidence.note",
+                ),
+                amount=(
+                    "draft.amount",
+                    "draft.expected_amount",
+                    "draft.posted_amount",
+                    "draft.variance",
+                    "draft.template_amount",
+                    "draft.lines[].amount",
+                    "evidence_summary.amount_range",
+                    "evidence_summary.latest_amount",
+                    # Every kind's occurrences carry one row's amount; a
+                    # detected schedule adds statistics of single amounts
+                    # (its cv, a ratio, and price_changed stay).
+                    "evidence.occurrences[].amount",
+                    "evidence.amount.typical",
+                    "evidence.amount.latest",
+                    "evidence.amount.low",
+                    "evidence.amount.high",
+                ),
+            )
+        )
+    ],
+)
 def get_suggestion(suggestion_id: uuid.UUID, token: ReadToken, session: DbSession) -> SuggestionOut:
     """One suggestion with its full evidence (the occurrences behind it, or
     for a transfer_link the confirmed pairs)."""
@@ -246,7 +363,10 @@ def decide(
     """accept / edit_then_accept apply the draft: a schedule suggestion
     creates the schedule (active, materialized); a transfer_link suggestion
     creates the rule as a DRAFT and returns `projected_links` — activate it
-    through POST /rules/{rule_id}/state with that count confirmed. reject is
+    through POST /rules/{rule_id}/state with that count confirmed; a trade_rule
+    suggestion creates its categorize rule as a DRAFT and returns
+    `projected_matches` (activate it, then apply-history to mark history,
+    dry run first). reject is
     durable and scoped; snooze hides it until a date. Nothing ever
     auto-accepts, and nothing here activates a rule. A match suggestion's
     accept confirms the proposal (marking its bank row reviewed) and reject
@@ -256,7 +376,10 @@ def decide(
     /matching/confirm-transfer does: `transfer` names the merged row and the
     transfer_link suggestion it proposed) and reject remembers that the pair
     is not a transfer — the automatic link paths leave it alone too; nothing
-    to edit, and a pair whose rows moved on withdraws it with a 422."""
+    to edit, and a pair whose rows moved on withdraws it with a 422. A split
+    suggestion's accept splits the row with the draft's lines (or the
+    edited `lines`, edit_then_accept) through PUT /transactions/{id}/split;
+    a row that stopped being splittable answers 422."""
     try:
         row, created = service.decide(
             session,
@@ -279,10 +402,15 @@ def decide(
         out.schedule = ScheduleOut.from_model(created)
     elif isinstance(created, Rule):
         out.rule = RuleOut.from_model(created, _Accounts(session))
-        out.projected_links = rules_service.project_links(session, created)
+        if created.type == rules_service.TYPE_TRANSFER_LINK:
+            out.projected_links = rules_service.project_links(session, created)
+        else:
+            out.projected_matches = rules_service.project_matches(session, created)
     elif isinstance(created, Match):
         out.match = MatchOut.from_model(created)
-    elif isinstance(created, service.TransferPairConfirmed):
+    if row.kind == service.KIND_SPLIT and row.result_entity_id is not None:
+        out.split_transaction_id = row.result_entity_id
+    if isinstance(created, service.TransferPairConfirmed):
         out.transfer = TransferPairDecisionOut(
             merged_transaction_id=created.merged.id,
             suggestion_id=created.proposed.id if created.proposed is not None else None,

@@ -75,6 +75,20 @@ DEFAULT_CATEGORIES: tuple[CategorySpec, ...] = (
         "Jobless benefits and other payments from an unemployment-insurance program.",
     ),
     CategorySpec(
+        "income.gifts",
+        "Gifts received",
+        INCOME,
+        "Money given to you or to an account you hold, for example a birthday check or a "
+        "relative's gift deposited into a child's education account.",
+    ),
+    CategorySpec(
+        "income.employer_contributions",
+        "Employer contributions",
+        INCOME,
+        "Money your employer adds to a plan in your name: a 401(k) or 403(b) match, "
+        "profit sharing, or contributions to a health savings account.",
+    ),
+    CategorySpec(
         "income.other",
         "Other income",
         INCOME,

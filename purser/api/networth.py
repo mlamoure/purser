@@ -2,7 +2,6 @@
 
 import uuid
 from datetime import date as date_type
-from datetime import timedelta
 from decimal import Decimal
 from typing import Annotated, Literal
 
@@ -13,6 +12,7 @@ from sqlalchemy.orm import Session
 from purser import clock
 from purser import networth as service
 from purser.admin.auth import ReadToken, WriteToken
+from purser.api.disclosure import NOTHING, disclose
 from purser.db import get_session
 from purser.holdings.overlay import Holding
 from purser.ledger import LedgerError, NotFoundError
@@ -128,7 +128,7 @@ def _handle(exc: LedgerError) -> HTTPException:
     return HTTPException(code, str(exc))
 
 
-@router.get("")
+@router.get("", dependencies=[disclose(NOTHING)])
 def net_worth(
     token: ReadToken,
     session: DbSession,
@@ -172,7 +172,7 @@ class PotentialNetWorthOut(BaseModel):
     next_vest_date: date_type | None
 
 
-@router.get("/potential")
+@router.get("/potential", dependencies=[disclose(NOTHING)])
 def potential_net_worth(token: ReadToken, session: DbSession) -> PotentialNetWorthOut:
     """Home's potential assets/net worth including unvested stock at recorded
     prices, before tax withholding, conditional on vesting. Current snapshot
@@ -184,7 +184,7 @@ def potential_net_worth(token: ReadToken, session: DbSession) -> PotentialNetWor
     return PotentialNetWorthOut(**overview(session, clock.ledger_today()))
 
 
-@router.get("/series")
+@router.get("/series", dependencies=[disclose(NOTHING)])
 def net_worth_series(
     token: ReadToken,
     session: DbSession,
@@ -210,17 +210,12 @@ def materialize(
         points = service.series(session, start=start, end=end)
     except LedgerError as exc:
         raise _handle(exc) from exc
-    day = start
-    count = 0
-    while day <= end:
-        service.materialize_day(session, day)
-        day = day + timedelta(days=1)
-        count += 1
+    count = service.materialize_range(session, start, end)
     session.commit()
     return {"days_materialized": count, "points": len(points)}
 
 
-@holdings_router.get("")
+@holdings_router.get("", dependencies=[disclose(NOTHING)])
 def list_holdings(
     token: ReadToken,
     session: DbSession,
@@ -290,7 +285,7 @@ def create_valuation(
     )
 
 
-@valuations_router.get("")
+@valuations_router.get("", dependencies=[disclose(NOTHING)])
 def list_valuations(
     account_id: uuid.UUID, token: ReadToken, session: DbSession
 ) -> list[ValuationOut]:

@@ -127,9 +127,25 @@ def fits(
     the answer counts as none, and the next tier tries."""
     from purser import transfers  # function-local, as in _apply_category
 
-    return fits_currency(session, tx, category_id) and not transfers.machine_answer_refused(
-        session, tx, category_id, pairs=pairs
+    return (
+        fits_currency(session, tx, category_id)
+        and fits_securities_target(session, tx, category_id)
+        and not transfers.machine_answer_refused(session, tx, category_id, pairs=pairs)
     )
+
+
+def fits_securities_target(session: Session, tx: Transaction, category_id: uuid.UUID) -> bool:
+    """A rule's "Securities trade" target (``equity.securities``, decision
+    119) is an answer only for a row on a brokerage account whose holdings
+    come from the feed. The rule's own scope says so when it is written; an
+    account switched to hand-tracked holdings since then takes no answer."""
+    from purser import ledger as ledger_service
+
+    target = session.get(Account, category_id)
+    if target is None or target.path != ledger_service.SECURITIES_PATH:
+        return True
+    real = next((p for p in tx.postings if not p.account.is_virtual), None)
+    return real is not None and ledger_service.securities_trade_refusal(real.account) is None
 
 
 def fits_currency(session: Session, tx: Transaction, category_id: uuid.UUID) -> bool:
@@ -160,8 +176,16 @@ def _apply_category(
     assert category is not None
     from purser import ledger as ledger_service
 
-    # The classifier and rules never book to a system account (decision 103).
-    ledger_service.refuse_system_account(category)
+    # The classifier and payee memory never book to a system account
+    # (decision 103); a rule may mark a feed-holdings brokerage row as a
+    # securities trade (equity.securities, decision 119).
+    if provenance.get("source") == "rule" and category.path == ledger_service.SECURITIES_PATH:
+        real = next((p for p in tx.postings if not p.account.is_virtual), None)
+        if real is None:
+            raise ledger_service.LedgerError("a securities trade needs one real leg")
+        ledger_service.require_securities_trade_account(real.account)
+    else:
+        ledger_service.refuse_system_account(category)
     if not category.is_virtual:
         # A REAL account is the `[account]` transfer sugar (DESIGN §3.3): the
         # row becomes a one-sided transfer, not a differently-categorized flat.

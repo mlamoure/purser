@@ -25,15 +25,17 @@ information you should share.
   There is no Purser cloud account.
 - **Scoped access.** Give an agent read access or read and write access.
   Token creation and configuration require a separate admin scope.
-- **Disclosure controls.** MCP settings can replace payee names with stable
-  references and omit individual amounts. These are defaults: an agent can
-  request those fields per call. REST reads have different disclosure behavior;
-  see [Privacy and agents](https://mlamoure.github.io/purser/explanation/privacy-and-agents/).
+- **Privacy on request.** Your agent can ask Purser to leave payee names,
+  descriptions and individual amounts out of any answer that doesn't need
+  them, over MCP or the REST API; see [Privacy: your agent asks only for what
+  it needs](#privacy-your-agent-asks-only-for-what-it-needs).
 - **Server-side calculations.** Tools return totals, balances, net worth and
   forecasts without requiring the agent to read every transaction. An agent
   can also link to records for you to inspect in Purser.
 - **Auditing.** The Data shared view identifies integrations, returned field
   inventories, coverage, omissions and outcomes, with filters and exports.
+  Every call says whether the agent used privacy or the answer returned
+  identifiable payees, descriptions or amounts.
   Older entries and incomplete evidence are labeled explicitly. Integration
   responses are recorded before release; a capture error withholds the response,
   although a requested write may already have completed. Posted transactions
@@ -55,6 +57,35 @@ flowchart LR
 Purser and its database run on your server. Your agent reaches Purser with a
 scoped token and uses whichever model you choose; Purser itself calls a model
 only if you configure one.
+
+## Privacy: your agent asks only for what it needs
+
+What your agent reads into its conversation may reach its model provider. So
+on any call, over MCP or the REST API, your agent can ask Purser to leave out
+the payee names, descriptions or individual amounts that the question doesn't
+need. Purser removes them before the answer leaves your server and says what
+it removed.
+
+- *"How many times did we eat out this month?"* The agent asks for the dining
+  rows with `withhold: ["payee", "description", "amount"]` and counts them.
+  Payees arrive as stable references such as `py_8k2mq4x7ra`, which the agent
+  can still filter and act with, and the answer lists what was left out.
+- *"Who did we pay most at restaurants?"* That needs payee names, so the agent
+  asks without `withhold` and gets them.
+- Totals and balances always stay exact. To show you the rows themselves, the
+  agent sends a link that opens them in Purser, so the details reach you
+  without passing through the model.
+
+Nothing is withheld unless the agent asks: the choice is the agent's, call by
+call, because most financial questions need some detail. It is a privacy aid,
+not an access control (token scopes decide what an agent can read). The audit
+log marks every call **Privacy used** or **Identifiable** and can filter on
+either, so you can see when your financial details were shared.
+
+![Audit log: two reads by the same agent, the newer marked Privacy used (merchant references only) and the earlier marked Identifiable (merchant names and individual amounts)](docs/public/screenshots/audit.png)
+
+How it works in detail, with examples:
+[Privacy and agents](https://mlamoure.github.io/purser/explanation/privacy-and-agents/).
 
 ## What you can ask your agent
 
@@ -102,15 +133,23 @@ administrative controls for setup, connections, settings, tokens and auditing.
 It also lets you inspect accounts and records directly. These screenshots use
 synthetic demonstration data.
 
-![Dashboard with net worth, Needs attention (a detected scheduled transaction and the transaction review summary) and accounts](docs/public/screenshots/dashboard.png)
+![Dashboard with net worth, Needs attention (a detected scheduled transaction and the transaction review summary) and accounts grouped as Banking, Credit cards, Investments, Property and Loans](docs/public/screenshots/dashboard.png)
 
 **Needs attention:** review missing expected payments first, expand suggestions
 by type, and open the exact account register for posted or pending review.
+**Accounts** are grouped by kind (Banking, Credit cards, Investments, Property,
+Loans), each group with its subtotal, on the Dashboard and on the Accounts page.
+
+![A brokerage account: its balance history over the past year above the holdings table with gains, weights, cash and the total](docs/public/screenshots/account.png)
+
+**Accounts over time:** each account page opens with a chart of its balance,
+including holdings for brokerage accounts and valuations for loans. A
+brokerage account also lists its holdings, with unrealized gains, each
+holding's share of the account, and the cash.
 
 | | |
 |---|---|
-| ![Settings, Agents & API: create a token and the token list](docs/public/screenshots/tokens.png) **Access:** create scoped agent tokens under Settings, Agents & API | ![Privacy with agents card](docs/public/screenshots/privacy.png) **Disclosure:** set defaults for MCP responses, on the same page |
-| ![Audit log with an agent's read expanded](docs/public/screenshots/audit.png) **Audit log:** review sharing and changes under Settings, Audit log | ![Account register with categories and transfer links](docs/public/screenshots/register.png) **Record inspection:** view transactions, balances and transfer links |
+| ![Settings, Agents & API: how Purser is reached, creating a token and the token list](docs/public/screenshots/tokens.png) **Access:** create scoped agent tokens under Settings, Agents & API | ![Account register with its balance chart, categories and transfer links](docs/public/screenshots/register.png) **Record inspection:** view transactions, balances and transfer links |
 
 ![Scheduled transactions: the account forecast above each account's schedules by payee and memo](docs/public/screenshots/schedules.png)
 
@@ -122,14 +161,18 @@ The interface follows your system's light or dark appearance.
 ## Get started
 
 Purser runs with Docker on Linux (amd64 or arm64) and on Macs with Apple
-Silicon. To have your agent install it, give it this instruction:
+Silicon. You use it on that machine or from other machines on your home
+network. To have your agent install it, give it this instruction:
 
 ```text
 Set up Purser for me by following https://mlamoure.github.io/purser/tutorials/ai-setup/
 ```
 
-The setup guide asks you to store your encryption key, create the admin
-account and approve the agent's access token.
+The agent does the installing. You create the admin account, store your
+encryption key, connect your bank and create the agent's access token in
+Purser's setup page, which shows the steps for your client (Claude Code,
+Claude Desktop, Codex, Gemini, OpenClaw and others). On a Mac without Docker,
+the guide's script installs it first; on Linux, install Docker beforehand.
 
 For manual installation, follow the [Quickstart](https://mlamoure.github.io/purser/tutorials/quickstart/).
 Agents that load skills can also use [`skills/purser/SKILL.md`](skills/purser/SKILL.md).

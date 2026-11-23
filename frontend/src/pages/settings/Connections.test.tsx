@@ -33,6 +33,7 @@ function row(over: Partial<DiscoveredOut>): DiscoveredOut {
     balance_date: null,
     mapped_account_id: "acct-card",
     mapped_account_path: "liabilities.card",
+    mapped_account_name: "Example Card",
     ledger_balance: "-523.0000",
     drift: "-12.0000",
     drift_basis: "pending_inclusive",
@@ -75,6 +76,7 @@ describe("SimpleFin feed accounts: drift-basis pin (issue #307)", () => {
         name: "Synthetic Loan",
         mapped_account_id: "acct-loan",
         mapped_account_path: "liabilities.loan",
+        mapped_account_name: "Example Loan",
         ledger_balance: null,
         drift: null,
         drift_basis: null,
@@ -82,21 +84,21 @@ describe("SimpleFin feed accounts: drift-basis pin (issue #307)", () => {
       }),
     ]);
     const select = await screen.findByRole("combobox", {
-      name: "Drift basis for liabilities.card",
+      name: "Drift basis for Example Card",
     });
     expect(select).toHaveValue("pending_inclusive");
     expect(within(select).getByRole("option", { name: "Auto (learned: posted only)" })).toBeInTheDocument();
     expect(screen.getByText("pinned")).toBeInTheDocument();
     // The drift check never runs on the loan: no basis control for it.
     expect(
-      screen.queryByRole("combobox", { name: "Drift basis for liabilities.loan" }),
+      screen.queryByRole("combobox", { name: "Drift basis for Example Loan" }),
     ).not.toBeInTheDocument();
   });
 
   it("pins a basis through PATCH /accounts", async () => {
     const { user } = setup([row({ drift_basis_learned: "pending_inclusive" })]);
     const select = await screen.findByRole("combobox", {
-      name: "Drift basis for liabilities.card",
+      name: "Drift basis for Example Card",
     });
     expect(select).toHaveValue("auto");
     expect(screen.queryByText("pinned")).not.toBeInTheDocument();
@@ -113,7 +115,7 @@ describe("SimpleFin feed accounts: drift-basis pin (issue #307)", () => {
       row({ drift_basis: "posted_only", drift_basis_pinned: true, drift_basis_learned: "posted_only" }),
     ]);
     const select = await screen.findByRole("combobox", {
-      name: "Drift basis for liabilities.card",
+      name: "Drift basis for Example Card",
     });
     expect(select).toHaveValue("posted_only");
 
@@ -183,7 +185,12 @@ describe("SimpleFin feed accounts: map after setup (#539)", () => {
       "GET /connections/{connection_id}/discovered": () =>
         ok([
           mapped
-            ? { ...unmapped, mapped_account_id: "acct-new", mapped_account_path: "assets.new_savings" }
+            ? {
+                ...unmapped,
+                mapped_account_id: "acct-new",
+                mapped_account_path: "assets.new_savings",
+                mapped_account_name: "New Savings",
+              }
             : unmapped,
         ]),
       "GET /connections/inventory": ok([]),
@@ -210,10 +217,13 @@ describe("SimpleFin feed accounts: map after setup (#539)", () => {
       body: {
         external_id: "ext-new",
         create: { name: "New Savings", type: "savings", path: "assets.new_savings", currency: "USD" },
+        starting_balance: true,
       },
     });
-    // The list refetches and shows the mapping; the form is gone.
-    expect(await screen.findByText("assets.new_savings")).toBeInTheDocument();
+    // The list refetches and shows the mapping, the Purser account by its
+    // name (#552) beside the bank's; the form is gone.
+    await waitFor(() => expect(within(tr).getAllByText("New Savings")).toHaveLength(2));
+    expect(screen.queryByText("assets.new_savings")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Map account" })).not.toBeInTheDocument();
     const discoveredCalls = apiMock.GET.mock.calls.filter(
       ([path]) => path === "/connections/{connection_id}/discovered",
@@ -267,7 +277,7 @@ describe("SimpleFin feed accounts: ignore (#560)", () => {
         return ok({ external_id: "ext-b", ignored: true });
       },
     });
-    await screen.findByText(/Looks like a duplicate of liabilities.card/);
+    await screen.findByText(/Looks like a duplicate of Example Card,/);
     const rows = screen.getAllByRole("row").filter((r) => within(r).queryByText(/Joint Brokerage/));
     expect(within(rows[0]).getByText("not in Purser yet")).toBeInTheDocument(); // waiting first
 

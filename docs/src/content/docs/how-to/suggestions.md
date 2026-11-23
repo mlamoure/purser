@@ -6,8 +6,10 @@ description: Decide what Purser thinks you should do — detected recurring bill
 A **suggestion** is something Purser thinks you should decide: a recurring
 payee it found in your history, a schedule an agent proposed, a payment for a
 card you just added, a rule to link a transfer you keep confirming by hand, a
-bank row the matcher thinks paid one of your expected bills, or two bank rows
-that look like one transfer between your accounts.
+bank row the matcher thinks paid one of your expected bills, two bank rows
+that look like one transfer between your accounts, a new bank row to split
+the way you split the payee's last one, or a rule to mark brokerage rows like
+one you marked as a securities trade.
 It carries a typed **draft** of what it would create, the **evidence** behind
 it, a **confidence** where Purser scored one, and it remembers what you
 decided. The Dashboard cards and the MCP tools are two renderings of the same
@@ -50,6 +52,13 @@ Every suggestion has a `kind`, and the kind decides what its draft is:
   pairs you confirmed — instead of adding one. A split loan payment proposes
   nothing, and neither does a pair whose rows carry no payee. See
   [Manage transfers](../../how-to/transfers/#from-a-confirm-to-a-rule).
+- **A securities-trade mark.** When you mark a brokerage row as a securities
+  trade (the register's picker, `PATCH /transactions/{id}` with
+  `securities_trade: true`, or MCP `update_transaction`), Purser proposes a
+  `trade_rule` card, `source = mark`: a draft rule that marks rows like it on
+  that account the same way. Marking more rows like it refreshes the same
+  card. See
+  [Mark brokerage buys and sells](../../how-to/brokerage-trades/#let-a-rule-mark-the-next-ones).
 - **The matcher.** When the nightly matching pass (or `POST /matching/run`)
   scores a bank row in the middle tier for an expected bill — close, but not
   sure enough to match on its own — it proposes the match and the proposal
@@ -80,6 +89,17 @@ Every suggestion has a `kind`, and the kind decides what its draft is:
   posted row gets a reversal and a replacement), the card stays the same
   card, snooze included, and names the replacement. See
   [Manage transfers](../../how-to/transfers/#confirm-first-candidates).
+- **Split like last time.** After each import and the nightly matching job,
+  a new posted bank row from a payee whose most recent split on that
+  account (in the last 120 days) you or an agent made — not one a QIF file
+  brought in — gets a `split` card (`source = detected`, no confidence). The
+  payee is matched with every name a rename rule merged into it, and so is a
+  rejection "for the payee on that account". Its
+  draft copies that split's lines; the amount difference goes to the
+  largest category line, and an `[account]` line names the one bank row on
+  that account that exactly matches it, when there is exactly one. Only rows
+  from the last 30 days get a card. Splitting the row by hand withdraws it.
+  See [Split a transaction](../../how-to/split-transactions/#split-like-last-time).
 
 ## Reviewing Needs attention
 
@@ -145,9 +165,9 @@ or household-specific exceptions.
 
 | Decision | Effect |
 | --- | --- |
-| `accept` | Applies the draft exactly as shown. A `schedule` becomes an **active** schedule, materialized immediately; a `transfer_link` becomes a **draft** rule (below); a `match` confirms the match, which also marks the bank row reviewed; a `transfer_pair` links the two rows as one transfer, exactly as confirming them in the register does — the response's `transfer` names the merged row and, when the confirm proposed one, the `transfer_link` suggestion for that pair and payee. |
-| `edit_then_accept` | Same, after merging your `edits`. A schedule takes any draft field — `name`, `rrule`, `dtstart`, `amount`, `amount_type`, `estimate_basis`, `payee`, `category`, `counterparty_account`, `autopost_policy`. A transfer link takes only what narrows or widens it — `amount_exact` (a decimal string), `window_days` (0 to 14) and `effective_from` — because its account pair and payee are what it proposes. A match has nothing to edit: to pay the bill with a different row, mark it paid with that row (`POST /matching/match`, MCP `match`). A transfer pair has nothing to edit either: to link other rows, confirm them (`POST /matching/confirm-transfer`, MCP `confirm_transfer`). The edits are validated by the same schema before anything is created. |
-| `reject` | Durable. `reject_scope = counterparty` means "never suggest this payee or counterparty on this account again" — for a transfer link, never again for this account pair, whatever the payee; `exact` (default) rejects just this pattern, or this pair and payee. A match is rejected exactly: the matcher never proposes that bank row for that bill again, nor the posted row that replaces it when it was pending. A transfer pair is rejected exactly too: "not a transfer" — nothing links those two rows automatically again, not even a rule you activate later. |
+| `accept` | Applies the draft exactly as shown. A `schedule` becomes an **active** schedule, materialized immediately; a `transfer_link` becomes a **draft** rule (below); a `match` confirms the match, which also marks the bank row reviewed; a `transfer_pair` links the two rows as one transfer, exactly as confirming them in the register does — the response's `transfer` names the merged row and, when the confirm proposed one, the `transfer_link` suggestion for that pair and payee; a `split` splits the row with the draft's lines (the response's `split_transaction_id`, MCP `split.transaction_id`, is the split row); a `trade_rule` becomes a **draft** securities-trade rule (below). |
+| `edit_then_accept` | Same, after merging your `edits`. A schedule takes any draft field — `name`, `rrule`, `dtstart`, `amount`, `amount_type`, `estimate_basis`, `payee`, `category`, `counterparty_account`, `autopost_policy`. A transfer link takes only what narrows or widens it — `amount_exact` (a decimal string), `window_days` (0 to 14) and `effective_from` — because its account pair and payee are what it proposes. A match has nothing to edit: to pay the bill with a different row, mark it paid with that row (`POST /matching/match`, MCP `match`). A transfer pair has nothing to edit either: to link other rows, confirm them (`POST /matching/confirm-transfer`, MCP `confirm_transfer`). A split takes `lines` (the draft's line shape: `target`, `amount`, `memo`, `backing_ids`) — the card's Edit opens the split editor prefilled and saves through the card. A trade rule takes `match_field`, `match_mode`, `match_text` and `direction` — its account is what it proposes. The edits are validated by the same schema before anything is created. |
+| `reject` | Durable. `reject_scope = counterparty` means "never suggest this payee or counterparty on this account again" — for a transfer link, never again for this account pair, whatever the payee; `exact` (default) rejects just this pattern, or this pair and payee. A match is rejected exactly: the matcher never proposes that bank row for that bill again, nor the posted row that replaces it when it was pending. A transfer pair is rejected exactly too: "not a transfer" — nothing links those two rows automatically again, not even a rule you activate later. A split is rejected for that row (`exact`) or for the payee on that account (`counterparty`). A trade rule is rejected for that wording (`exact`) or for every trade rule on that account (`counterparty`). |
 | `snooze` | Hides it until `snooze_until` (default 30 days). Nothing auto-accepts on expiry — it simply returns to the inbox. A snoozed match stays proposed: its bank row is still held, and the forecast still counts the bill as paid pending your confirmation. |
 
 Deciding a match card whose proposal is already gone answers 422 and
@@ -171,10 +191,13 @@ count is asked for.
 On the Dashboard each open suggestion is a card: the headline, its source and
 confidence, an evidence summary that expands into the occurrences (or, for a
 transfer link, the pairs you confirmed), and the four decisions (rejecting
-asks whether to reject just this one or never suggest the pair again).
+asks whether to reject just this one or never suggest the pair again). A card
+names accounts and categories as you named them ("Checking", "Groceries"),
+and a schedule card's **Edit first** picks the category, or a transfer
+account, from the same list as the register.
 `GET /suggestions` lists the open inbox by confidence, a page at a time
 (`limit`, at most 25, and `offset` for the next page) — `?kind=schedule`,
-`?kind=transfer_link`, `?kind=match` or `?kind=transfer_pair` narrows it, and
+`?kind=transfer_link`, `?kind=match`, `?kind=transfer_pair`, `?kind=split` or `?kind=trade_rule` narrows it, and
 `?status=withdrawn` shows the cards Purser closed on its own;
 `GET /suggestions/counts` says how many of each kind are open (snoozed ones
 left out), and `GET /suggestions/{id}` adds the full evidence. A match card shows the
@@ -189,7 +212,25 @@ another. MCP `list_suggestions` (with an optional `kind`) returns the same
 rows with a one-line `headline`, the draft, an evidence summary (count,
 first/last, amount range, cadence, and an agent's `note`) and the confidence,
 beside `open` (every open row) and `open_by_kind`; `whats_new` carries the
-open count and the top few.
+open count and the top few. A headline names accounts the same way, for
+example `Card payment: monthly ≈ −500.00 on Checking with Example Card`, since
+people read what an agent relays; the draft keeps the account paths
+(`assets.checking`), which accepting applies and other calls take. `≈` marks
+an estimated amount (the draft's `amount_type` is `estimated`), written with
+a real minus sign; a fixed amount is a plain decimal string such as `-15.99`.
+Withholding amounts removes the number either way (`≈ [withheld]`).
+
+### Accepting a securities-trade rule
+
+A `trade_rule` card's accept (or Edit & accept, which changes the text, how it
+matches and the direction) creates a categorize rule as a **draft** that marks
+matching rows on the account as a securities trade, and returns
+`projected_matches`: how many rows in your history it matches today. The card
+then offers **Activate**, which needs no count to confirm (an active
+categorize rule acts on new rows only); past rows are marked through the
+rule's apply to history on the Rules page, which previews first. Reject this
+one remembers the proposal; Never for this account stops trade-rule proposals
+for the account.
 
 ## Why it remembers
 

@@ -21,7 +21,7 @@ from sqlalchemy import Engine, select, text
 
 from purser.feed import drift, service, simplefin
 from purser.feed.reconcile import PENDING_MATCH_WINDOW_DAYS
-from tests.conftest import ADMIN_CREDENTIALS
+from tests.conftest import ADMIN_CREDENTIALS, now, today
 
 RealHttpxClient = httpx.Client
 ACCESS_URL = "https://user:secret@bridge.example.com/simplefin"
@@ -38,7 +38,7 @@ def _epoch(day: int) -> int:
 def _recent_epoch(days_ago: int) -> int:
     """Pending-lifecycle tests need dates inside the resync overlap window
     (last_fetch_at - RESYNC_OVERLAP_DAYS), i.e. relative to now."""
-    return int((datetime.now(UTC) - timedelta(days=days_ago)).timestamp())
+    return int((now() - timedelta(days=days_ago)).timestamp())
 
 
 def account_of(
@@ -203,7 +203,7 @@ def _old_tx(days_ago: int, amount: str = "-10.00", desc: str = "Old txn") -> dic
     """A historical (posted, non-pending) transaction dated ``days_ago``."""
     return {
         "id": f"old-{days_ago}",
-        "posted": int((datetime.now(UTC) - timedelta(days=days_ago)).timestamp()),
+        "posted": int((now() - timedelta(days=days_ago)).timestamp()),
         "amount": amount,
         "description": desc,
     }
@@ -483,7 +483,7 @@ class TestLongIdleGapSync:
         assert final_end is None  # the live window stays unbounded at the end
         assert final_start is not None
         # Open-ended, it runs to "now": whole days stay under the span.
-        assert (date.today() - final_start).days <= simplefin.BRIDGE_PAGE_DAYS - 1
+        assert (today() - final_start).days <= simplefin.BRIDGE_PAGE_DAYS - 1
 
     def test_short_gap_stays_a_single_fetch(self, harness: FeedHarness) -> None:
         backend = RecordingBackend(backfill=False)
@@ -1395,7 +1395,7 @@ class TestPendingRecheck:
         harness.sync(connection_id)
         (start, _end) = backend.calls[-1]
         assert start is not None
-        assert start >= date.today() - timedelta(days=service.RESYNC_OVERLAP_DAYS + 1)
+        assert start >= today() - timedelta(days=service.RESYNC_OVERLAP_DAYS + 1)
 
     def test_pending_dropped_by_the_bank_is_voided_and_reported(
         self, harness: FeedHarness, migrated_engine: Engine
@@ -1567,7 +1567,7 @@ class TestPendingRecheck:
                 "account": "assets.checking",
                 "category": "expenses.uncategorized",
                 "amount": "-64.00",
-                "date": date.today().isoformat(),
+                "date": today().isoformat(),
                 "payee": "Metro Water",
                 "status": "expected",
             },
@@ -1617,7 +1617,7 @@ class TestPendingRecheck:
         assert len(backend.calls) == 1  # no gap windows either
         (start, _end) = backend.calls[-1]
         assert start is not None
-        assert start >= date.today() - timedelta(days=service.RESYNC_OVERLAP_DAYS + 1)
+        assert start >= today() - timedelta(days=service.RESYNC_OVERLAP_DAYS + 1)
         assert sync["voided_pendings"] == 0
         assert harness.client.get(f"/transactions/{pending_id}").json()["status"] == "pending"
 
@@ -1803,7 +1803,6 @@ class TestPendingLifecycleProperties:
         # Examples share the test's database: a fresh external id keeps each
         # example's identities (hashes) its own.
         external = f"Card {uuid.uuid4().hex[:8]}"
-        now = datetime.now(UTC)
 
         def rows_for(state: list[tuple[int, bool]]) -> list[dict[str, Any]]:
             # An identity may be listed twice: identical rows are occurrences
@@ -1813,7 +1812,7 @@ class TestPendingLifecycleProperties:
                 days_ago, amount, description = identities[index % len(identities)]
                 row: dict[str, Any] = {
                     "id": f"unstable-{uuid.uuid4()}",
-                    "posted": int((now - timedelta(days=days_ago)).timestamp()),
+                    "posted": int((now() - timedelta(days=days_ago)).timestamp()),
                     "amount": amount,
                     "description": description,
                 }
@@ -2028,7 +2027,7 @@ class TestWidenedTail:
         harness.sync(connection_id)
         (start, _end) = backend.calls[-1]
         assert start is not None
-        assert start >= date.today() - timedelta(days=service.RESYNC_OVERLAP_DAYS + 1)
+        assert start >= today() - timedelta(days=service.RESYNC_OVERLAP_DAYS + 1)
         # A feed-mapped asset also carries the value change that moved it to
         # the reported balance (decision 113); the purchase is still pending.
         (still_open,) = [r for r in _live_rows(harness, valued_path) if r["status"] == "pending"]
@@ -2267,12 +2266,11 @@ class TestWidenedTailProperties:
         from purser.models import RawFetch
 
         external = f"Card {uuid.uuid4().hex[:8]}"  # examples share the database
-        now = datetime.now(UTC)
 
         def row(days_ago: int, amount: str, description: str, **extra: Any) -> dict[str, Any]:
             return {
                 "id": f"unstable-{uuid.uuid4()}",
-                "posted": int((now - timedelta(days=days_ago)).timestamp()),
+                "posted": int((now() - timedelta(days=days_ago)).timestamp()),
                 "amount": amount,
                 "description": description,
                 **extra,
@@ -2400,6 +2398,8 @@ class TestDiscoveryAndHealth:
         discovered = harness.client.get(f"/connections/{connection_id}/discovered").json()
         checking = next(d for d in discovered if d["external_id"] == "Demo Checking")
         assert checking["mapped_account_path"] == "assets.checking"
+        # The name the settings badge shows (#552); map_new names it after the id.
+        assert checking["mapped_account_name"] == "Demo Checking"
 
     def test_demo_fixture_imports(self, harness: FeedHarness) -> None:
         harness.use_payload(FIXTURE)
@@ -2738,7 +2738,7 @@ class TestBackfill:
         harness.use_payload(payload_of([]))
         cid = harness.connect()
         harness.sync(cid)
-        target = datetime.now(UTC).date() - timedelta(days=200)
+        target = today() - timedelta(days=200)
 
         backend = RecordingBackend(lambda s, e: payload_of([_old_tx(120)]))
         harness.use_transport(backend.transport())
@@ -2783,7 +2783,7 @@ class TestBackfill:
 
         # Inside the first backfill page: [cursor - 45d, cursor + 1d], the
         # cursor being the first sync's reach behind the earliest fetch.
-        overlap_date = datetime.now(UTC).date() - timedelta(days=service.FIRST_SYNC_DAYS + 20)
+        overlap_date = today() - timedelta(days=service.FIRST_SYNC_DAYS + 20)
         _seed_manual_qif_row("assets.checking", overlap_date, "-33.00")
 
         backend = RecordingBackend()  # empty windows; overlap is about EXISTING rows
@@ -3748,7 +3748,7 @@ class TestFeedStart:
         _set_feed_start(
             harness.client,
             _account_id_by_path(harness.client, "assets.checking"),
-            (datetime.now(UTC) - timedelta(days=100)).date().isoformat(),
+            (today() - timedelta(days=100)).isoformat(),
         )
         # The ops latch-reset recipe (no API on purpose — raw SQL, as run live).
         with migrated_engine.begin() as conn:
@@ -3761,7 +3761,7 @@ class TestFeedStart:
             )
         # Re-page serves a transfer-shaped equal-and-opposite pair, 150d old —
         # the checking leg is pre-boundary (skips), the savings leg imports.
-        pair_epoch = int((datetime.now(UTC) - timedelta(days=150)).timestamp())
+        pair_epoch = int((now() - timedelta(days=150)).timestamp())
         repage = RecordingBackend(
             lambda start, end: multi_payload_of(
                 [
@@ -3803,7 +3803,7 @@ class TestFeedStart:
 
     def test_map_reimport_respects_feed_start(self, harness: FeedHarness) -> None:
         epoch_old, epoch_new = _recent_epoch(10), _recent_epoch(2)
-        boundary = (datetime.now(UTC) - timedelta(days=5)).date()
+        boundary = today() - timedelta(days=5)
         rows = [
             {"id": "t-old", "posted": epoch_old, "amount": "-1.00", "description": "pre"},
             {"id": "t-new", "posted": epoch_new, "amount": "-2.00", "description": "post"},
@@ -3857,9 +3857,9 @@ class TestFeedStart:
         _set_feed_start(
             harness.client,
             _account_id_by_path(harness.client, "assets.checking"),
-            (datetime.now(UTC) - timedelta(days=100)).date().isoformat(),
+            (today() - timedelta(days=100)).isoformat(),
         )
-        old_epoch = int((datetime.now(UTC) - timedelta(days=150)).timestamp())
+        old_epoch = int((now() - timedelta(days=150)).timestamp())
         ignoring = RecordingBackend(
             lambda start, end: multi_payload_of(
                 [
@@ -4170,12 +4170,12 @@ class TestManualHoldingsSource:
         from purser.feed import importer
         from purser.models import RawFetch
 
-        now = datetime.now(UTC)
-        # Today's fetch is taken now (after any switch the test just made);
-        # another day's at noon.
+        # Today's fetch is taken now, on the live clock: after any switch the
+        # test just made, which the database stamps with its own now(), so
+        # later than the test's pinned instant. Another day's at noon.
         fetched_at = (
-            now
-            if on == now.date()
+            datetime.now(UTC)
+            if on == today()
             else datetime.combine(on, datetime.min.time(), tzinfo=UTC) + timedelta(hours=12)
         )
         with db.get_sessionmaker()() as session:
@@ -4214,11 +4214,10 @@ class TestManualHoldingsSource:
         date, so the per-symbol latest view never ties."""
         from purser import db, networth
 
-        today = datetime.now(UTC).date()
-        connection_id, account_id = self._manual_then_feed(harness, today - timedelta(days=3))
-        stats = self._import_dated(connection_id, self._payload(), today)
+        connection_id, account_id = self._manual_then_feed(harness, today() - timedelta(days=3))
+        stats = self._import_dated(connection_id, self._payload(), today())
         assert stats["holdings_snapshots"] == 2 and stats["holdings_skipped_manual"] == 0
-        assert self._rows_on(migrated_engine, account_id, today) == [
+        assert self._rows_on(migrated_engine, account_id, today()) == [
             ("ACME", "feed", Decimal("3.000000")),
             ("TEST", "feed", Decimal("1.000000")),
         ]
@@ -4230,7 +4229,7 @@ class TestManualHoldingsSource:
                     " WHERE account_path = 'assets.plan' ORDER BY symbol"
                 )
             ).all()
-        assert [tuple(r) for r in view] == [("ACME", today), ("TEST", today)]
+        assert [tuple(r) for r in view] == [("ACME", today()), ("TEST", today())]
         with db.get_sessionmaker()() as session:
             latest = networth.latest_holdings(session, uuid.UUID(account_id))
             assert sorted((h.symbol, h.source) for h in latest) == [
@@ -4244,20 +4243,19 @@ class TestManualHoldingsSource:
         """The cash-sweep shape: a feed that sends cash and no holdings ends the
         manual period on its first fetch after the switch, with a zero row
         for each hand-tracked position; the history before stays."""
-        today = datetime.now(UTC).date()
-        connection_id, account_id = self._manual_then_feed(harness, today - timedelta(days=3))
-        assert self._value(account_id, today) == Decimal("300.0000")  # no dip at the switch
+        connection_id, account_id = self._manual_then_feed(harness, today() - timedelta(days=3))
+        assert self._value(account_id, today()) == Decimal("300.0000")  # no dip at the switch
         cash_only = self._payload()
         cash_only["accounts"][0]["holdings"] = []
-        stats = self._import_dated(connection_id, cash_only, today + timedelta(days=1))
+        stats = self._import_dated(connection_id, cash_only, today() + timedelta(days=1))
         assert stats["holdings_snapshots"] == 0
         # A manual tombstone ends the position: it never moves the feed floor.
-        assert self._rows_on(migrated_engine, account_id, today + timedelta(days=1)) == [
+        assert self._rows_on(migrated_engine, account_id, today() + timedelta(days=1)) == [
             ("ACME", "manual", Decimal("0.000000"))
         ]
-        assert self._value(account_id, today + timedelta(days=1)) is None
-        assert self._value(account_id, today + timedelta(days=90)) is None
-        assert self._value(account_id, today) == Decimal("300.0000")  # history stays
+        assert self._value(account_id, today() + timedelta(days=1)) is None
+        assert self._value(account_id, today() + timedelta(days=90)) is None
+        assert self._value(account_id, today()) == Decimal("300.0000")  # history stays
         self._one_row_per_symbol(migrated_engine, account_id)
 
     def test_the_switch_day_keeps_its_value_until_the_next_fetch(
@@ -4266,18 +4264,17 @@ class TestManualHoldingsSource:
         """Switched back after the day's sync ran (the account still manual):
         the switch day keeps the hand-tracked value, no dip, and the next
         day's fetch ends the period from its own date."""
-        today = datetime.now(UTC).date()
         connection_id, account_id = self._manual_then_feed(
-            harness, today - timedelta(days=3), switch=False
+            harness, today() - timedelta(days=3), switch=False
         )
-        skipped = self._import_dated(connection_id, self._payload(), today)
+        skipped = self._import_dated(connection_id, self._payload(), today())
         assert skipped["holdings_skipped_manual"] == 2  # today's sync, still manual
         self._switch_back(harness, account_id)
-        assert self._value(account_id, today) == Decimal("300.0000")
-        nxt = self._import_dated(connection_id, self._payload(), today + timedelta(days=1))
+        assert self._value(account_id, today()) == Decimal("300.0000")
+        nxt = self._import_dated(connection_id, self._payload(), today() + timedelta(days=1))
         assert nxt["holdings_snapshots"] == 2
-        assert self._value(account_id, today) == Decimal("300.0000")
-        assert self._value(account_id, today + timedelta(days=1)) == Decimal("310.0000")
+        assert self._value(account_id, today()) == Decimal("300.0000")
+        assert self._value(account_id, today() + timedelta(days=1)) == Decimal("310.0000")
         self._one_row_per_symbol(migrated_engine, account_id)
 
     def test_the_fetch_replaces_a_hand_tracked_set_of_its_own_date(
@@ -4285,27 +4282,26 @@ class TestManualHoldingsSource:
     ) -> None:
         """A hand-tracked set dated the switch day (a close recorded today)
         stays through the switch; the feed's set for that day replaces it."""
-        today = datetime.now(UTC).date()
         connection_id, account_id = self._manual_then_feed(
-            harness, today - timedelta(days=3), switch=False
+            harness, today() - timedelta(days=3), switch=False
         )
         resp = harness.client.post(
-            "/prices", json={"symbol": "ACME", "date": today.isoformat(), "close": "120"}
+            "/prices", json={"symbol": "ACME", "date": today().isoformat(), "close": "120"}
         )
         assert resp.status_code == 200, resp.text
         self._switch_back(harness, account_id)
-        assert self._rows_on(migrated_engine, account_id, today) == [
+        assert self._rows_on(migrated_engine, account_id, today()) == [
             ("ACME", "manual", Decimal("3.000000"))
         ]
-        assert self._value(account_id, today) == Decimal("360.0000")
-        self._import_dated(connection_id, self._payload(), today)
-        assert self._rows_on(migrated_engine, account_id, today) == [
+        assert self._value(account_id, today()) == Decimal("360.0000")
+        self._import_dated(connection_id, self._payload(), today())
+        assert self._rows_on(migrated_engine, account_id, today()) == [
             ("ACME", "feed", Decimal("3.000000")),
             ("TEST", "feed", Decimal("1.000000")),
         ]
-        assert self._value(account_id, today) == Decimal("310.0000")
+        assert self._value(account_id, today()) == Decimal("310.0000")
         # A second fetch that day adds no second row for any symbol.
-        again = self._import_dated(connection_id, self._payload(), today)
+        again = self._import_dated(connection_id, self._payload(), today())
         assert again["holdings_snapshots"] == 0
         self._one_row_per_symbol(migrated_engine, account_id)
 
@@ -4318,9 +4314,8 @@ class TestManualHoldingsSource:
         so the fetch adds nothing."""
         from purser import db, networth
 
-        today = datetime.now(UTC).date()
-        yesterday = today - timedelta(days=1)
-        connection_id, account_id = self._manual_then_feed(harness, today - timedelta(days=3))
+        yesterday = today() - timedelta(days=1)
+        connection_id, account_id = self._manual_then_feed(harness, today() - timedelta(days=3))
         assert self._rows_on(migrated_engine, account_id, yesterday) == []
         stats = self._import_dated(connection_id, self._payload(), yesterday)
         assert stats["holdings_snapshots"] == 0 and stats["holdings_skipped_manual"] == 2
@@ -4334,10 +4329,9 @@ class TestManualHoldingsSource:
     ) -> None:
         """Sold out by hand yesterday (the set holds only a zero row), then
         switched back today: a fetch dated yesterday still adds nothing."""
-        today = datetime.now(UTC).date()
-        yesterday = today - timedelta(days=1)
+        yesterday = today() - timedelta(days=1)
         connection_id, account_id = self._manual_then_feed(
-            harness, today - timedelta(days=4), switch=False
+            harness, today() - timedelta(days=4), switch=False
         )
         positions = harness.client.get(f"/accounts/{account_id}/positions").json()
         resp = harness.client.post(
@@ -4359,8 +4353,7 @@ class TestManualHoldingsSource:
         """Re-importing a fetch dated inside the manual period (the map path
         re-imports the latest fetch) must not put feed rows beside the
         hand-tracked set of that date: one source per date."""
-        today = datetime.now(UTC).date()
-        yesterday = today - timedelta(days=1)
+        yesterday = today() - timedelta(days=1)
         connection_id, account_id = self._manual_then_feed(harness, yesterday)
         before = self._rows_on(migrated_engine, account_id, yesterday)
         assert before == [("ACME", "manual", Decimal("3.000000"))]
@@ -4380,14 +4373,13 @@ class TestManualHoldingsSource:
         the period-end rows are manual tombstones, which never move the feed
         floor, so the projection re-derives the hand-tracked history and that
         date holds the shares again."""
-        today = datetime.now(UTC).date()
-        connection_id, account_id = self._manual_then_feed(harness, today - timedelta(days=3))
-        self._import_dated(connection_id, self._cash_only(self._payload()), today)
-        assert self._value(account_id, today) is None  # the feed holds nothing
+        connection_id, account_id = self._manual_then_feed(harness, today() - timedelta(days=3))
+        self._import_dated(connection_id, self._cash_only(self._payload()), today())
+        assert self._value(account_id, today()) is None  # the feed holds nothing
         resp = harness.client.patch(f"/accounts/{account_id}", json={"holdings_source": "manual"})
         assert resp.status_code == 200, resp.text
-        assert self._value(account_id, today) == Decimal("300.0000")
-        assert self._rows_on(migrated_engine, account_id, today) == []  # the tombstone went
+        assert self._value(account_id, today()) == Decimal("300.0000")
+        assert self._rows_on(migrated_engine, account_id, today()) == []  # the tombstone went
         self._one_row_per_symbol(migrated_engine, account_id)
 
     def test_a_fetch_taken_before_the_switch_never_ends_the_period(
@@ -4396,13 +4388,12 @@ class TestManualHoldingsSource:
         """The day's sync ran while the account was still manual; after the
         switch, mapping another account re-imports that fetch. It was taken
         before the switch, so the switch day keeps its hand-tracked value."""
-        today = datetime.now(UTC).date()
         payload = self._payload()
         payload["accounts"].append(account_of([], account_id="SF-CHK", balance="0.00"))
         connection_id, account_id = self._manual_then_feed(
-            harness, today - timedelta(days=3), switch=False
+            harness, today() - timedelta(days=3), switch=False
         )
-        self._import_dated(connection_id, self._cash_only(payload), today)  # still manual
+        self._import_dated(connection_id, self._cash_only(payload), today())  # still manual
         self._switch_back(harness, account_id)
         resp = harness.client.post(
             f"/connections/{connection_id}/map",
@@ -4412,8 +4403,8 @@ class TestManualHoldingsSource:
             },
         )
         assert resp.status_code == 200, resp.text
-        assert self._value(account_id, today) == Decimal("300.0000")
-        assert self._rows_on(migrated_engine, account_id, today) == []
+        assert self._value(account_id, today()) == Decimal("300.0000")
+        assert self._rows_on(migrated_engine, account_id, today()) == []
 
     def test_a_later_fetch_that_day_replaces_a_tombstone(
         self, harness: FeedHarness, migrated_engine: Engine
@@ -4421,16 +4412,15 @@ class TestManualHoldingsSource:
         """The first fetch after the switch omits ACME (a tombstone ends it); a
         later fetch the same day reports it: its row replaces the tombstone,
         as a later fetch adds an omitted symbol on any other date."""
-        today = datetime.now(UTC).date()
-        connection_id, account_id = self._manual_then_feed(harness, today - timedelta(days=3))
-        first = self._import_dated(connection_id, self._cash_only(self._payload()), today)
+        connection_id, account_id = self._manual_then_feed(harness, today() - timedelta(days=3))
+        first = self._import_dated(connection_id, self._cash_only(self._payload()), today())
         assert first["manual_period_tombstones"] == 1
-        self._import_dated(connection_id, self._payload(), today)
-        assert self._rows_on(migrated_engine, account_id, today) == [
+        self._import_dated(connection_id, self._payload(), today())
+        assert self._rows_on(migrated_engine, account_id, today()) == [
             ("ACME", "feed", Decimal("3.000000")),
             ("TEST", "feed", Decimal("1.000000")),
         ]
-        assert self._value(account_id, today) == Decimal("310.0000")
+        assert self._value(account_id, today()) == Decimal("310.0000")
         self._one_row_per_symbol(migrated_engine, account_id)
 
     def test_the_period_end_is_audited_and_counted(
@@ -4439,9 +4429,8 @@ class TestManualHoldingsSource:
         from purser import db
         from purser.models import AuditLog
 
-        today = datetime.now(UTC).date()
-        connection_id, account_id = self._manual_then_feed(harness, today - timedelta(days=3))
-        stats = self._import_dated(connection_id, self._cash_only(self._payload()), today)
+        connection_id, account_id = self._manual_then_feed(harness, today() - timedelta(days=3))
+        stats = self._import_dated(connection_id, self._cash_only(self._payload()), today())
         assert stats["manual_period_tombstones"] == 1
         assert stats["manual_period_rows_deleted"] == 0
         with db.get_sessionmaker()() as session:
@@ -4453,9 +4442,9 @@ class TestManualHoldingsSource:
             ).scalars()
         after = row.before_after["after"]
         assert after["tombstones_written"] == 1 and after["raw_fetch_id"] is not None
-        assert after["on"] == today.isoformat() and after["reason"] == "fetch"
+        assert after["on"] == today().isoformat() and after["reason"] == "fetch"
         # Once: the next fetch finds the period ended.
-        again = self._import_dated(connection_id, self._cash_only(self._payload()), today)
+        again = self._import_dated(connection_id, self._cash_only(self._payload()), today())
         assert again["manual_period_tombstones"] == 0
 
     def test_a_feed_row_holding_zero_shares_stays_visible(self, harness: FeedHarness) -> None:
@@ -4488,8 +4477,7 @@ class TestManualHoldingsSource:
         from purser import db
         from purser.models import AuditLog
 
-        today = datetime.now(UTC).date()
-        connection_id, account_id = self._manual_then_feed(harness, today - timedelta(days=3))
+        connection_id, account_id = self._manual_then_feed(harness, today() - timedelta(days=3))
         other = harness.client.post(
             "/accounts", json={"name": "Plan 2", "type": "brokerage", "path": "assets.plan2"}
         ).json()["id"]
@@ -4498,8 +4486,8 @@ class TestManualHoldingsSource:
             json={"external_id": "SF-PLAN", "account_id": other},
         )
         assert resp.status_code == 200, resp.text
-        assert self._value(account_id, today) is None
-        assert self._rows_on(migrated_engine, account_id, today) == [
+        assert self._value(account_id, today()) is None
+        assert self._rows_on(migrated_engine, account_id, today()) == [
             ("ACME", "manual", Decimal("0.000000"))
         ]
         with db.get_sessionmaker()() as session:
@@ -4519,27 +4507,26 @@ class TestManualHoldingsSource:
         switch ends its period. Until then the hand-tracked set stays in effect:
         no blank day (the re-import of the latest fetch, taken before the switch,
         adds nothing)."""
-        today = datetime.now(UTC).date()
-        connection_id, account_id = self._manual_then_feed(harness, today - timedelta(days=3))
-        before = self._value(account_id, today)
+        connection_id, account_id = self._manual_then_feed(harness, today() - timedelta(days=3))
+        before = self._value(account_id, today())
         assert before is not None
         two = self._payload()
         second = json.loads(json.dumps(two["accounts"][0]))
         second["id"] = "SF-PLAN2"
         second["holdings"] = [{"symbol": "ACME", "shares": "5", "market_value": "500.00"}]
         two["accounts"].append(second)
-        self._import_dated(connection_id, two, today - timedelta(days=1))
+        self._import_dated(connection_id, two, today() - timedelta(days=1))
         resp = harness.client.post(
             f"/connections/{connection_id}/map",
             json={"external_id": "SF-PLAN2", "account_id": account_id},
         )
         assert resp.status_code == 200, resp.text
-        assert self._value(account_id, today) == before
+        assert self._value(account_id, today()) == before
         assert ("ACME", "manual", Decimal("0.000000")) not in self._rows_on(
-            migrated_engine, account_id, today
+            migrated_engine, account_id, today()
         )
-        self._import_dated(connection_id, two, today)
-        assert self._rows_on(migrated_engine, account_id, today) == [
+        self._import_dated(connection_id, two, today())
+        assert self._rows_on(migrated_engine, account_id, today()) == [
             ("ACME", "feed", Decimal("5.000000"))
         ]
         self._one_row_per_symbol(migrated_engine, account_id)

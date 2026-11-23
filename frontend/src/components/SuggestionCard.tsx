@@ -14,16 +14,30 @@
  * and there is nothing to edit. A `transfer_pair` suggestion is a transfer
  * candidate (#386, decision 102): two bank rows of exactly opposite amounts
  * that nothing links on its own; accept links them as one transfer, reject
- * remembers they are not one, and there is nothing to edit. */
+ * remembers they are not one, and there is nothing to edit. A `split`
+ * suggestion (#590, decision 118) offers a new bank row its payee's last
+ * split: accept applies the lines as shown, Edit opens the split editor
+ * prefilled and accepts the edited lines; never applied on its own. A `trade_rule`
+ * suggestion (#591, decision 119) — proposed when you mark a row as a
+ * securities trade — accepts into a DRAFT categorize rule that marks rows
+ * like it as a securities trade; activating it is the next step.
+ *
+ * Every card reads accounts and categories by name (#552): the server's
+ * headline names them, and the card's own lines turn the draft's paths into
+ * names with the #541 helpers. The draft keeps the paths accepting needs. */
 
 import { useId, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api, errorDetail } from "../lib/api";
-import { formatMoney, negateMoney } from "../lib/money";
+import { formatMoney, moneySign, negateMoney } from "../lib/money";
 import { formatDate } from "../lib/dates";
 import type { components } from "../api/schema";
 import { Badge, Button, ErrorText, Input, Label, Table, Td, Th } from "./ui";
+import SplitEditor from "./SplitEditor";
+import { EstimateText, EstimatedAmount } from "./EstimatedAmount";
+import CategorySelect from "./CategorySelect";
+import { useAccountNames, usePathNames } from "../lib/names";
 
 export type SuggestionOut = components["schemas"]["SuggestionOut"];
 type Decision = components["schemas"]["DecisionRequest"];
@@ -35,6 +49,7 @@ const STANDARD_WINDOW_DAYS = 3;
 function sourceLabel(source: string): string {
   if (source === "account_added") return "new account";
   if (source === "confirm") return "your confirm";
+  if (source === "mark") return "your mark";
   return source;
 }
 
@@ -135,7 +150,9 @@ type Summary = {
 function CardHeader({ suggestion }: { suggestion: SuggestionOut }) {
   return (
     <div className="flex flex-wrap items-center gap-2">
-      <span className="min-w-0 grow break-words font-medium">{suggestion.headline}</span>
+      <span className="min-w-0 grow break-words font-medium">
+        <EstimateText text={suggestion.headline} />
+      </span>
       <Badge>{sourceLabel(suggestion.source)}</Badge>
       {suggestion.confidence && (
         <Badge
@@ -276,7 +293,159 @@ export function SuggestionCard({
     return <MatchCard suggestion={suggestion} onDecided={onDecided} />;
   if (suggestion.kind === "transfer_pair")
     return <TransferPairCard suggestion={suggestion} onDecided={onDecided} />;
+  if (suggestion.kind === "split")
+    return <SplitCard suggestion={suggestion} onDecided={onDecided} />;
+  if (suggestion.kind === "trade_rule")
+    return <TradeRuleCard suggestion={suggestion} onDecided={onDecided} />;
   return <ScheduleCard suggestion={suggestion} onDecided={onDecided} />;
+}
+
+type SplitDraft = {
+  transaction_id: string;
+  template_id: string;
+  account: string;
+  date: string;
+  amount: string;
+  template_amount: string;
+  payee: string | null;
+  lines: { target: string; amount: string; memo: string | null; backing_ids: string[] }[];
+};
+
+/** A split suggestion (#590): "split like last time?" for a new bank row
+ * from a payee whose last split you (or your agent) made. The lines are the
+ * last split's, with the difference in amount on its largest category line;
+ * an account line names the one bank row that backs it exactly, when there
+ * is one. Accept splits the row as shown; Edit opens the split editor; reject
+ * is remembered (or never for this payee); snooze only hides the card. */
+function SplitCard({
+  suggestion,
+  onDecided,
+}: {
+  suggestion: SuggestionOut;
+  onDecided?: () => void;
+}) {
+  const qc = useQueryClient();
+  const pathName = usePathNames();
+  const draft = suggestion.draft as unknown as SplitDraft;
+  const [rejecting, setRejecting] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const decided = () => {
+    qc.invalidateQueries({ queryKey: ["suggestions"] });
+    qc.invalidateQueries({ queryKey: ["register"] });
+    qc.invalidateQueries({ queryKey: ["accounts"] });
+    onDecided?.();
+  };
+  const { decide, error } = useDecide(suggestion.id, decided);
+  const lineName = (target: string) =>
+    /^\[(.*)\]$/.test(target) ? `To ${pathName(target.slice(1, -1))}` : pathName(target);
+
+  return (
+    <div className="min-w-0 break-words rounded-lg border border-border p-3 text-sm">
+      <CardHeader suggestion={suggestion} />
+      <p className="mt-1 text-xs text-muted-foreground">
+        {formatMoney(draft.amount)} on {pathName(draft.account)} · {formatDate(draft.date)}
+        {draft.payee ? ` · ${draft.payee}` : ""} · last time {formatMoney(draft.template_amount)}
+      </p>
+      <Table className="mt-2 text-xs">
+        <thead>
+          <tr>
+            <Th>Line</Th>
+            <Th className="text-right">Amount</Th>
+            <Th>Backed by</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {draft.lines.map((l, i) => (
+            <tr key={i}>
+              <Td>
+                {lineName(l.target)}
+                {l.memo ? <span className="text-muted-foreground"> · {l.memo}</span> : null}
+              </Td>
+              <Td className="text-right font-mono">{formatMoney(l.amount)}</Td>
+              <Td className="text-muted-foreground">
+                {/^\[.*\]$/.test(l.target)
+                  ? l.backing_ids.length
+                    ? `${l.backing_ids.length} bank row${l.backing_ids.length === 1 ? "" : "s"}`
+                    : "none yet"
+                  : ""}
+              </Td>
+            </tr>
+          ))}
+        </tbody>
+      </Table>
+      <Link className="mt-2 inline-block text-xs underline" to={`/selection?id=${draft.transaction_id}`}>
+        Inspect the transaction
+      </Link>
+      {editing && (
+        <div className="mt-3">
+          <SplitEditor
+            txId={draft.transaction_id}
+            amount={draft.amount}
+            accountPath={draft.account}
+            isSplit={false}
+            initialLines={draft.lines.map((l) => ({
+              category: l.target,
+              amount: l.amount,
+              memo: l.memo ?? "",
+              backing: l.backing_ids,
+            }))}
+            onSave={async (lines) => {
+              await decide.mutateAsync({
+                decision: "edit_then_accept",
+                reject_scope: "exact",
+                edits: {
+                  lines: lines.map((l) => ({
+                    target: l.category,
+                    amount: l.amount,
+                    memo: l.memo ?? null,
+                    backing_ids: l.backing_ids ?? [],
+                  })),
+                },
+              });
+            }}
+            onClose={() => setEditing(false)}
+          />
+        </div>
+      )}
+      <div className="mt-3 flex flex-wrap gap-2">
+        {!rejecting && !editing && (
+          <>
+            <Button
+              size="sm"
+              disabled={decide.isPending}
+              onClick={() => decide.mutate({ decision: "accept", reject_scope: "exact" })}
+            >
+              Split like this
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
+              Edit…
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={decide.isPending}
+              onClick={() => decide.mutate({ decision: "snooze", reject_scope: "exact" })}
+            >
+              Snooze 30d
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setRejecting(true)}>
+              Reject
+            </Button>
+          </>
+        )}
+        {rejecting && (
+          <RejectButtons
+            pending={decide.isPending}
+            neverLabel="Never for this payee"
+            neverTitle="Never suggest splitting this payee's rows on this account again"
+            onReject={(scope) => decide.mutate({ decision: "reject", reject_scope: scope })}
+            onCancel={() => setRejecting(false)}
+          />
+        )}
+      </div>
+      {error && <ErrorText>{error}</ErrorText>}
+    </div>
+  );
 }
 
 type TransferPairDraft = {
@@ -306,6 +475,7 @@ function TransferPairCard({
   onDecided?: () => void;
 }) {
   const qc = useQueryClient();
+  const accountName = useAccountNames();
   const draft = suggestion.draft as unknown as TransferPairDraft;
   const [rejecting, setRejecting] = useState(false);
   const { decide, error } = useDecide(suggestion.id, () => {
@@ -335,14 +505,14 @@ function TransferPairCard({
         <tbody>
           <tr>
             <Td>Leaves</Td>
-            <Td className="font-mono">{draft.from_account}</Td>
+            <Td>{accountName(draft.from_account)}</Td>
             <Td>{formatDate(draft.outgoing_date)}</Td>
             <Td className="max-w-56 truncate">{draft.outgoing_description ?? ""}</Td>
             <Td className="text-right font-mono">{formatMoney(negateMoney(draft.amount))}</Td>
           </tr>
           <tr>
             <Td>Arrives</Td>
-            <Td className="font-mono">{draft.to_account}</Td>
+            <Td>{accountName(draft.to_account)}</Td>
             <Td>{formatDate(draft.incoming_date)}</Td>
             <Td className="max-w-56 truncate">{draft.incoming_description ?? ""}</Td>
             <Td className="text-right font-mono">{formatMoney(draft.amount)}</Td>
@@ -438,6 +608,7 @@ function MatchCard({
   onDecided?: () => void;
 }) {
   const qc = useQueryClient();
+  const accountName = useAccountNames();
   const draft = suggestion.draft as unknown as MatchDraft;
   const [rejecting, setRejecting] = useState(false);
   const { decide, error } = useDecide(suggestion.id, () => {
@@ -473,7 +644,7 @@ function MatchCard({
         </tbody>
       </Table>
       <p className="mt-1 text-xs text-muted-foreground">
-        on <span className="font-mono">{draft.account}</span> ·{" "}
+        on {accountName(draft.account)} ·{" "}
         {sameAmount ? "same amount" : <>variance {formatMoney(draft.variance, { signDisplay: "always" })}</>}
       </p>
 
@@ -544,14 +715,21 @@ function ScheduleCard({
   const [editing, setEditing] = useState(false);
   const [rejecting, setRejecting] = useState(false);
   const formId = useId();
+  const accountName = useAccountNames();
   const draft = suggestion.draft as Record<string, string | null>;
+  // The category picker's value (#552, as on the schedule form): a category
+  // path, or "[account path]" for a transfer — the draft's
+  // counterparty_account. A schedule is one or the other, never both.
+  const draftTarget = draft.counterparty_account
+    ? `[${draft.counterparty_account}]`
+    : (draft.category ?? "");
   const [edits, setEdits] = useState<Record<string, string>>({
     payee: draft.payee ?? "",
     memo: draft.memo ?? "",
     rrule: draft.rrule ?? "",
     dtstart: draft.dtstart ?? "",
     amount: draft.amount ?? "",
-    category: draft.category ?? "",
+    target: draftTarget,
   });
   const { decide, error } = useDecide(suggestion.id, () => {
     qc.invalidateQueries({ queryKey: ["suggestions"] });
@@ -561,9 +739,18 @@ function ScheduleCard({
 
   const submitEdits = () => {
     const changed: Record<string, string | null> = {};
-    for (const [key, value] of Object.entries(edits)) {
+    const { target, ...fields } = edits;
+    for (const [key, value] of Object.entries(fields)) {
       const before = draft[key] ?? "";
       if (value !== before) changed[key] = value === "" ? null : value;
+    }
+    if (target !== draftTarget) {
+      const transfer = /^\[(.*)\]$/.exec(target);
+      const category = transfer || target === "" ? null : target;
+      const counterparty = transfer ? transfer[1] : null;
+      if (category !== (draft.category ?? null)) changed.category = category;
+      if (counterparty !== (draft.counterparty_account ?? null))
+        changed.counterparty_account = counterparty;
     }
     // The draft's name is the derived label (#534): keep it in step with a
     // payee or memo edit, so accepting doesn't read the old name as a memo.
@@ -583,13 +770,20 @@ function ScheduleCard({
       <CardHeader suggestion={suggestion} />
       <EvidenceLine suggestion={suggestion} noun="occurrences" />
       <p className="mt-2 text-xs text-muted-foreground">
-        Creates an active scheduled transaction on {draft.account}; no payment is sent. First date:{" "}
-        {formatDate(edits.dtstart)}. Amount: {formatMoney(edits.amount)}. Pause or edit it from Scheduled transactions.
+        Creates an active scheduled transaction on {accountName(draft.account)}; no payment is
+        sent. First date:{" "}
+        {formatDate(edits.dtstart)}. Amount:{" "}
+        {draft.amount_type === "estimated" && edits.amount ? (
+          <EstimatedAmount value={edits.amount} />
+        ) : (
+          formatMoney(edits.amount)
+        )}
+        . Pause or edit it from Scheduled transactions.
       </p>
 
       {editing && (
         <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-3">
-          {(["payee", "memo", "rrule", "dtstart", "amount", "category"] as const).map((key) => (
+          {(["payee", "memo", "rrule", "dtstart", "amount", "target"] as const).map((key) => (
             <div key={key}>
               <Label className="text-xs" htmlFor={`${formId}-${key}`}>
                 {
@@ -599,7 +793,7 @@ function ScheduleCard({
                     rrule: "Repeats",
                     dtstart: "First date",
                     amount: "Amount (negative for money out)",
-                    category: "Category",
+                    target: "Category, or transfer to",
                   }[key]
                 }
               </Label>
@@ -609,13 +803,20 @@ function ScheduleCard({
                   value={edits.rrule}
                   onChange={(value) => setEdits({ ...edits, rrule: value })}
                 />
+              ) : key === "target" ? (
+                <CategorySelect
+                  id={`${formId}-${key}`}
+                  value={edits.target}
+                  currentAccountPath={draft.account ?? ""}
+                  direction={moneySign(edits.amount) > 0 ? "credit" : "debit"}
+                  onChange={(value) => setEdits({ ...edits, target: value })}
+                />
               ) : (
                 <Input
                   id={`${formId}-${key}`}
                   type={key === "dtstart" ? "date" : "text"}
                   value={edits[key]}
                   onChange={(e) => setEdits({ ...edits, [key]: e.target.value })}
-                  placeholder={key === "category" ? "expenses.…" : ""}
                 />
               )}
             </div>
@@ -697,6 +898,7 @@ function TransferLinkCard({
   onDecided?: () => void;
 }) {
   const qc = useQueryClient();
+  const accountName = useAccountNames();
   const draft = suggestion.draft as unknown as TransferLinkDraft;
   const [editing, setEditing] = useState(false);
   const [rejecting, setRejecting] = useState(false);
@@ -799,8 +1001,7 @@ function TransferLinkCard({
     <div className="min-w-0 break-words rounded-lg border border-border p-3 text-sm">
       <CardHeader suggestion={suggestion} />
       <p className="mt-1 text-xs">
-        <span className="font-mono">{draft.from_account}</span> and{" "}
-        <span className="font-mono">{draft.to_account}</span> · payee{" "}
+        {accountName(draft.from_account)} and {accountName(draft.to_account)} · payee{" "}
         <span className="font-medium">{draft.payee}</span> or an alias · legs within {windowDays}{" "}
         days{draft.window_days == null ? " (standard)" : ""}
         {draft.amount_exact ? ` · exactly ${formatMoney(draft.amount_exact)}` : " · any amount"}
@@ -882,6 +1083,256 @@ function TransferLinkCard({
             pending={decide.isPending}
             neverLabel="Never for this pair"
             neverTitle="Never suggest a transfer link between these two accounts again"
+            onReject={(scope) => decide.mutate({ decision: "reject", reject_scope: scope })}
+            onCancel={() => setRejecting(false)}
+          />
+        )}
+      </div>
+      {error && <ErrorText>{error}</ErrorText>}
+    </div>
+  );
+}
+
+type TradeRuleDraft = {
+  account: string;
+  account_id: string;
+  match_field: "payee" | "description" | "payee_or_description";
+  match_mode: "equals" | "prefix" | "contains";
+  match_text: string;
+  direction: "debit" | "credit" | null;
+};
+
+const MATCH_FIELD_LABEL: Record<TradeRuleDraft["match_field"], string> = {
+  payee: "payee",
+  description: "description",
+  payee_or_description: "payee or description",
+};
+const MATCH_MODE_LABEL: Record<TradeRuleDraft["match_mode"], string> = {
+  equals: "is",
+  prefix: "starts with",
+  contains: "contains",
+};
+
+/** A trade_rule suggestion (#591, decision 119): you marked a row on a
+ * brokerage account as a securities trade, and Purser offers a rule that
+ * marks rows like it the same way. Purser never decides which rows are
+ * trades by itself (brokers word them differently), so the wording is
+ * yours to edit. Accept creates the rule as a draft; activating it is the
+ * next step, and history is marked only through the Rules page's
+ * apply-history (a dry run first). */
+function TradeRuleCard({
+  suggestion,
+  onDecided,
+}: {
+  suggestion: SuggestionOut;
+  onDecided?: () => void;
+}) {
+  const qc = useQueryClient();
+  const accountName = useAccountNames();
+  const draft = suggestion.draft as unknown as TradeRuleDraft;
+  const [editing, setEditing] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+  const [edits, setEdits] = useState({
+    match_field: draft.match_field,
+    match_mode: draft.match_mode,
+    match_text: draft.match_text,
+    direction: draft.direction ?? "",
+  });
+  const [created, setCreated] = useState<{ id: string; projected: number } | null>(null);
+  const [activationError, setActivationError] = useState<string | null>(null);
+
+  const finish = () => {
+    qc.invalidateQueries({ queryKey: ["suggestions"] });
+    qc.invalidateQueries({ queryKey: ["rules"] });
+    onDecided?.();
+  };
+  const { decide, error } = useDecide(suggestion.id, (data) => {
+    if (data.rule) {
+      qc.invalidateQueries({ queryKey: ["rules"] });
+      setCreated({ id: data.rule.id, projected: data.projected_matches ?? 0 });
+      return;
+    }
+    finish();
+  });
+  const activate = useMutation({
+    mutationFn: async (ruleId: string) => {
+      const { error: err } = await api.POST("/rules/{rule_id}/state", {
+        params: { path: { rule_id: ruleId } },
+        body: { state: "active" },
+      });
+      if (err) throw new Error(errorDetail(err));
+    },
+    onSuccess: finish,
+    onError: (e: Error) => setActivationError(e.message),
+  });
+
+  const submitEdits = () => {
+    const changed: Record<string, string | null> = {};
+    if (edits.match_field !== draft.match_field) changed.match_field = edits.match_field;
+    if (edits.match_mode !== draft.match_mode) changed.match_mode = edits.match_mode;
+    if (edits.match_text.trim() !== draft.match_text) changed.match_text = edits.match_text.trim();
+    if (edits.direction !== (draft.direction ?? ""))
+      changed.direction = edits.direction === "" ? null : edits.direction;
+    if (Object.keys(changed).length === 0) {
+      decide.mutate({ decision: "accept", reject_scope: "exact" });
+      return;
+    }
+    decide.mutate({ decision: "edit_then_accept", edits: changed, reject_scope: "exact" });
+  };
+
+  const direction =
+    draft.direction === "debit"
+      ? "money out (buys)"
+      : draft.direction === "credit"
+        ? "money in (sells)"
+        : "either direction";
+
+  if (created) {
+    return (
+      <div className="min-w-0 break-words rounded-lg border border-border p-3 text-sm">
+        <CardHeader suggestion={suggestion} />
+        <p className="mt-2">
+          Rule created as a <strong>draft</strong>. It matches <strong>{created.projected}</strong>{" "}
+          row(s) in your history today. Active, it marks new rows like these as a securities trade
+          as they arrive; mark past rows from the Rules page (apply to history, with a preview
+          first).
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Button size="sm" disabled={activate.isPending} onClick={() => activate.mutate(created.id)}>
+            Activate
+          </Button>
+          <Button size="sm" variant="ghost" onClick={finish}>
+            Leave as draft
+          </Button>
+          <Link to="/settings/rules" className="self-center text-xs underline">
+            review on the Rules page
+          </Link>
+        </div>
+        {activationError && <ErrorText>{activationError}</ErrorText>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-w-0 break-words rounded-lg border border-border p-3 text-sm">
+      <CardHeader suggestion={suggestion} />
+      <p className="mt-1 text-xs">
+        On {accountName(draft.account)}: {MATCH_FIELD_LABEL[draft.match_field]}{" "}
+        {MATCH_MODE_LABEL[draft.match_mode]} <span className="font-medium">"{draft.match_text}"</span>{" "}
+        · {direction} → Securities trade
+      </p>
+      <EvidenceLine suggestion={suggestion} noun="marked row(s)" />
+
+      {editing && (
+        <div className="mt-3 grid grid-cols-2 gap-2 md:grid-cols-4">
+          <div>
+            <Label className="text-xs" htmlFor={`${suggestion.id}-field`}>
+              Match on
+            </Label>
+            <select
+              id={`${suggestion.id}-field`}
+              className="h-9 w-full rounded-md border border-border bg-card px-2 text-sm"
+              value={edits.match_field}
+              onChange={(e) =>
+                setEdits({ ...edits, match_field: e.target.value as TradeRuleDraft["match_field"] })
+              }
+            >
+              <option value="payee_or_description">payee or description</option>
+              <option value="payee">payee</option>
+              <option value="description">description</option>
+            </select>
+          </div>
+          <div>
+            <Label className="text-xs" htmlFor={`${suggestion.id}-mode`}>
+              How
+            </Label>
+            <select
+              id={`${suggestion.id}-mode`}
+              className="h-9 w-full rounded-md border border-border bg-card px-2 text-sm"
+              value={edits.match_mode}
+              onChange={(e) =>
+                setEdits({ ...edits, match_mode: e.target.value as TradeRuleDraft["match_mode"] })
+              }
+            >
+              <option value="prefix">starts with</option>
+              <option value="contains">contains</option>
+              <option value="equals">is</option>
+            </select>
+          </div>
+          <div>
+            <Label className="text-xs" htmlFor={`${suggestion.id}-text`}>
+              Text
+            </Label>
+            <Input
+              id={`${suggestion.id}-text`}
+              value={edits.match_text}
+              onChange={(e) => setEdits({ ...edits, match_text: e.target.value })}
+            />
+          </div>
+          <div>
+            <Label className="text-xs" htmlFor={`${suggestion.id}-direction`}>
+              Direction
+            </Label>
+            <select
+              id={`${suggestion.id}-direction`}
+              className="h-9 w-full rounded-md border border-border bg-card px-2 text-sm"
+              value={edits.direction}
+              onChange={(e) => setEdits({ ...edits, direction: e.target.value })}
+            >
+              <option value="debit">money out (buys)</option>
+              <option value="credit">money in (sells)</option>
+              <option value="">either</option>
+            </select>
+          </div>
+        </div>
+      )}
+
+      <div className="mt-3 flex flex-wrap gap-2">
+        {!editing && !rejecting && (
+          <>
+            <Button
+              size="sm"
+              disabled={decide.isPending}
+              title="Creates the rule as a draft; activating it is the next step"
+              onClick={() => decide.mutate({ decision: "accept", reject_scope: "exact" })}
+            >
+              Create draft rule
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setEditing(true)}>
+              Edit & accept
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={decide.isPending}
+              onClick={() => decide.mutate({ decision: "snooze", reject_scope: "exact" })}
+            >
+              Snooze 30d
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setRejecting(true)}>
+              Reject
+            </Button>
+          </>
+        )}
+        {editing && (
+          <>
+            <Button
+              size="sm"
+              disabled={decide.isPending || !edits.match_text.trim()}
+              onClick={submitEdits}
+            >
+              Create with edits
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
+              Cancel
+            </Button>
+          </>
+        )}
+        {rejecting && (
+          <RejectButtons
+            pending={decide.isPending}
+            neverLabel="Never for this account"
+            neverTitle="Never suggest a securities-trade rule for this account again"
             onReject={(scope) => decide.mutate({ decision: "reject", reject_scope: scope })}
             onCancel={() => setRejecting(false)}
           />

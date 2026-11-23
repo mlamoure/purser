@@ -8,8 +8,8 @@ memories, `propose` on schedules), with drafts as the default.
 
 from fastapi.testclient import TestClient
 
+from tests.conftest import today
 from tests.test_mcp import (  # noqa: F401 (fixture re-export)
-    TODAY,
     LiveServer,
     _mcp_call,
     live_server,
@@ -50,7 +50,7 @@ class TestAgentWrites:
             "account": "assets.checking",
             "category": "expenses.dining",
             "amount": "-12.50",
-            "date_": TODAY.isoformat(),
+            "date_": today().isoformat(),
         }
         posted, pending = _mcp_call(
             live_server.url,

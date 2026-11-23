@@ -10,7 +10,7 @@ import json
 import threading
 import uuid
 from collections.abc import Callable
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy import Engine, select, text
@@ -22,8 +22,7 @@ from purser.feed import importer
 from purser.holdings import prices, projection
 from purser.holdings import service as holdings
 from purser.models import Account, ApiToken, Connection, RawFetch, User
-
-TODAY = datetime.now(UTC).date()
+from tests.conftest import now, today
 
 
 def _feed_account(session: Session) -> tuple[Account, Connection]:
@@ -52,7 +51,7 @@ def _fetch(session: Session, connection_id: uuid.UUID, holdings: list[dict]) -> 
                 "name": "Plan",
                 "currency": "USD",
                 "balance": "0.00",
-                "balance-date": int(datetime.now(UTC).timestamp()),
+                "balance-date": int(now().timestamp()),
                 "transactions": [],
                 "holdings": holdings,
             }
@@ -83,8 +82,7 @@ def _in_thread(work: Callable[[], None]) -> tuple[threading.Thread, list[BaseExc
 
 
 def _sources_by_day(engine: Engine, account_id: uuid.UUID) -> dict[date, set[str]]:
-    """Each date's sources (read from the rows, never from a module-level
-    TODAY: a run can cross midnight UTC)."""
+    """Each date's sources, as the stored rows have them."""
     out: dict[date, set[str]] = {}
     with engine.connect() as conn:
         for as_of, source in conn.execute(
@@ -119,7 +117,7 @@ class TestSyncAgainstASwitch:
                 account_ref=str(account_id),
                 symbol="ACME",
                 quantity=Decimal("3"),
-                as_of=TODAY,
+                as_of=today(),
                 token=None,
             )
 
@@ -167,7 +165,7 @@ class TestSyncAgainstASwitch:
                         account_ref=str(account_id),
                         symbol="ACME",
                         quantity=Decimal("4"),
-                        as_of=TODAY - timedelta(days=2),
+                        as_of=today() - timedelta(days=2),
                         token=None,
                     )
                     session.commit()
@@ -238,7 +236,7 @@ class TestCloseAgainstAnImport:
                 account_ref=str(account_id),
                 category_ref=str(seed.id),
                 amount=Decimal("25.00"),
-                date=TODAY,
+                date=today(),
                 requested_status=core_ledger.Status.POSTED,
                 token=None,
             )
@@ -263,7 +261,7 @@ class TestCloseAgainstAnImport:
 
             thread, errors = _in_thread(close)
             thread.join(timeout=2)
-            balances.mark_dirty(importing, TODAY, networth_only=True)  # then the watermark
+            balances.mark_dirty(importing, today(), networth_only=True)  # then the watermark
             importing.commit()
             thread.join(timeout=60)
             assert errors == []
@@ -309,7 +307,9 @@ class TestPriceAgainstANewHolder:
     exclusively before it reads which accounts hold the symbol; a write that
     starts holding it takes it shared before it projects."""
 
-    D = TODAY - timedelta(days=3)
+    @property
+    def day(self) -> date:
+        return today() - timedelta(days=3)
 
     def test_a_price_recorded_while_a_position_is_uncommitted(
         self, clean_db: None, migrated_engine: Engine
@@ -326,14 +326,18 @@ class TestPriceAgainstANewHolder:
                 account_ref=str(account_id),
                 symbol="LOCKX",
                 quantity=Decimal("4"),
-                as_of=self.D,
+                as_of=self.day,
                 token=None,
             )
 
             def price() -> None:
                 with db.get_sessionmaker()() as session:
                     recorded = prices.record_price(
-                        session, symbol="LOCKX", price_date=self.D, close=Decimal("25"), token=None
+                        session,
+                        symbol="LOCKX",
+                        price_date=self.day,
+                        close=Decimal("25"),
+                        token=None,
                     )
                     assert recorded.accounts == 1
                     session.commit()
@@ -347,7 +351,7 @@ class TestPriceAgainstANewHolder:
         finally:
             writer.close()
         values = _stored_values(migrated_engine, account_id, "LOCKX")
-        assert values and all(v == Decimal("100.0000") for d, v in values.items() if d >= self.D)
+        assert values and all(v == Decimal("100.0000") for d, v in values.items() if d >= self.day)
 
     def test_a_position_recorded_while_a_price_is_uncommitted(
         self, clean_db: None, migrated_engine: Engine
@@ -360,7 +364,7 @@ class TestPriceAgainstANewHolder:
         pricer = db.get_sessionmaker()()
         try:
             prices.record_price(
-                pricer, symbol="LOCKY", price_date=self.D, close=Decimal("25"), token=None
+                pricer, symbol="LOCKY", price_date=self.day, close=Decimal("25"), token=None
             )
 
             def position() -> None:
@@ -370,7 +374,7 @@ class TestPriceAgainstANewHolder:
                         account_ref=str(account_id),
                         symbol="LOCKY",
                         quantity=Decimal("4"),
-                        as_of=self.D,
+                        as_of=self.day,
                         token=None,
                     )
                     session.commit()
@@ -384,7 +388,7 @@ class TestPriceAgainstANewHolder:
         finally:
             pricer.close()
         values = _stored_values(migrated_engine, account_id, "LOCKY")
-        assert values and all(v == Decimal("100.0000") for d, v in values.items() if d >= self.D)
+        assert values and all(v == Decimal("100.0000") for d, v in values.items() if d >= self.day)
 
     def test_a_price_recorded_while_an_account_switches_back_to_manual(
         self, clean_db: None, migrated_engine: Engine
@@ -402,7 +406,7 @@ class TestPriceAgainstANewHolder:
                 account_ref=str(account_id),
                 symbol="LOCKZ",
                 quantity=Decimal("4"),
-                as_of=self.D,
+                as_of=self.day,
                 token=None,
             )
             ledger.update_account(
@@ -418,7 +422,11 @@ class TestPriceAgainstANewHolder:
             def price() -> None:
                 with db.get_sessionmaker()() as session:
                     prices.record_price(
-                        session, symbol="LOCKZ", price_date=self.D, close=Decimal("25"), token=None
+                        session,
+                        symbol="LOCKZ",
+                        price_date=self.day,
+                        close=Decimal("25"),
+                        token=None,
                     )
                     session.commit()
 
@@ -431,7 +439,7 @@ class TestPriceAgainstANewHolder:
         finally:
             switch.close()
         values = _stored_values(migrated_engine, account_id, "LOCKZ")
-        assert values and all(v == Decimal("100.0000") for d, v in values.items() if d >= self.D)
+        assert values and all(v == Decimal("100.0000") for d, v in values.items() if d >= self.day)
 
 
 class TestMoveAgainstASync:
@@ -516,7 +524,7 @@ class TestMoreLockOrders:
                 account_ref=str(doomed_id),
                 symbol="ACME",
                 quantity=Decimal("1"),
-                as_of=TODAY - timedelta(days=2),
+                as_of=today() - timedelta(days=2),
                 token=None,
             )
             doomed_path = session.get(Account, doomed_id).path
@@ -557,7 +565,7 @@ class TestMoreLockOrders:
         set) when the admin switches to manual again. The switch waits, then
         projects after the feed's rows: one source per date, and the
         hand-tracked history before the fetch survives."""
-        held_on = TODAY - timedelta(days=5)
+        held_on = today() - timedelta(days=5)
         with db.get_sessionmaker()() as session:
             account, connection = _feed_account(session)
             account_id, connection_id = account.id, connection.id

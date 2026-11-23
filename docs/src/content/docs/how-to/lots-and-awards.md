@@ -265,10 +265,13 @@ corrections update the lot and retain the previous and new basis in the audit lo
 Lot references and grant ids are account identifiers. They are encrypted at
 rest. Agents never see them unless a call asks with `include:
 ["external_ids"]`, and REST omits them for non-admin API tokens. You can
-always pass a reference to name a lot or an award. Plan labels follow the
-purchase-privacy setting. A lot's basis (its per-share figure too), proceeds
-and gains follow the amount-privacy setting. Realized-gain totals are
-aggregates.
+always pass a reference to name a lot or an award. A call that withholds
+descriptions leaves out plan labels; one that withholds amounts leaves out a
+lot's basis (its per-share figure too), proceeds and gains, the price and
+fees of each position event (including a split's cash-in-lieu sale) and a
+vest's fair market value. Share counts stay. Realized-gain totals are
+aggregates and always stay. See
+[Privacy and agents](../../explanation/privacy-and-agents/).
 
 ## Not covered
 
@@ -276,7 +279,9 @@ These are out of scope:
 
 - tax forms and tax computation
 - ESPP qualifying flags
-- splits and other corporate actions
+- corporate actions other than stock splits (a split keeps every lot's basis
+  and holding period: see
+  [Record a stock split](../../how-to/manual-holdings/#record-a-stock-split))
 - importing a CSV lot export
 - vest events in the forecast
 

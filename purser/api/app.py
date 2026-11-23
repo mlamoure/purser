@@ -55,6 +55,11 @@ def create_app() -> FastAPI:
     crypto.ensure_key()  # encryption at rest is required — fail before serving
     settings = get_settings()
     configure_logging(settings.log_level)
+    from purser.config import removed_env_vars_set
+    from purser.logging import get_logger
+
+    for name, why in removed_env_vars_set().items():
+        get_logger(__name__).warning("ignored removed setting", variable=name, replaced_by=why)
 
     from purser.mcp.mount import McpAuthWrapper
 
@@ -89,8 +94,13 @@ def create_app() -> FastAPI:
     # out from every other.
     security.dummy_password_hash()
 
+    from purser.api.disclosure import DisclosureMiddleware
     from purser.api.middleware import AuditMiddleware, BodyLimitMiddleware
 
+    # Innermost: payee references in requests, and a read route's withhold
+    # applied to its response (#613) — inside the audit capture, so the audit
+    # row inventories what actually left Purser.
+    app.add_middleware(DisclosureMiddleware)
     # Capture integration responses before release; browser activity remains
     # best-effort. MCP tools and financial resources audit their own results.
     app.add_middleware(AuditMiddleware)

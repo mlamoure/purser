@@ -54,7 +54,7 @@ every response says which method produced it via `balance_method` (`method` on
 
 | Method | Applies to | What it means |
 | --- | --- | --- |
-| `postings` | checking, savings, cash, credit cards | The stored running balance alone. |
+| `postings` | checking, savings, cash, credit cards | The stored running balance alone. A bank-fed account's first row is its [starting balance](../../how-to/starting-balance/): what it held before the first transaction the feed delivered. |
 | `postings` | property (a hand-valued asset) | Its value is a ledger: a change in value is an entry against `equity.revaluation`, and reconciling sets the value on a date. See [Track a house or other asset](../../how-to/hand-valued-assets/). |
 | `valuation` | loan | The latest valuation **replaces** the postings sum. A mortgage's feed reports a balance, not a transaction history, so the postings sum is not the debt. |
 | `postings+holdings` | brokerage | The latest holdings market value is **added to** the postings sum. Brokerage cash is real money the feed already reported, so it is not discarded. The holdings come from the feed's snapshots or, for an account [tracked by hand](../../how-to/manual-holdings/), from its positions priced at the newest close. |
@@ -96,10 +96,35 @@ equals the last point.
 The window defaults to the last 90 days. Points are oldest-first. Past 5000
 points the response sets `truncated` rather than quietly dropping the tail.
 
-The same three methods apply, and the account type decides once for the whole
-window — an account does not change how it is valued partway through. The
-close cutoff, though, applies per date: history before a close keeps its
-overlay, and from the close date onward the account reads from postings.
+This is the **postings history** for every account type, and its `method` is
+always `postings`. A price move or a new valuation has no transaction, so it
+has no point here: a brokerage account's `opening` and points are its cash, and
+a loan's are its postings. For what an account is worth over time, chart it.
+
+### Charting a balance
+
+To chart what an account is worth day by day, use
+`GET /accounts/{id}/balance/history?range=1y`. Each point is the
+account's reported end-of-day balance by the same three methods (a brokerage
+account's cash plus its holdings, a loan's valuations), on dates sampled across
+the window: daily for a year, weekly for five, at most `max_points` (default
+400, up to 1000). `range` is one of `1m`, `3m`, `6m`, `ytd`, `1y`, `5y` or
+`all`, ending today; `start` and `end` override it. The window starts no
+earlier than the account's first activity. The response carries the change
+over the window (`change`, and `change_pct` when the window does not open at
+zero) and the `low` and `high`, all computed by the server. The account page
+in the admin interface draws this series above the register.
+
+The account type decides the method once for the whole window — an account
+does not change how it is valued partway through. The close cutoff, though,
+applies per date: history before a close keeps its overlay, and from the close
+date onward the account reads from postings.
+
+`low` and `high` rank every day with activity in the window, not only the
+sampled points: a day with a transaction and, for a brokerage account, a day
+with a holdings snapshot, for a loan a day with a valuation, plus the close
+date. Between those days the reported balance does not move, so a sparse
+series cannot hide an extreme.
 
 ## Reconciled balances
 
@@ -158,13 +183,19 @@ total across rows use `spending_summary`. In no case should you add up
 
 `balance_history` picks the density itself and tells you what it picked, so a
 naive call cannot blow your context: `30d` is a true daily series, `90d` lands
-on every third day, `1y` on every fourteenth. `low` and `high` are computed
-over **every** day with activity in the window rather than the returned points,
-so they stay true even when the series is sparse — a low on the 19th is
-reported correctly by a series that never contains the 19th. `movers` names
-the biggest movements. Full per-transaction resolution is behind `series_uri`,
-which serves exactly the window the tool summarized (for `all`, the whole
-history): up to 5000 points, oldest first, with `truncated` set past that.
+on every third day, `1y` on every fourteenth. Its `series`, `current`, `low`
+and `high` are the balance the account reports, by the `method` it names (a
+brokerage account's cash plus its holdings, a loan's valuations). `low` and
+`high` are computed over **every** day with activity in the window rather
+than the returned points — a transaction, and a holdings snapshot or a
+valuation for those accounts — so they stay true even when the series is
+sparse: a low on the 19th is reported correctly by a series that never
+contains the 19th. `movers` names the biggest movements. Full per-transaction
+resolution is behind `series_uri`, which serves exactly the window the tool
+summarized (for `all`, the whole history): up to 5000 points, oldest first,
+with `truncated` set past that. It is the postings history, like
+`/balance/series`: for a brokerage account it is the cash alone, for a loan
+its postings.
 
 `low` and `high` are **end-of-day** balances: each day counts with the balance
 it closed at, never with a value it passed through on the way. Purser orders

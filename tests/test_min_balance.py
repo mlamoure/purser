@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from purser import schedules as schedules_service
 from purser.models import AuditLog, Event
+from tests.conftest import today
 
 
 @pytest.fixture
@@ -210,19 +211,18 @@ class TestShortfallScan:
     def test_a_floor_set_later_joins_the_next_scan_and_clearing_it_leaves(
         self, seeded: dict[str, str], client: TestClient, migrated_engine: Engine
     ) -> None:
-        today = date.today()  # the forecast's own "today" (schedules.forecast_account)
         opening = client.post(
             "/transactions",
             json={
                 "account": "assets.checking",
                 "category": "income",
                 "amount": "300.00",
-                "date": (today - timedelta(days=20)).isoformat(),
+                "date": (today() - timedelta(days=20)).isoformat(),
                 "status": "posted",
             },
         )
         assert opening.status_code == 201, opening.text
-        self._expected(client, "-250.00", today + timedelta(days=5))  # projects 50.00
+        self._expected(client, "-250.00", today() + timedelta(days=5))  # projects 50.00
 
         # No floor: the account is not scanned.
         schedules_service.shortfall_scan_job()
@@ -233,12 +233,12 @@ class TestShortfallScan:
         schedules_service.shortfall_scan_job()
         (fired,) = self._shortfalls(migrated_engine)
         assert fired["account"] == "assets.checking"
-        assert fired["date"] == (today + timedelta(days=5)).isoformat()
+        assert fired["date"] == (today() + timedelta(days=5)).isoformat()
         assert Decimal(fired["low"]) == Decimal("50.00")
         assert Decimal(fired["min_balance"]) == Decimal("100.00")
 
         # Cleared: a new, earlier dip below the old floor raises nothing.
         assert _patch(client, seeded["checking"], {"min_balance": None}).status_code == 200  # type: ignore[attr-defined]
-        self._expected(client, "-275.00", today + timedelta(days=1))
+        self._expected(client, "-275.00", today() + timedelta(days=1))
         schedules_service.shortfall_scan_job()
         assert len(self._shortfalls(migrated_engine)) == 1

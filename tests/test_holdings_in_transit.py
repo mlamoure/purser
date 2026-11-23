@@ -19,9 +19,9 @@ from purser import networth
 from purser.core import holdings as core
 from purser.holdings import prices, service
 from purser.models import Account
+from tests.conftest import today
 from tests.test_holdings_cash import _broker, _epoch, _feed_row, _hold, _symbol, _sync
 
-TODAY = datetime.now(UTC).date()
 D0 = date(2026, 3, 2)  # a Monday
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -134,11 +134,11 @@ class TestProjectionRows:
 def _priced_position(session: Session) -> tuple[Account, str]:
     account = _broker(session)
     symbol = _symbol()
-    _hold(session, account, symbol, "100", TODAY - timedelta(days=40))
+    _hold(session, account, symbol, "100", today() - timedelta(days=40))
     prices.record_price(
         session,
         symbol=symbol,
-        price_date=TODAY - timedelta(days=40),
+        price_date=today() - timedelta(days=40),
         close=Decimal("50"),
         token=None,
     )
@@ -146,7 +146,7 @@ def _priced_position(session: Session) -> tuple[Account, str]:
 
 
 def _trade_on(weekday: int) -> date:
-    trade = TODAY - timedelta(days=14)
+    trade = today() - timedelta(days=14)
     while trade.weekday() != weekday:
         trade -= timedelta(days=1)
     return trade
@@ -189,7 +189,7 @@ class TestNetWorthDoesNotDip:
         row = _feed_row(db_session, account, "1000.00", trade + timedelta(days=bank_days), "SOLD")
         event = _sell(db_session, account, symbol, trade, transaction_id=row.id)
         assert event.settle_on == trade + timedelta(days=bank_days)
-        days = [trade + timedelta(days=n) for n in range(-2, (TODAY - trade).days + 1)]
+        days = [trade + timedelta(days=n) for n in range(-2, (today() - trade).days + 1)]
         assert set(_values(db_session, account, days).values()) == {Decimal("5000.0000")}
         held = networth.latest_holdings(db_session, account.id, trade)  # before the cash
         (line,) = [h for h in held if h.symbol == symbol]
@@ -200,7 +200,7 @@ class TestNetWorthDoesNotDip:
         account, symbol = _priced_position(db_session)
         trade = _trade_on(1)
         _sell(db_session, account, symbol, trade, settle_on=trade + timedelta(days=2))
-        days = [trade + timedelta(days=n) for n in range(-2, (TODAY - trade).days + 1)]
+        days = [trade + timedelta(days=n) for n in range(-2, (today() - trade).days + 1)]
         assert set(_values(db_session, account, days).values()) == {Decimal("5000.0000")}
 
     def test_cash_settling_after_today_does_not_double_count_on_its_day(self, db_session) -> None:
@@ -209,9 +209,9 @@ class TestNetWorthDoesNotDip:
         # transit must already be there, written ahead, or the posted cash and
         # the transit both count that day.
         account, symbol = _priced_position(db_session)
-        settle = TODAY + timedelta(days=2)
-        _sell(db_session, account, symbol, TODAY, settle_on=settle)
-        days = [TODAY + timedelta(days=n) for n in range(-1, 5)]
+        settle = today() + timedelta(days=2)
+        _sell(db_session, account, symbol, today(), settle_on=settle)
+        days = [today() + timedelta(days=n) for n in range(-1, 5)]
         assert set(_values(db_session, account, days).values()) == {Decimal("5000.0000")}
         # ...and the set written ahead is not "the latest" before its day: a
         # read with no date is the ledger day's, still carrying the cash.
@@ -227,7 +227,7 @@ class TestNetWorthDoesNotDip:
             ),
             {"path": account.path, "symbol": symbol},
         ).one()
-        assert latest.as_of == TODAY and latest.market_value == Decimal("5000.0000")
+        assert latest.as_of == today() and latest.market_value == Decimal("5000.0000")
 
     def test_a_broker_copy_taking_over_moves_the_cash_but_not_net_worth(self, db_session) -> None:
         account, symbol = _priced_position(db_session)
@@ -246,7 +246,7 @@ class TestNetWorthDoesNotDip:
             ],
         )
         assert stats["linked_trade_cash"] == 1
-        days = [trade + timedelta(days=n) for n in range(-2, (TODAY - trade).days + 1)]
+        days = [trade + timedelta(days=n) for n in range(-2, (today() - trade).days + 1)]
         assert set(_values(db_session, account, days).values()) == {Decimal("5000.0000")}
 
     def test_reversing_a_linked_sale_ends_its_cash_in_transit(self, db_session) -> None:

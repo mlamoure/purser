@@ -56,6 +56,10 @@ one: the account's earliest feed-sourced transaction date minus a 3-day margin
 days later), or null when the feed has not touched the account. This is the
 per-request twin of the persistent [`feed_start`](../../how-to/simplefin/) boundary.
 
+An account that [starts from the bank's balance](../starting-balance/) keeps
+matching the bank when you import its older history: Purser lowers the
+starting entry by exactly what the file brings in.
+
 ## Sign invert
 
 Some banks export a card or loan file with spending as a positive number. A
@@ -100,9 +104,10 @@ taxes, or a store run that was half groceries, land in their own categories.
   difference goes there too, counted `split_remainders`.
 - A split left with a single category line imports as an ordinary row.
 
-Split rows are read-only: they cannot be recategorized or edited in place,
-and neither the categorize pass nor a rule's apply-history touches them. A
-file imported before split lines were read landed each split row whole under
+A split row is edited like any other split — its lines, or removing the
+split ([Split a transaction](../../how-to/split-transactions/)) — but it cannot
+be recategorized as a flat row, and neither the categorize pass nor a rule's
+apply-history touches it. A file imported before split lines were read landed each split row whole under
 `expenses.split`; importing it again dedups against those rows, so to get the
 lines, purge that import's batch first (`purser admin purge-retired-rows`, see
 the [CLI reference](../../reference/cli/)) and import again.

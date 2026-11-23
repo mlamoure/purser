@@ -22,13 +22,12 @@ from purser.holdings import cash as trade_cash
 from purser.holdings import service
 from purser.ledger import LedgerError
 from purser.models import Account, AuditLog, Posting, Transaction
-
-TODAY = datetime.now(UTC).date()
+from tests.conftest import now, today
 
 
 def _weekday_before(days: int) -> date:
     """A Monday-to-Thursday date about ``days`` ago, so T+1 is the next day."""
-    day = TODAY - timedelta(days=days)
+    day = today() - timedelta(days=days)
     while day.weekday() >= 4:
         day -= timedelta(days=1)
     return day
@@ -92,7 +91,7 @@ class TestSaleProceeds:
         arrives that day too (a later settle_on is opt-in)."""
         account = _broker(db_session)
         symbol = _symbol()
-        position = _hold(db_session, account, symbol, "100", TODAY - timedelta(days=30))
+        position = _hold(db_session, account, symbol, "100", today() - timedelta(days=30))
         trade = _weekday_before(10)
         event = service.record_event(
             db_session,
@@ -121,7 +120,7 @@ class TestSaleProceeds:
         probe looks to five days after it; by default it looks to five days
         after T+1, whatever the posting date."""
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "100", TODAY - timedelta(days=40))
+        position = _hold(db_session, account, _symbol(), "100", today() - timedelta(days=40))
         trade = _weekday_before(20)
         later = trade + timedelta(days=3)
         event = service.record_event(
@@ -165,7 +164,7 @@ class TestSaleProceeds:
         """quantity x price is often sub-cent with fractional shares; the cash
         is what a broker pays, the net rounded once, half up, to the cent."""
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "10", TODAY - timedelta(days=30))
+        position = _hold(db_session, account, _symbol(), "10", today() - timedelta(days=30))
         service.record_event(
             db_session,
             position_id=position.id,
@@ -192,7 +191,7 @@ class TestSaleProceeds:
 
     def test_cash_beyond_what_the_ledger_holds_is_refused(self, db_session) -> None:
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "1", TODAY - timedelta(days=30))
+        position = _hold(db_session, account, _symbol(), "1", today() - timedelta(days=30))
         with pytest.raises(LedgerError, match="out of range"):
             service.record_event(
                 db_session,
@@ -208,12 +207,12 @@ class TestSaleProceeds:
     def test_proceeds_none_moves_no_cash(self, db_session) -> None:
         """Shares withheld for tax: the count drops, the cash does not move."""
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "10", TODAY - timedelta(days=5))
+        position = _hold(db_session, account, _symbol(), "10", today() - timedelta(days=5))
         event = service.record_event(
             db_session,
             position_id=position.id,
             kind="sell",
-            occurred_on=TODAY,
+            occurred_on=today(),
             quantity=Decimal("3"),
             proceeds_to="none",
             token=None,
@@ -223,7 +222,7 @@ class TestSaleProceeds:
 
     def test_a_funded_buy_takes_its_cost_and_a_plain_buy_takes_none(self, db_session) -> None:
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "1", TODAY - timedelta(days=9))
+        position = _hold(db_session, account, _symbol(), "1", today() - timedelta(days=9))
         trade = _weekday_before(4)
         funded = service.record_event(
             db_session,
@@ -256,10 +255,10 @@ class TestSaleProceeds:
             ("sell", {}, "needs a price"),
             ("sell", {"funded_from": "cash", "price": Decimal("1")}, "funded_from applies to buys"),
             ("buy", {"proceeds_to": "cash"}, "proceeds_to applies to sells"),
-            ("sell", {"proceeds_to": "none", "settle_on": TODAY}, "settle_on and transaction_id"),
+            ("sell", {"proceeds_to": "none", "settle_on": 0}, "settle_on and transaction_id"),
             (
                 "sell",
-                {"price": Decimal("1"), "settle_on": TODAY - timedelta(days=30)},
+                {"price": Decimal("1"), "settle_on": -30},
                 "before the trade date",
             ),
             ("sell", {"price": Decimal("1"), "fees": Decimal("9")}, "at least one cent"),
@@ -269,14 +268,16 @@ class TestSaleProceeds:
     def test_cash_fields_are_validated(
         self, db_session, kind: str, fields: dict, message: str
     ) -> None:
+        if "settle_on" in fields:  # days from the test's today, resolved in the test (#533)
+            fields = {**fields, "settle_on": today() + timedelta(days=fields["settle_on"])}
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "10", TODAY - timedelta(days=20))
+        position = _hold(db_session, account, _symbol(), "10", today() - timedelta(days=20))
         with pytest.raises(LedgerError, match=message):
             service.record_event(
                 db_session,
                 position_id=position.id,
                 kind=kind,
-                occurred_on=TODAY - timedelta(days=2),
+                occurred_on=today() - timedelta(days=2),
                 quantity=Decimal("1"),
                 token=None,
                 **fields,
@@ -297,7 +298,7 @@ class TestSaleProceeds:
         ledger.update_account(
             db_session, account_id=account.id, holdings_source="manual", actor_token_id=None
         )
-        position = _hold(db_session, account, _symbol(), "10", TODAY - timedelta(days=30))
+        position = _hold(db_session, account, _symbol(), "10", today() - timedelta(days=30))
         trade = _weekday_before(10)
         income = ledger.create_account(
             db_session,
@@ -339,13 +340,13 @@ class TestSaleProceeds:
 
     def test_set_quantity_carries_no_cash_fields(self, db_session) -> None:
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "1", TODAY)
+        position = _hold(db_session, account, _symbol(), "1", today())
         with pytest.raises(LedgerError, match="set_quantity moves no cash"):
             service.record_event(
                 db_session,
                 position_id=position.id,
                 kind="set_quantity",
-                occurred_on=TODAY,
+                occurred_on=today(),
                 quantity=Decimal("2"),
                 proceeds_to="cash",
                 token=None,
@@ -383,7 +384,7 @@ class TestDoubleCountGuardAndLink:
         own cash beside it counted the sale twice once the bank posted it; the
         probe takes the pending copy and says to wait for it."""
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "50", TODAY - timedelta(days=40))
+        position = _hold(db_session, account, _symbol(), "50", today() - timedelta(days=40))
         trade = _weekday_before(12)
         pending = {
             "id": "a",
@@ -421,7 +422,7 @@ class TestDoubleCountGuardAndLink:
         """A fractional-share sale's sub-cent product still finds the feed's
         cent row: 3.5 x 10.1234 = 35.4319 settles as 35.43."""
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "10", TODAY - timedelta(days=30))
+        position = _hold(db_session, account, _symbol(), "10", today() - timedelta(days=30))
         trade = _weekday_before(10)
         feed = _feed_row(db_session, account, "35.43", trade + timedelta(days=1), "SOLD")
         with pytest.raises(trade_cash.CashAlreadyRecorded) as caught:
@@ -439,7 +440,7 @@ class TestDoubleCountGuardAndLink:
 
     def test_the_feeds_copy_of_the_cash_blocks_a_second_posting(self, db_session) -> None:
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "50", TODAY - timedelta(days=40))
+        position = _hold(db_session, account, _symbol(), "50", today() - timedelta(days=40))
         trade = _weekday_before(12)
         feed = _feed_row(db_session, account, "995.00", trade + timedelta(days=2), "SOLD SHARES")
         with pytest.raises(trade_cash.CashAlreadyRecorded) as raised:
@@ -466,7 +467,7 @@ class TestDoubleCountGuardAndLink:
         from purser.feed import importer
 
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "50", TODAY - timedelta(days=40))
+        position = _hold(db_session, account, _symbol(), "50", today() - timedelta(days=40))
         trade = _weekday_before(12)
         on = trade + timedelta(days=1)
         income = importer._uncategorized(db_session, income=True)
@@ -541,7 +542,7 @@ class TestDoubleCountGuardAndLink:
         from purser.models import Match
 
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "50", TODAY - timedelta(days=40))
+        position = _hold(db_session, account, _symbol(), "50", today() - timedelta(days=40))
         uncategorized = importer._uncategorized(db_session, income=True)
         schedule = schedules.create_schedule(
             db_session,
@@ -552,7 +553,7 @@ class TestDoubleCountGuardAndLink:
             amount=Decimal("100.00"),
             payee_name="Plan Sweep",
             category_path=uncategorized.path,
-            dtstart=TODAY,
+            dtstart=today(),
             token=None,
         )
         original = ledger.create_flat_transaction(
@@ -560,7 +561,7 @@ class TestDoubleCountGuardAndLink:
             account_ref=str(account.id),
             category_ref=str(uncategorized.id),
             amount=Decimal("100.00"),
-            date=TODAY,
+            date=today(),
             payee_name="Plan Sweep",
             description="PLAN SWEEP SOLD",
             requested_status=core.Status.POSTED,
@@ -582,7 +583,7 @@ class TestDoubleCountGuardAndLink:
         sell = {
             "position_id": position.id,
             "kind": "sell",
-            "occurred_on": TODAY,
+            "occurred_on": today(),
             "quantity": Decimal("1"),
             "price": Decimal("100"),
             "token": None,
@@ -605,7 +606,7 @@ class TestDoubleCountGuardAndLink:
         from purser.models import Match
 
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "50", TODAY - timedelta(days=40))
+        position = _hold(db_session, account, _symbol(), "50", today() - timedelta(days=40))
         trade = _weekday_before(12)
         row = _feed_row(db_session, account, "100.00", trade, "SOLD")
         ledger.create_flat_transaction(
@@ -644,7 +645,7 @@ class TestDoubleCountGuardAndLink:
         coincidence): force_cash posts the cash anyway, and the trade's audit
         row names the row it overrode."""
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "50", TODAY - timedelta(days=40))
+        position = _hold(db_session, account, _symbol(), "50", today() - timedelta(days=40))
         trade = _weekday_before(12)
         other = _feed_row(db_session, account, "100.00", trade + timedelta(days=1), "REFUND")
         with pytest.raises(trade_cash.CashAlreadyRecorded) as caught:
@@ -691,7 +692,7 @@ class TestDoubleCountGuardAndLink:
         self, db_session, fields: dict, message: str
     ) -> None:
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "50", TODAY - timedelta(days=40))
+        position = _hold(db_session, account, _symbol(), "50", today() - timedelta(days=40))
         trade = _weekday_before(12)
         if fields.get("transaction_id") == "link":
             fields = {"transaction_id": _feed_row(db_session, account, "100.00", trade, "SOLD").id}
@@ -710,7 +711,7 @@ class TestDoubleCountGuardAndLink:
 
     def test_a_row_past_the_window_does_not_block(self, db_session) -> None:
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "50", TODAY - timedelta(days=60))
+        position = _hold(db_session, account, _symbol(), "50", today() - timedelta(days=60))
         trade = _weekday_before(30)
         _feed_row(db_session, account, "100.00", trade + timedelta(days=20), "UNRELATED")
         event = service.record_event(
@@ -726,7 +727,7 @@ class TestDoubleCountGuardAndLink:
 
     def test_linking_rebooks_the_feed_row_to_equity_securities(self, db_session) -> None:
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "50", TODAY - timedelta(days=40))
+        position = _hold(db_session, account, _symbol(), "50", today() - timedelta(days=40))
         trade = _weekday_before(12)
         feed = _feed_row(db_session, account, "995.00", trade + timedelta(days=1), "SOLD SHARES")
         event = service.record_event(
@@ -780,7 +781,7 @@ class TestDoubleCountGuardAndLink:
         from purser import matching
 
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "50", TODAY - timedelta(days=40))
+        position = _hold(db_session, account, _symbol(), "50", today() - timedelta(days=40))
         other = _broker(db_session)
         trade = _weekday_before(12)  # T+1 is the next day; the window ends 6 days on
         price: Decimal | None = Decimal("10")
@@ -869,7 +870,7 @@ class TestDoubleCountGuardAndLink:
 class TestReversalAndLocking:
     def test_reversing_a_sale_undoes_its_cash_and_restores_the_shares(self, db_session) -> None:
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "100", TODAY - timedelta(days=30))
+        position = _hold(db_session, account, _symbol(), "100", today() - timedelta(days=30))
         event = service.record_event(
             db_session,
             position_id=position.id,
@@ -896,7 +897,7 @@ class TestReversalAndLocking:
         from purser import balances
 
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "100", TODAY - timedelta(days=30))
+        position = _hold(db_session, account, _symbol(), "100", today() - timedelta(days=30))
         event = service.record_event(
             db_session,
             position_id=position.id,
@@ -921,14 +922,14 @@ class TestReversalAndLocking:
         assert undone_by.date == cash.date and undone_by.origin == "system"
         assert cash.status == "posted"  # immutable: still there, corrected
         balances.recompute_running(db_session)
-        assert balances.balance_asof(db_session, account.id, TODAY) == _postings(
+        assert balances.balance_asof(db_session, account.id, today()) == _postings(
             db_session, account
         )
         assert _postings(db_session, account) == 0
 
     def test_a_trade_cash_row_cannot_be_edited(self, db_session) -> None:
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "10", TODAY - timedelta(days=30))
+        position = _hold(db_session, account, _symbol(), "10", today() - timedelta(days=30))
         event = service.record_event(
             db_session,
             position_id=position.id,
@@ -957,18 +958,18 @@ class TestReversalAndLocking:
 
         account = _broker(db_session)
         symbol = _symbol()
-        _hold(db_session, account, symbol, "100", TODAY - timedelta(days=40))
+        _hold(db_session, account, symbol, "100", today() - timedelta(days=40))
         prices.record_price(
             db_session,
             symbol=symbol,
-            price_date=TODAY - timedelta(days=40),
+            price_date=today() - timedelta(days=40),
             close=Decimal("50"),
             token=None,
         )
-        trade = TODAY - timedelta(days=14)
+        trade = today() - timedelta(days=14)
         while trade.weekday() != weekday:
             trade -= timedelta(days=1)
-        days = [trade + timedelta(days=n) for n in range(-2, (TODAY - trade).days + 1)]
+        days = [trade + timedelta(days=n) for n in range(-2, (today() - trade).days + 1)]
         before = {day: networth.net_worth_at(db_session, day)["net_worth"] for day in days}
         position = service.open_position(db_session, account.id, symbol)
         service.record_event(
@@ -1014,7 +1015,7 @@ class TestRest:
             json={
                 "symbol": _symbol(),
                 "quantity": "100",
-                "as_of": (TODAY - timedelta(days=40)).isoformat(),
+                "as_of": (today() - timedelta(days=40)).isoformat(),
             },
         ).json()
         return {"account": account["id"], "position": position["id"]}
@@ -1148,7 +1149,7 @@ class TestTradeCashStaysWithItsTrade:
             json={
                 "symbol": _symbol(),
                 "quantity": "100",
-                "as_of": (TODAY - timedelta(days=60)).isoformat(),
+                "as_of": (today() - timedelta(days=60)).isoformat(),
             },
         ).json()["id"]
         own_day, linked_day = _weekday_before(20), _weekday_before(10)
@@ -1329,7 +1330,7 @@ class TestCorrectingAClosedPosition:
             json={
                 "symbol": symbol,
                 "quantity": "10",
-                "as_of": (TODAY - timedelta(days=days + 10)).isoformat(),
+                "as_of": (today() - timedelta(days=days + 10)).isoformat(),
             },
         ).json()["id"]
         sale = client.post(
@@ -1406,7 +1407,7 @@ class TestCorrectingAClosedPosition:
             json={
                 "symbol": "ACME",
                 "quantity": "4",
-                "as_of": (TODAY - timedelta(days=5)).isoformat(),
+                "as_of": (today() - timedelta(days=5)).isoformat(),
             },
         ).json()["id"]
         resp = admin_client.patch(f"/positions/{first}", json={"closed": False})
@@ -1415,7 +1416,7 @@ class TestCorrectingAClosedPosition:
             f"/positions/{second}/events",
             json={
                 "kind": "sell",
-                "occurred_on": TODAY.isoformat(),
+                "occurred_on": today().isoformat(),
                 "quantity": "4",
                 "proceeds_to": "none",
             },
@@ -1553,7 +1554,7 @@ def test_a_dry_run_leaves_the_balance_watermark_alone(db_session) -> None:
 
     account = _broker(db_session)
     symbol = _symbol()
-    _hold(db_session, account, symbol, "10", TODAY - timedelta(days=30))
+    _hold(db_session, account, symbol, "10", today() - timedelta(days=30))
     db_session.info.pop("balances_dirty", None)  # the setup's own marks
     statements: list[str] = []
 
@@ -1588,7 +1589,7 @@ def test_review_batch_marks_trade_cash_locked(db_session) -> None:
     from purser import review
 
     account = _broker(db_session)
-    position = _hold(db_session, account, _symbol(), "10", TODAY - timedelta(days=30))
+    position = _hold(db_session, account, _symbol(), "10", today() - timedelta(days=30))
     event = service.record_event(
         db_session,
         position_id=position.id,
@@ -1617,7 +1618,7 @@ def test_an_escalated_bank_row_a_trade_linked_is_locked(db_session) -> None:
     from purser.models import Connection, RawFetch
 
     account = _broker(db_session)
-    position = _hold(db_session, account, _symbol(), "50", TODAY - timedelta(days=40))
+    position = _hold(db_session, account, _symbol(), "50", today() - timedelta(days=40))
     trade = _weekday_before(12)
     connection = Connection(provider="simplefin")
     db_session.add(connection)
@@ -1669,7 +1670,7 @@ ACCESS_URL = "https://user:secret@bridge.example.com/simplefin"
 def _sweep_payload(balance: str) -> dict:
     """A cash sweep: the feed reports only the sweep's small cash balance and
     the disbursements out; the sale proceeds that funded them never appear."""
-    epoch = int(datetime.now(UTC).timestamp())
+    epoch = int(now().timestamp())
     return {
         "errors": [],
         "accounts": [
@@ -1816,7 +1817,7 @@ class TestFeedBalanceIsCash:
             json={
                 "symbol": symbol,
                 "quantity": "40",
-                "as_of": (TODAY - timedelta(days=60)).isoformat(),
+                "as_of": (today() - timedelta(days=60)).isoformat(),
             },
         ).json()
         for days, quantity, price in ((25, "10", "100"), (14, "5", "102.468")):
@@ -1868,7 +1869,7 @@ def test_account_purge_removes_trade_cash_with_its_events(clean_db: None) -> Non
 
     with db.get_sessionmaker()() as session:
         account = _broker(session)
-        position = _hold(session, account, _symbol(), "10", TODAY - timedelta(days=30))
+        position = _hold(session, account, _symbol(), "10", today() - timedelta(days=30))
         service.record_event(
             session,
             position_id=position.id,
@@ -1917,7 +1918,11 @@ def test_a_bills_match_is_never_carried_onto_sale_cash(
     )
     position = h.client.post(
         f"/accounts/{acct['id']}/positions",
-        json={"symbol": "XYZ", "quantity": "50", "as_of": (TODAY - timedelta(days=40)).isoformat()},
+        json={
+            "symbol": "XYZ",
+            "quantity": "50",
+            "as_of": (today() - timedelta(days=40)).isoformat(),
+        },
     ).json()["id"]
     schedule = h.client.post(
         "/schedules",
@@ -1967,7 +1972,7 @@ def test_a_bills_match_is_never_carried_onto_sale_cash(
         f"/positions/{position}/events",
         json={
             "kind": "sell",
-            "occurred_on": TODAY.isoformat(),
+            "occurred_on": today().isoformat(),
             "quantity": "1",
             "price": "100",
             "transaction_id": b_row["id"],
@@ -2002,7 +2007,7 @@ def test_unmatched_posted_rows_leave_trade_cash_out(db_session) -> None:
     from purser import matching
 
     account = _broker(db_session)
-    position = _hold(db_session, account, _symbol(), "50", TODAY - timedelta(days=40))
+    position = _hold(db_session, account, _symbol(), "50", today() - timedelta(days=40))
     trade = _weekday_before(12)
     feed = _feed_row(db_session, account, "100.00", trade, "SOLD")
     linked = service.record_event(
@@ -2033,7 +2038,7 @@ def test_automatic_passes_read_the_trade_cash_lineage_once(db_session, monkeypat
     from purser.ledger import accounts as ledger_accounts
 
     account = _broker(db_session)
-    position = _hold(db_session, account, _symbol(), "50", TODAY - timedelta(days=40))
+    position = _hold(db_session, account, _symbol(), "50", today() - timedelta(days=40))
     service.record_event(
         db_session,
         position_id=position.id,
@@ -2102,7 +2107,7 @@ class TestTheGuardsHoldUnderConcurrency:
         day = _weekday_before(8)
         with maker() as session:
             account = _broker(session)
-            position = _hold(session, account, _symbol(), "10", TODAY - timedelta(days=60))
+            position = _hold(session, account, _symbol(), "10", today() - timedelta(days=60))
             if fetched:  # archived, as purge-feed-rows requires of what it deletes
                 connection = Connection(provider="simplefin")
                 session.add(connection)
@@ -2287,7 +2292,7 @@ class TestTheGuardsHoldUnderConcurrency:
         from purser.models import Match
 
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "50", TODAY - timedelta(days=40))
+        position = _hold(db_session, account, _symbol(), "50", today() - timedelta(days=40))
         day = _weekday_before(8)
         sold = _feed_row(db_session, account, "250.00", day, "SOLD SHARES")
         event = service.record_event(

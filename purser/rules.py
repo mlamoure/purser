@@ -297,6 +297,7 @@ class Shaped:
     payee_name: str | None
     category_id: uuid.UUID | None
     applied: list[uuid.UUID]
+    categorize_rule_id: uuid.UUID | None = None  # the categorize rule among ``applied``
 
 
 def shape_new_row(
@@ -341,12 +342,19 @@ def shape_new_row(
         )
 
     category_id: uuid.UUID | None = None
+    categorize_rule_id: uuid.UUID | None = None
     categorize = first_match(rules, TYPE_CATEGORIZE, candidate)
     if categorize is not None and categorize.category_id is not None:
         category_id = categorize.category_id
+        categorize_rule_id = categorize.id
         applied.append(categorize.id)
 
-    return Shaped(payee_name=payee_name, category_id=category_id, applied=applied)
+    return Shaped(
+        payee_name=payee_name,
+        category_id=category_id,
+        applied=applied,
+        categorize_rule_id=categorize_rule_id,
+    )
 
 
 def mark_applied(session: Session, rule_ids: list[uuid.UUID]) -> None:
@@ -546,20 +554,39 @@ def _audit(
     )
 
 
-def _check_category_target(session: Session, category_id: object) -> None:
+def _check_category_target(session: Session, category_id: object, account_ids: object) -> None:
     """A categorize rule never books to a system account (decision 103): its
-    target is a category, or a real account (the transfer sugar)."""
+    target is a category, or a real account (the transfer sugar) — except
+    ``equity.securities``, "Securities trade" (decision 119), for a rule
+    scoped to brokerage accounts whose holdings come from the feed: every one
+    of a non-empty ``account_ids``. Purser never detects a trade itself."""
     if not isinstance(category_id, uuid.UUID):
         return
     from purser import ledger as ledger_service
     from purser.models import Account
 
     target = session.get(Account, category_id)
-    if target is not None and ledger_service.is_system_account(target):
+    if target is None or not ledger_service.is_system_account(target):
+        return
+    if target.path != ledger_service.SECURITIES_PATH:
         raise RuleError(
-            f"{target.path} is a system account: securities trades book their cash to it, "
-            "never a rule"
+            f"{target.path} is a system account: {target.path} entries are Purser's own, "
+            "never a rule's"
         )
+    ids = list(account_ids) if isinstance(account_ids, list | tuple | set | frozenset) else []
+    if not ids:
+        raise RuleError(
+            f"{target.path} is a system account: a rule that marks rows as a securities trade "
+            "must name its brokerage accounts (account_ids), since Purser never decides on its "
+            "own which rows are trades"
+        )
+    for account_id in ids:
+        account = session.get(Account, account_id)
+        if account is None:
+            raise RuleError(f"account_ids names no account {account_id}")
+        refusal = ledger_service.securities_trade_refusal(account)
+        if refusal is not None:
+            raise RuleError(f"a securities-trade rule: {refusal}")
 
 
 def create(
@@ -583,7 +610,7 @@ def create(
             "a transfer_link rule is created as a draft: activate it with its projected "
             "link count confirmed (POST /rules/{id}/state with confirm_links)"
         )
-    _check_category_target(session, fields.get("category_id"))
+    _check_category_target(session, fields.get("category_id"), fields.get("account_ids"))
     validate_window_days(fields.get("window_days"), rule_type=str(fields.get("type")))
     validate_payee_scope(session, fields.get("payee_scope_id"), rule_type=str(fields.get("type")))
     rule = Rule(**fields)
@@ -632,8 +659,12 @@ def update(
     validate_payee_scope(
         session, changes.get("payee_scope_id", rule.payee_scope_id), rule_type=new_type
     )
-    if "category_id" in changes:
-        _check_category_target(session, changes["category_id"])
+    if "category_id" in changes or "account_ids" in changes:
+        _check_category_target(
+            session,
+            changes.get("category_id", rule.category_id),
+            changes.get("account_ids", rule.account_ids),
+        )
     before = _shape(rule)
     for key, value in changes.items():
         setattr(rule, key, value)
@@ -1003,6 +1034,7 @@ def apply_history(
     skipped_transfers = 0
     skipped_splits = 0
     skipped_currency = 0
+    skipped_not_trade_account = 0
     skipped_not_a_transfer = 0
     # The "not a transfer" memory, read once for the whole run (#386 review).
     pairs = transfers_service.SuppressedPairs()
@@ -1041,6 +1073,16 @@ def apply_history(
             if (
                 rule.type == TYPE_CATEGORIZE
                 and rule.category_id is not None
+                and not categorize_service.fits_securities_target(session, tx, rule.category_id)
+            ):
+                # A "Securities trade" rule (decision 119) on an account whose
+                # holdings are now tracked by hand: such a row is recorded as
+                # a trade instead. Skipped before selection, like a currency.
+                skipped_not_trade_account += 1
+                continue
+            if (
+                rule.type == TYPE_CATEGORIZE
+                and rule.category_id is not None
                 and transfers_service.machine_answer_refused(
                     session, tx, rule.category_id, pairs=pairs
                 )
@@ -1068,6 +1110,7 @@ def apply_history(
         "skipped_transfers": skipped_transfers,
         "skipped_splits": skipped_splits,
         "skipped_currency": skipped_currency,
+        "skipped_not_trade_account": skipped_not_trade_account,
         "skipped_not_a_transfer": skipped_not_a_transfer,
         "payees_aliased": 0,
     }
@@ -1138,3 +1181,18 @@ def apply_history(
             after=dict(result),
         )
     return result
+
+
+def project_matches(session: Session, rule: Rule) -> int:
+    """How many live rows a categorize rule's apply-history would select
+    (its dry run's ``matched``): the projected count a trade_rule accept
+    answers with (decision 119), before the rule is activated or applied."""
+    result = apply_history(
+        session,
+        rule_id=rule.id,
+        token=None,
+        dry_run=True,
+        posted="correct",
+        include_user_categorized=True,
+    )
+    return int(result["matched"])

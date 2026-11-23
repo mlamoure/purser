@@ -1,9 +1,10 @@
 """Application settings, sourced from PURSER_* environment variables."""
 
 from functools import lru_cache
+from typing import Annotated
 
 from pydantic import field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
@@ -23,6 +24,19 @@ class Settings(BaseSettings):
     port: int = 8000
     # External base URL of this instance (cookie security + OIDC redirect URI).
     public_url: str = "http://localhost:8000"
+    # Other exact names this machine is reached by (#633, decision 132): its
+    # IP address, short host name, <name>.local. The MCP Host guard and the
+    # admin's cross-site check accept them besides public_url's host and
+    # localhost; public_url stays the address Purser gives out. A comma-
+    # separated string in the environment; a wildcard or a malformed entry
+    # stops startup (purser.network.parse_allowed_hosts).
+    allowed_hosts: Annotated[tuple[str, ...], NoDecode] = ()
+    # The address the deployment publishes Purser's port on, as it reports
+    # it (#632): Compose passes its own PURSER_BIND_ADDRESS (127.0.0.1 by
+    # default, 0.0.0.0 for the home network). Read only to report how Purser
+    # is reached (purser.network.reach_mode); unset means the deployment does
+    # not say, and the report says "unknown" rather than guess.
+    bind_address: str | None = None
     # Browser-session lifetime. Absolute cap in days — single source for both
     # the token expiry and the cookie max-age. Idle timeout in hours — a
     # session with no request for this long stops authenticating (sliding:
@@ -65,19 +79,17 @@ class Settings(BaseSettings):
     # merge automatically (evented, audited, unlink-able). Off = everything
     # stays a confirm-first candidate.
     transfer_auto_link: bool = True
-    # Minimal disclosure to agents (#437, DESIGN §9): both off by default.
-    # privacy_purchase returns payees as stable references (py_...) and omits
-    # descriptions, memos and schedule names; privacy_amount omits
-    # single-transaction amounts (aggregates stay exact). A setting is a
-    # default the agent may override per call with `include`, not a ceiling.
-    privacy_purchase: bool = False
-    privacy_amount: bool = False
     # Optional AI categorization (BYO provider). Off by default; the core is
-    # fully functional without it (DESIGN §11).
-    ai_provider: str = "none"  # none | openai | anthropic
+    # fully functional without it (DESIGN §11). `local` is a model the user
+    # runs behind an OpenAI-compatible API (decision 133): same code path as
+    # `openai`, but it never falls back to the cloud default URL below.
+    ai_provider: str = "none"  # none | openai | local | anthropic
     ai_base_url: str = "https://api.openai.com/v1"  # any OpenAI-compatible endpoint
     ai_api_key: str | None = None
     ai_model: str | None = None
+    # Seconds to wait for one provider answer. A model on modest hardware can
+    # need longer than a hosted service; 30 is the value before #640.
+    ai_timeout_seconds: int = 30
     # Backend review pass (issue #175, DESIGN §11.2). Gated by ai_provider on
     # top of this: configuring a provider grants nothing by itself.
     ai_review: bool = False
@@ -121,6 +133,17 @@ class Settings(BaseSettings):
     # env-only, never a runtime override.
     source_url: str = "https://github.com/mlamoure/purser"
 
+    @field_validator("allowed_hosts", mode="before")
+    @classmethod
+    def _exact_host_names(cls, v: object) -> tuple[str, ...]:
+        from purser.network import parse_allowed_hosts
+
+        if isinstance(v, str):
+            return parse_allowed_hosts(v)
+        if isinstance(v, (list, tuple)):
+            return parse_allowed_hosts(",".join(str(item) for item in v))
+        raise ValueError("PURSER_ALLOWED_HOSTS must be a comma-separated list of host names")
+
     @field_validator("timezone")
     @classmethod
     def _iana_timezone(cls, v: str) -> str:
@@ -137,6 +160,23 @@ class Settings(BaseSettings):
     @property
     def cookie_secure(self) -> bool:
         return self.public_url.startswith("https://")
+
+
+# Variables Purser no longer reads, with what replaced them; create_app logs a
+# warning for each one still set, so an upgrade does not ignore it silently.
+REMOVED_ENV_VARS = {
+    # #613: privacy is a per-call choice the agent makes (withhold), not a
+    # user setting.
+    "PURSER_PRIVACY_PURCHASE": "agents now ask for privacy per call with withhold",
+    "PURSER_PRIVACY_AMOUNT": "agents now ask for privacy per call with withhold",
+}
+
+
+def removed_env_vars_set() -> dict[str, str]:
+    """The removed variables still present in the environment."""
+    import os
+
+    return {name: why for name, why in REMOVED_ENV_VARS.items() if name in os.environ}
 
 
 @lru_cache

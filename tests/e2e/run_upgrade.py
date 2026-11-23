@@ -2,7 +2,7 @@
 
 Run via:
   uv run --group e2e python tests/e2e/run_upgrade.py \
-      --old-image ghcr.io/mlamoure/purser:v2026.11.1 --new-image purser:dev
+      --old-image ghcr.io/mlamoure/purser:v2026.11.5 --new-image purser:dev
 
 For a pre-write-scope image, add --legacy-scopes to exercise conversion from
 the retired propose scope. Current-release upgrades preserve read/write scopes.

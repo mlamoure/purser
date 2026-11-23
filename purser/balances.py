@@ -29,6 +29,7 @@ import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import date as date_type
+from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -338,6 +339,32 @@ def change_points(
         )
     )
     return rows[:limit], len(rows) > limit
+
+
+def change_series(
+    session: Session,
+    account_id: uuid.UUID,
+    *,
+    start: date_type,
+    end: date_type,
+    limit: int = 5000,
+) -> tuple[Decimal, list[Any], bool]:
+    """The per-change POSTINGS history of one account over ``[start, end]``,
+    as ``(opening, rows, truncated)`` — the one implementation behind
+    ``GET /accounts/{id}/balance/series`` and ``purser://balance-history/…``
+    (decision 129).
+
+    ``opening`` is the stored running balance at the end of the day BEFORE
+    the window (``start`` itself is the first day a caller can see move, so
+    carrying its activity in would count it twice), and ``rows`` are
+    :func:`change_points`. Both come from the same store, so ``opening`` plus
+    every ``delta`` equals the last row's ``balance`` for every account type.
+    A holdings or valuation overlay has no per-transaction grain, so it is not
+    applied here: the reported balance over time is
+    ``networth.account_balance_series``."""
+    rows, truncated = change_points(session, account_id, start=start, end=end, limit=limit)
+    opening = balance_asof(session, account_id, start - timedelta(days=1))
+    return opening, rows, truncated
 
 
 def window_extremes(

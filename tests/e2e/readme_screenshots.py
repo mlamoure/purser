@@ -14,17 +14,31 @@ it apart from anything else running):
 
 PURSER_SHOTS_URL overrides the instance URL (default http://127.0.0.1:18543).
 Everything is synthetic: the built-in demo data, an @example.com admin, a few
-example schedules, a detected subscription and one MCP read by an example
-agent token so the audit log has a sharing entry. The PNGs are written to
+example schedules, a detected subscription, two MCP reads by an example
+agent token so the audit log shows one identifiable answer and one that
+withheld payees, descriptions and amounts on request (#613), and (#596) a hand-tracked
+brokerage account with a year of weekly closes, a house and the mortgage it
+secures, so the Dashboard shows its account groups and the account page its
+balance chart and holdings table. The PNGs are written to
 docs/public/screenshots/ in the light scheme, palette-quantized to keep the
 repository small; `--dark DIR` also writes dark-scheme copies to DIR for
 review (they are not committed).
+
+Each scheme is then checked on the same pages (#556, which retired the
+mocked attention and audit scripts): no register badge is cut off at the
+table's edge, at phone width no page scrolls sideways (the Dashboard with
+its schedule suggestion open for editing included), and axe-core finds no
+serious or critical WCAG 2 A/AA violation. axe-core is the
+frontend's pinned devDependency: run `cd frontend && npm ci` first.
 """
 
 import argparse
 import json
 import os
 import urllib.request
+from datetime import date as Day
+from datetime import timedelta
+from decimal import Decimal
 from http.cookiejar import CookieJar
 from pathlib import Path
 
@@ -33,6 +47,19 @@ from playwright.sync_api import Page, expect, sync_playwright
 
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "docs/public/screenshots"
+AXE = ROOT / "frontend/node_modules/axe-core/axe.min.js"
+PHONE = {"width": 390, "height": 844}
+# The register's badges (status, auto-linked, scheduled …) that end past the
+# right edge of the table's visible area (#556: "auto-linked" was cut off).
+CLIPPED_BADGES = """() => {
+  const table = [...document.querySelectorAll('table')].find((t) =>
+    [...t.querySelectorAll('thead th')].some((th) => th.textContent.trim() === 'Status'));
+  if (!table) return ['no register table'];
+  const edge = table.parentElement.getBoundingClientRect().right;
+  return [...table.querySelectorAll('tbody .rounded-full')]
+    .filter((badge) => badge.getBoundingClientRect().right > edge + 0.5)
+    .map((badge) => badge.textContent);
+}"""
 BASE = os.getenv("PURSER_SHOTS_URL", "http://127.0.0.1:18543").rstrip("/")
 ADMIN = {"email": "owner@example.com", "password": "demo-password-1", "display_name": "Demo owner"}
 SCHEDULES = [
@@ -126,6 +153,7 @@ def seed() -> None:
             },
         )
     session.json("POST", "/schedules/detect")
+    seed_investments_and_property(session, Day.fromisoformat(today["ledger_today"]))
     minted = session.json("POST", "/tokens", {"name": "Budget Assistant", "scopes": ["read"]})
     session.json("POST", "/tokens", {"name": "Household dashboard", "scopes": ["read"]})
     assert isinstance(minted, dict)
@@ -159,14 +187,127 @@ def seed() -> None:
         },
     )
     assert '"isError":true' not in body.replace(" ", ""), body[:300]
+    # A count needs no payee names or single amounts: the agent withholds
+    # them (#613), and the audit log marks this read "Privacy used".
+    _, body = agent.call(
+        "POST",
+        "/mcp/",
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "search_transactions",
+                "arguments": {
+                    "account": "assets.checking",
+                    "withhold": ["payee", "description", "amount"],
+                },
+            },
+        },
+    )
+    assert '"isError":true' not in body.replace(" ", ""), body[:300]
+
+
+def seed_investments_and_property(session: Client, today: Day) -> None:
+    """A brokerage account tracked by hand with a year of weekly closes, a
+    house and the mortgage it secures (#596). Prices are whole cents built
+    from integers, so no amount passes through a float."""
+    broker = session.json(
+        "POST",
+        "/accounts",
+        {"name": "Index Brokerage", "type": "brokerage", "path": "assets.brokerage"},
+    )
+    assert isinstance(broker, dict)
+    session.json("PATCH", f"/accounts/{broker['id']}", {"holdings_source": "manual"})
+    opened = today - timedelta(days=371)
+    for symbol, name, quantity, basis in (
+        ("EXTM", "Example Total Market Fund", "40", "8400.00"),
+        ("EXIN", "Example International Fund", "120", "6600.00"),
+    ):
+        session.json(
+            "POST",
+            f"/accounts/{broker['id']}/positions",
+            {
+                "symbol": symbol,
+                "name": name,
+                "quantity": quantity,
+                "cost_basis": basis,
+                "as_of": opened.isoformat(),
+            },
+        )
+    for week in range(54):
+        day = opened + timedelta(days=7 * week)
+        if day > today:
+            break
+        # A gentle climb with a wobble and one dip, in cents.
+        wobble = ((week * 37) % 11 - 5) * 90
+        dip = -1500 if 20 <= week <= 26 else 0
+        closes = {
+            "EXTM": 21000 + week * 95 + wobble + dip,
+            "EXIN": 5500 + week * 22 + wobble // 3,
+        }
+        for symbol, cents in closes.items():
+            session.json(
+                "POST",
+                "/prices",
+                {"symbol": symbol, "date": day.isoformat(), "close": str(Decimal(cents) / 100)},
+            )
+
+    house = session.json(
+        "POST",
+        "/accounts",
+        {
+            "name": "Home",
+            "type": "property",
+            "path": "assets.home",
+            "asset_kind": "house",
+            "acquired_on": (today - timedelta(days=2000)).isoformat(),
+        },
+    )
+    assert isinstance(house, dict)
+    session.json(
+        "POST",
+        f"/accounts/{house['id']}/value-changes",
+        {
+            "as_of": (today - timedelta(days=400)).isoformat(),
+            "amount": "450000.00",
+            "kind": "capital",
+        },
+    )
+    session.json(
+        "POST",
+        f"/accounts/{house['id']}/value-changes",
+        {"as_of": (today - timedelta(days=120)).isoformat(), "amount": "12500.00"},
+    )
+    mortgage = session.json(
+        "POST", "/accounts", {"name": "Mortgage", "type": "loan", "path": "liabilities.mortgage"}
+    )
+    assert isinstance(mortgage, dict)
+    for month in range(13, -1, -1):
+        owed = Decimal(318000) - Decimal(910) * (13 - month)
+        session.json(
+            "POST",
+            f"/accounts/{mortgage['id']}/valuations",
+            {"as_of": (today - timedelta(days=30 * month)).isoformat(), "value": str(-owed)},
+        )
+    session.json("PATCH", f"/accounts/{mortgage['id']}", {"secured_by_id": house["id"]})
+
+
+# Shots holding the balance chart's gradient fill (#594), which bands into
+# visible steps at 256 colors unless dithered.
+GRADIENT_SHOTS = {"account.png", "register.png"}
 
 
 def quantize(path: Path) -> None:
     """256-color palette PNG: UI screenshots have few colors, and this keeps
-    each file a fraction of its RGB size without visible banding."""
+    each file a fraction of its RGB size without visible banding. A shot with
+    a gradient is dithered against that palette instead, which costs size
+    (the noise compresses worse) but keeps the fill smooth."""
     with Image.open(path) as im:
         rgb = im.convert("RGB")
     palette = rgb.quantize(256, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.NONE)
+    if path.name in GRADIENT_SHOTS:
+        palette = rgb.quantize(palette=palette, dither=Image.Dither.FLOYDSTEINBERG)
     palette.save(path, optimize=True)
 
 
@@ -203,7 +344,24 @@ def shoot(page: Page, out: Path, quantized: bool) -> list[Path]:
     save("dashboard.png", full_page=True)
 
     settle(page, f"/accounts/{checking}")
+    page.wait_for_timeout(2600)  # the balance chart's draw-in (#594)
     save("register.png")
+
+    # An account page (#594, #595): the balance chart, drawn in, above the
+    # holdings table, without the register below.
+    broker = next(a["id"] for a in accounts if a["path"] == "assets.brokerage")
+    settle(page, f"/accounts/{broker}")
+    expect(
+        page.get_by_role("region", name="Holdings").get_by_text("Unrealized gain")
+    ).to_be_visible()
+    page.wait_for_timeout(2600)
+    bottom = page.get_by_role("region", name="Holdings").bounding_box()
+    assert bottom is not None
+    save(
+        "account.png",
+        full_page=True,
+        clip={"x": 0, "y": 0, "width": 1280, "height": bottom["y"] + bottom["height"] + 24},
+    )
 
     settle(page, "/schedules")
     expect(page.get_by_role("img", name="Forecast", exact=False)).to_be_visible()
@@ -212,24 +370,71 @@ def shoot(page: Page, out: Path, quantized: bool) -> list[Path]:
 
     settle(page, "/settings/agents")
     expect(page.get_by_text("Budget Assistant", exact=True)).to_be_visible()
-    # The create form and the token list, without the login sessions below.
-    save("tokens.png", full_page=True, clip={"x": 0, "y": 0, "width": 1280, "height": 990})
-    privacy = (
-        page.locator("div")
-        .filter(has=page.get_by_role("heading", name="Privacy with agents", exact=True))
-        .last
+    # How Purser is reached (#632), the create form and the token list, without
+    # the login sessions below: the clip ends under the token table's card.
+    tokens = page.get_by_role("table").filter(has_text="Budget Assistant").bounding_box()
+    assert tokens is not None
+    save(
+        "tokens.png",
+        full_page=True,
+        clip={"x": 0, "y": 0, "width": 1280, "height": tokens["y"] + tokens["height"] + 48},
     )
-    save("privacy.png", locator=privacy)
-
     settle(page, "/settings/audit")
-    page.get_by_text("Budget Assistant", exact=True).first.click()
-    page.wait_for_timeout(300)
+    expect(page.get_by_text("Privacy used", exact=True)).to_be_visible()
+    expect(page.get_by_text("Identifiable", exact=True)).to_be_visible()
+    # Both reads, collapsed: the one that withheld fields on request (newest,
+    # "Privacy used") above the one that returned identifiable data.
     save("audit.png")
 
     if quantized:
         for path in written:
             quantize(path)
     return written
+
+
+def open_schedule_editor(page: Page) -> None:
+    """The Dashboard's detected subscription, open in its editor."""
+    page.get_by_role("button", name="Scheduled transactions", exact=False).first.click()
+    page.get_by_role("button", name="Edit first", exact=True).first.click()
+    expect(page.get_by_label("Repeats", exact=True).first).to_be_visible()
+
+
+def check(page: Page) -> list[str]:
+    """What each README page must keep: the register's badges inside the
+    table at the screenshot width, and at phone width no sideways scroll and
+    no serious or critical axe-core WCAG 2 A/AA violation."""
+    accounts = page.request.get(BASE + "/accounts").json()
+    checking = next(a["id"] for a in accounts if a["path"] == "assets.checking")
+    broker = next(a["id"] for a in accounts if a["path"] == "assets.brokerage")
+    pages = [
+        ("/", open_schedule_editor),
+        ("/accounts", None),
+        (f"/accounts/{checking}", None),
+        (f"/accounts/{broker}", None),
+        ("/schedules", None),
+        ("/settings/agents", None),
+        ("/settings/audit", None),
+    ]
+    problems: list[str] = []
+    settle(page, f"/accounts/{checking}")
+    clipped = page.evaluate(CLIPPED_BADGES)
+    if clipped:
+        problems.append(f"register: badges cut off at the table's edge: {clipped}")
+    page.set_viewport_size(PHONE)
+    for route, prepare in pages:
+        settle(page, route)
+        if prepare:
+            prepare(page)
+        if not page.evaluate("document.documentElement.scrollWidth <= innerWidth"):
+            problems.append(f"{route}: scrolls sideways at {PHONE['width']}px")
+        page.add_script_tag(path=str(AXE))
+        violations = page.evaluate(
+            "async () => (await axe.run(document, {runOnly: ['wcag2a', 'wcag2aa']}))"
+            ".violations.filter(v => ['serious', 'critical'].includes(v.impact))"
+            ".map(v => v.id + ': ' + v.help + ' (' + v.nodes.length + ')')"
+        )
+        problems += [f"{route}: {v}" for v in violations]
+    return problems
 
 
 def main() -> None:
@@ -253,6 +458,8 @@ def main() -> None:
             errors: list[str] = []
             page.on("pageerror", lambda error, errors=errors: errors.append(str(error)))
             written = shoot(page, out, quantized=scheme == "light")
+            problems = check(page)
+            assert not problems, f"{scheme}: {problems}"
             assert not errors, errors
             print(json.dumps({"scheme": scheme, "files": [str(p) for p in written]}))
             context.close()

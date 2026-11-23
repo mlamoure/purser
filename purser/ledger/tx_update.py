@@ -15,11 +15,16 @@ from purser.admin import security
 from purser.core import ledger as core
 from purser.ledger.accounts import (
     ASSET_ENTRY_PATHS,
+    OPENING_PATH,
+    SECURITIES_PATH,
     _assert_accounts_open,
+    held_by_trade,
     is_system_account,
     lock_transaction,
     refuse_system_account,
+    require_securities_trade_account,
     resolve_account,
+    securities_account,
 )
 from purser.ledger.errors import LedgerError, RowChanged
 from purser.ledger.payees import resolve_payee
@@ -48,6 +53,7 @@ def update_transaction(
     payee_name: str | None = None,
     description: str | None = None,
     account_ref: str | None = None,
+    securities_trade: bool | None = None,
 ) -> Transaction:
     """Edit semantics by status (DESIGN §4):
 
@@ -66,9 +72,25 @@ def update_transaction(
     transfer-shaped row converts it back (``account_ref`` names which side
     keeps the row). Conversions are their own operation — no other field
     may change in the same call.
+
+    ``securities_trade=True`` marks a flat row on a feed-holdings brokerage
+    account as a securities trade (#591, decision 119): its category leg is
+    re-pointed to ``equity.securities`` by the ordinary category edit (in
+    place, or the correction pair on a posted row). Nothing else may name
+    that account as a category. A marked row is changed back by naming any
+    category; ``securities_trade=False`` needs that category. A row a
+    recorded trade holds (decision 103) stays read-only.
     """
     from purser import transfers  # function-local: transfers imports purser.ledger
 
+    if securities_trade is True and category_ref is not None:
+        raise LedgerError(
+            "securities_trade=true replaces the category: send one or the other, not both"
+        )
+    if securities_trade is False and category_ref is None:
+        raise LedgerError(
+            "to change a securities trade back, name the category it should have (category)"
+        )
     tx = get_transaction(session, tx_id)
     if tx.schedule_id is not None and tx.status == "expected":
         tx = lock_transaction(session, tx_id)
@@ -88,6 +110,26 @@ def update_transaction(
         # transactions_reverses_id_uniq.
         refuse_corrected(session, tx)
 
+    if securities_trade:
+        if tx.status == core.Status.EXPECTED.value:
+            raise LedgerError(
+                "an expected row is a forecast, not a trade: mark the pending or posted row "
+                "the broker recorded (schedules never book to the securities account)"
+            )
+        if tx.split_account_id is not None:
+            raise LedgerError(
+                "a split row cannot be a securities trade: remove the split first "
+                "(unsplit_transaction, DELETE /transactions/{id}/split)"
+            )
+        if transfers.is_transfer(tx):
+            raise LedgerError(
+                "a transfer is not a securities trade: a trade's cash has one real leg, on the "
+                "brokerage account. Convert the transfer back to a category first"
+            )
+        real_legs = [p for p in tx.postings if not p.account.is_virtual]
+        if len(real_legs) == 1:
+            require_securities_trade_account(real_legs[0].account)
+        category_ref = str(securities_account(session).id)
     if category_ref is not None:
         other_edits = (date, amount, payee_name, description)
         target_ref = core.parse_transfer_target(category_ref)
@@ -119,6 +161,7 @@ def update_transaction(
             category_ref=category_ref,
             payee_name=payee_name,
             description=description,
+            securities_trade=bool(securities_trade),
         )
 
     from purser import occurrences
@@ -135,7 +178,7 @@ def update_transaction(
             assert amount is not None
             transfers.set_amount_in_place(session, tx=tx, amount=amount, account_ref=account_ref)
         else:
-            real, category = _flat_legs(tx)
+            real, category = _flat_legs(tx, marked_editable=_marked_editable(session, tx))
             new_amount = core.quantize(amount if amount is not None else real.amount)
             if new_amount == 0:
                 raise LedgerError("amount must be nonzero")
@@ -145,8 +188,7 @@ def update_transaction(
             if not new_category.is_virtual:
                 raise LedgerError(f"{new_category.path} is not a category")
             if category_ref:
-                refuse_system_account(new_category)
-                check_category_currency(real.currency, new_category)
+                _check_new_category(real, new_category, securities_trade=bool(securities_trade))
             real.amount = new_amount
             category.amount = -new_amount
             # The relationship, not the FK: the session keeps loaded objects
@@ -219,18 +261,41 @@ def _specs_of(tx: Transaction) -> list[core.PostingSpec]:
     ]
 
 
-def _flat_legs(tx: Transaction) -> tuple[Posting, Posting]:
+def _marked_editable(session: Session, tx: Transaction) -> bool:
+    """A row on equity.securities that no recorded trade holds: marked a
+    securities trade by a person, an agent or a rule, or a balance true-up
+    (decision 119). Only such a row's securities leg may be edited."""
+    return any(
+        p.account.is_virtual and p.account.path == SECURITIES_PATH for p in tx.postings
+    ) and not held_by_trade(session, tx)
+
+
+def _check_new_category(real: Posting, category: Account, *, securities_trade: bool) -> None:
+    """A category a person or an agent chose: never a system account, except
+    equity.securities through ``securities_trade`` on a feed-holdings
+    brokerage row (decision 119)."""
+    if securities_trade and category.path == SECURITIES_PATH:
+        require_securities_trade_account(real.account)
+    else:
+        refuse_system_account(category)
+    check_category_currency(real.currency, category)
+
+
+def _flat_legs(tx: Transaction, *, marked_editable: bool = False) -> tuple[Posting, Posting]:
     """(real leg, category leg) of a flat transaction; any other shape is
     refused. ``update_transaction`` sends transfers to ``transfers`` first,
     so the message names what a flat edit needs rather than a transfer. A
-    split row (one real leg, several category legs) is read-only in v1
-    (decision 87), and the refusal says so."""
+    split row (it carries the split marker, decision 118) is edited only
+    through the split path, and the refusal says so. ``marked_editable``: the
+    row's equity.securities leg is a mark no trade holds (``_marked_editable``),
+    which the person's own edit may change (decision 119)."""
     real = [p for p in tx.postings if not p.account.is_virtual]
     virtual = [p for p in tx.postings if p.account.is_virtual]
-    if len(real) == 1 and len(virtual) >= 2:
+    if tx.split_account_id is not None:
         raise LedgerError(
-            f"split rows are read-only: this row books {len(virtual)} category legs "
-            "against one real leg, and only a row with one category leg can be edited"
+            f"this row is a split ({len(tx.postings) - 1} lines): change its lines with "
+            "split_transaction (PUT /transactions/{id}/split), or remove the split with "
+            "unsplit_transaction (DELETE /transactions/{id}/split)"
         )
     if len(tx.postings) != 2 or len(real) != 1 or len(virtual) != 1:
         raise LedgerError(
@@ -243,6 +308,17 @@ def _flat_legs(tx: Transaction) -> tuple[Posting, Posting]:
             "this row is a change in an asset's value; reverse it (reverse_value_change, "
             "or POST /value-changes/{transaction_id}/reverse) and record the right figure"
         )
+    if is_system_account(virtual[0].account) and virtual[0].account.path == OPENING_PATH:
+        # An account's starting balance (decision 123) is derived from the
+        # bank's balance and kept in step by Purser, so it is not edited.
+        raise LedgerError(
+            "this row is the account's starting balance, which Purser derives from the "
+            "bank's balance; reconcile the account to a statement (reconcile_account) to "
+            "correct its balance, or remove the starting balance (set_starting_balance "
+            "with remove, or DELETE /accounts/{id}/starting-balance)"
+        )
+    if marked_editable and virtual[0].account.path == SECURITIES_PATH:
+        return real[0], virtual[0]
     if is_system_account(virtual[0].account):
         # The cash of a securities trade (decision 103) moves with its trade:
         # an edit here would part the cash leg from the share leg.
@@ -295,10 +371,11 @@ def _reverse_and_replace(
     category_ref: str | None,
     payee_name: str | None,
     description: str | None,
+    securities_trade: bool = False,
 ) -> Transaction:
     # Validate the replacement BEFORE persisting anything: a failure here must
     # not leave a dangling reversal behind.
-    real, category = _flat_legs(tx)
+    real, category = _flat_legs(tx, marked_editable=_marked_editable(session, tx))
     new_amount = core.quantize(amount if amount is not None else real.amount)
     if new_amount == 0:
         raise LedgerError("amount must be nonzero")
@@ -306,8 +383,7 @@ def _reverse_and_replace(
     if not new_category.is_virtual:
         raise LedgerError(f"{new_category.path} is not a category")
     if category_ref:
-        refuse_system_account(new_category)
-        check_category_currency(real.currency, new_category)
+        _check_new_category(real, new_category, securities_trade=securities_trade)
 
     replacement_specs = core.expand_flat(
         account_id=real.account_id,
@@ -338,11 +414,21 @@ def reverse_and_replace_with_specs(
     origin: core.Origin | None = None,
     action: str = "transaction.correct",
     audit_extra: dict[str, Any] | None = None,
+    split_account_id: uuid.UUID | None = None,
+    keep_review_mark: bool = False,
 ) -> Transaction:
     """The correction pair for a posted row, with the replacement's postings
     supplied by the caller — shared by flat recategorization, transfer
-    conversion, and machine categorization. ``token=None`` is a system
-    actor (scope gates are the caller's responsibility)."""
+    conversion, machine categorization and splits. ``token=None`` is a system
+    actor (scope gates are the caller's responsibility).
+
+    ``split_account_id`` is the replacement's split marker (decision 118):
+    set when the replacement is a split, None for every other shape. The
+    reversal always carries the original's marker, so the reversal of a
+    split is classified as what it negates — never as a transfer.
+
+    ``keep_review_mark``: the replacement keeps the original's review mark
+    whole even for a token-bearing actor (un-split, ``review.inherit``)."""
     # The row is locked and reloaded first, so a merge or another correction
     # that committed meanwhile is seen: a correction of a row voided into a
     # transfer, or corrected twice, would leave two live copies (#386 review).
@@ -361,6 +447,7 @@ def reverse_and_replace_with_specs(
         origin=core.Origin.SYSTEM,
         token=token,
         reverses_id=tx.id,
+        split_account_id=tx.split_account_id,
     )
     payee = tx.payee.name if tx.payee else None
     replacement = _persist_transaction(
@@ -373,6 +460,7 @@ def reverse_and_replace_with_specs(
         origin=origin if origin is not None else _actor_origin(token),
         token=token,
         reverses_id=reversal.id,
+        split_account_id=split_account_id,
     )
     # The funnel marked the pair's (possibly NEW) date; a date moved FORWARD
     # still demotes the original at its OLD date, so cover that too.
@@ -383,7 +471,13 @@ def reverse_and_replace_with_specs(
     # grants nor revokes it.
     from purser import review as review_service
 
-    review_service.inherit(session, original_id=tx.id, replacement_id=replacement.id, token=token)
+    review_service.inherit(
+        session,
+        original_id=tx.id,
+        replacement_id=replacement.id,
+        token=token,
+        keep_mark=keep_review_mark,
+    )
     audit.record(
         session,
         actor_token_id=token.id if token else None,
@@ -457,6 +551,10 @@ def transition_status(
         )
     if not core.can_transition(old, new_status):
         raise LedgerError(f"cannot transition {old.value} -> {new_status.value}")
+    if new_status == core.Status.VOID:
+        from purser import splits  # function-local: splits imports this package
+
+        splits.refuse_void_with_backing(session, tx)
     if new_status == core.Status.POSTED and (token is None or not security.can_write(token.scopes)):
         raise LedgerError("posting a transaction requires write scope")
     # A posted chain head is what a schedule estimate learns from (decision

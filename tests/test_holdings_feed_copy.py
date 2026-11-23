@@ -7,7 +7,7 @@ Synthetic fixtures only: made-up symbols, prices and amounts.
 """
 
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -21,6 +21,7 @@ from purser.holdings import cash as trade_cash
 from purser.holdings import service
 from purser.models import Account, AuditLog, PositionEvent, Posting, Transaction
 from tests import test_feed
+from tests.conftest import today
 from tests.test_feed import FeedHarness
 from tests.test_feed_outage import Bank
 from tests.test_holdings_cash import (
@@ -32,8 +33,6 @@ from tests.test_holdings_cash import (
     _sync,
     _weekday_before,
 )
-
-TODAY = datetime.now(UTC).date()
 
 feed_env = test_feed.feed_env
 harness = test_feed.harness
@@ -80,7 +79,7 @@ class TestTakeOver:
         self, db_session
     ) -> None:
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "100", TODAY - timedelta(days=40))
+        position = _hold(db_session, account, _symbol(), "100", today() - timedelta(days=40))
         trade = _weekday_before(12)
         event = _sell(db_session, position.id, trade, "20", "50")
         purser_row = ledger.get_transaction(db_session, event.transaction_id)
@@ -126,7 +125,7 @@ class TestTakeOver:
 
     def test_a_funded_buy_is_taken_over_too(self, db_session) -> None:
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "10", TODAY - timedelta(days=40))
+        position = _hold(db_session, account, _symbol(), "10", today() - timedelta(days=40))
         trade = _weekday_before(12)
         service.record_event(
             db_session,
@@ -145,7 +144,7 @@ class TestTakeOver:
 
     def test_a_pending_copy_is_not_stored_and_its_posted_row_takes_over(self, db_session) -> None:
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "50", TODAY - timedelta(days=40))
+        position = _hold(db_session, account, _symbol(), "50", today() - timedelta(days=40))
         trade = _weekday_before(12)
         event = _sell(db_session, position.id, trade, "1", "100")
         pending = _sold("p1", trade + timedelta(days=1), "100.00", pending=True)
@@ -166,7 +165,7 @@ class TestTakeOver:
         """A row of another amount, dated before the trade or after the copy
         window (five days after T+1 or settle_on) is an ordinary row."""
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "50", TODAY - timedelta(days=40))
+        position = _hold(db_session, account, _symbol(), "50", today() - timedelta(days=40))
         trade = _weekday_before(20)
         _sell(db_session, position.id, trade, "1", "100")
         end = trade_cash.copy_window_end(trade, trade)
@@ -185,7 +184,7 @@ class TestTakeOver:
 
     def test_two_sales_of_one_amount_each_take_one_copy_oldest_first(self, db_session) -> None:
         account = _broker(db_session)
-        position = _hold(db_session, account, _symbol(), "50", TODAY - timedelta(days=40))
+        position = _hold(db_session, account, _symbol(), "50", today() - timedelta(days=40))
         first_day = _weekday_before(14)
         second_day = first_day + timedelta(days=1)
         first = _sell(db_session, position.id, first_day, "1", "100")
@@ -211,7 +210,7 @@ class TestTakeOver:
 class TestTheTradeStillOwnsItsCash:
     def _taken_over(self, session: Session):
         account = _broker(session)
-        position = _hold(session, account, _symbol(), "100", TODAY - timedelta(days=40))
+        position = _hold(session, account, _symbol(), "100", today() - timedelta(days=40))
         trade = _weekday_before(12)
         event = _sell(session, position.id, trade, "20", "50")
         _sync(session, account, [_sold("t1", trade + timedelta(days=1), "1000.00")])
@@ -226,7 +225,7 @@ class TestTheTradeStillOwnsItsCash:
     ) -> None:
         account, position, event, _holder, bank_row = self._taken_over(db_session)
         reversal = service.reverse_event(db_session, event_id=event.id, token=None)
-        assert service.quantity_on(db_session, position, TODAY) == Decimal("100")
+        assert service.quantity_on(db_session, position, today()) == Decimal("100")
         assert reversal.transaction_id is not None
         head = ledger.get_transaction(db_session, reversal.transaction_id)
         assert not ledger.has_system_leg(head.postings)
@@ -292,7 +291,7 @@ def _record_sale(harness: FeedHarness, account_id: str, on: date) -> dict[str, A
         json={
             "symbol": symbol,
             "quantity": "100",
-            "as_of": (TODAY - timedelta(days=60)).isoformat(),
+            "as_of": (today() - timedelta(days=60)).isoformat(),
         },
     )
     assert resp.status_code == 201, resp.text
@@ -406,7 +405,7 @@ def test_importing_feed_copies_is_idempotent_and_counts_each_sale_once(
 ) -> None:
     with db.get_sessionmaker()() as session:
         account = _broker(session)
-        position = _hold(session, account, _symbol(), "100", TODAY - timedelta(days=60))
+        position = _hold(session, account, _symbol(), "100", today() - timedelta(days=60))
         start = _weekday_before(30)
         proceeds = Decimal(0)
         for offset, quantity in sales:

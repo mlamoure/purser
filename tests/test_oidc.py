@@ -13,6 +13,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from joserfc.errors import ExpiredTokenError, InvalidClaimError
 from joserfc.jwk import ECKey, RSAKey
 from sqlalchemy import Engine, text
 
@@ -335,6 +336,7 @@ REJECTED_CLAIMS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
     "expired": lambda c: {**c, "exp": c["iat"] - 5},
     "exp_missing": _with(exp=DROP),
     "exp_not_numeric": _with(exp="tomorrow"),
+    "exp_bool": _with(exp=True),
     "iat_missing": _with(iat=DROP),
     "iat_far_future": lambda c: {**c, "iat": c["iat"] + 600, "exp": c["exp"] + 600},
     "nbf_future": lambda c: {**c, "nbf": c["iat"] + 600},
@@ -380,6 +382,30 @@ class TestIdTokenClaims:
         resp = _callback(oidc_client)
         assert resp.status_code == 303, resp.text
         assert _signed_in(oidc_client)
+
+
+class TestExpBoundary:
+    """``_IdTokenClaims.validate_exp`` on its own, at a fixed "now": the
+    override must behave the same under every joserfc release we allow."""
+
+    NOW = 1_800_000_000
+
+    def _registry(self) -> oidc_module._IdTokenClaims:
+        return oidc_module._IdTokenClaims(now=self.NOW, leeway=oidc_module.CLOCK_SKEW_SECONDS)
+
+    @pytest.mark.parametrize("exp", [NOW, NOW - 1, NOW - oidc_module.CLOCK_SKEW_SECONDS])
+    def test_expired_at_or_after_exp(self, exp: int) -> None:
+        with pytest.raises(ExpiredTokenError):
+            self._registry().validate_exp(exp)
+
+    @pytest.mark.parametrize("exp", [NOW + 1, NOW + 0.5])
+    def test_valid_before_exp(self, exp: int | float) -> None:
+        self._registry().validate_exp(exp)
+
+    @pytest.mark.parametrize("exp", [True, False, "1800000001", None, [NOW + 1]])
+    def test_bool_or_non_number_refused(self, exp: object) -> None:
+        with pytest.raises(InvalidClaimError):
+            self._registry().validate_exp(exp)
 
 
 class TestIdTokenSignature:

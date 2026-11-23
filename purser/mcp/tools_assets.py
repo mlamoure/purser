@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from purser.mcp._registry import _amount, _principal, _run, _token_row, audited_tool
-from purser.mcp.privacy import Emits
+from purser.privacy import Emits
 
 _CHANGE_EMITS = Emits(amount=("amount",), balance=("balance",))
 

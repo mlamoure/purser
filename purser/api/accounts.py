@@ -5,14 +5,15 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from purser import assets, balances, clock, ledger, networth, reconciliation
+from purser import assets, balances, clock, ledger, networth, reconciliation, starting_balance
 from purser.admin import security
 from purser.admin.auth import ReadToken, WriteToken
+from purser.api.disclosure import NOTHING, Emits, disclose
 from purser.db import get_session
 from purser.feed.snapshot import BankSnapshot, account_snapshot
 from purser.models import Account, ApiToken
@@ -135,6 +136,14 @@ class AccountOut(BaseModel):
     # A manually tracked brokerage account whose feed balance is its cash
     # (§7.3, decision 103): admin opt-in that puts it in the drift check.
     feed_balance_is_cash: bool = False
+    # The post-sync balance true-up of a feed-holdings brokerage account
+    # (decision 119): on by default there, always false elsewhere.
+    balance_true_up: bool = Field(
+        default=False,
+        description="Brokerage accounts whose holdings come from the feed: after each sync, "
+        "post a labelled balance adjustment so cash plus holdings equal the broker's balance. "
+        "Always false on other accounts.",
+    )
     balance: Decimal | None = None
     # Valuation overlay (DESIGN §8, decision 42): open loan accounts
     # report their latest valuation as `balance` (method "valuation",
@@ -193,6 +202,7 @@ class AccountOut(BaseModel):
             drift_basis_override=_drift_basis(a.drift_basis_override),
             holdings_source="manual" if a.holdings_source == "manual" else "feed",
             feed_balance_is_cash=a.feed_balance_is_cash,
+            balance_true_up=a.balance_true_up,
             balance=balance,
             balance_method=balance_method,
             balance_as_of=balance_as_of,
@@ -315,6 +325,16 @@ class AccountUpdate(BaseModel):
         "account's transactions, like a checking account's. Off by default because many "
         "brokers report the whole account value instead. Turning it off clears a "
         "drift-basis pin; switching the account back to the feed turns it off. Admin scope.",
+    )
+    balance_true_up: bool | None = Field(
+        default=None,
+        description="A brokerage account whose holdings come from the feed only (422 "
+        "otherwise): after each sync, Purser compares the balance the broker reported with "
+        "the account's cash plus the holdings from the same fetch and, when they differ by a "
+        "cent or more, posts one labelled 'Balance adjustment' against Securities trade "
+        "(equity.securities) for the difference, so a buy row the broker never sent cannot "
+        "leave the account overstated. On by default; false stops future adjustments (past "
+        "ones stay). Absent leaves it unchanged. Write scope.",
     )
     asset_kind: AssetKind | None = Field(
         default=None,
@@ -473,7 +493,7 @@ def _account_out(session: Session, account: Account, token: ApiToken) -> Account
     )
 
 
-@router.get("")
+@router.get("", dependencies=[disclose(NOTHING)])
 def list_accounts(
     token: ReadToken,
     session: DbSession,
@@ -515,7 +535,7 @@ class AccountDetailOut(AccountOut):
     bank_snapshot: BankSnapshot
 
 
-@router.get("/{account_id}")
+@router.get("/{account_id}", dependencies=[disclose(NOTHING)])
 def get_account(account_id: uuid.UUID, token: ReadToken, session: DbSession) -> AccountDetailOut:
     try:
         account = ledger.get_account(session, account_id)
@@ -541,7 +561,7 @@ class BalanceAsOf(BaseModel):
     bank_snapshot: BankSnapshot
 
 
-@router.get("/{account_id}/balance")
+@router.get("/{account_id}/balance", dependencies=[disclose(NOTHING)])
 def balance_as_of(
     account_id: uuid.UUID,
     token: ReadToken,
@@ -578,30 +598,43 @@ def balance_as_of(
 class BalancePoint(BaseModel):
     date: date
     balance: Decimal
-    delta: Decimal
-    transaction_id: uuid.UUID
+    # Absent when the request withholds amounts: the series then has one
+    # end-of-day point per day (a per-change series gives each amount away).
+    delta: Decimal | None = None
+    transaction_id: uuid.UUID | None = None
 
 
 class BalanceSeries(BaseModel):
     """Full-resolution balance history: one point per stored change, which is
-    the grain the running-balance store keeps and the register shows."""
+    the grain the running-balance store keeps and the register shows. It is
+    the postings history for every account type (decision 129): ``opening``
+    plus every ``delta`` equals the last point."""
 
     account_id: uuid.UUID
     path: str
     start: date
     end: date
     currency: str
-    method: str  # "postings" | "valuation" | "postings+holdings"
+    # Always "postings": a holdings or valuation overlay has no per-change
+    # grain. The reported balance over time is /balance/history.
+    method: str
     opening: Decimal
     points: list[BalancePoint]
     truncated: bool
+    withheld: list[str] | None = None  # ["amount"] when the request withheld amounts
 
 
 _SERIES_MAX_POINTS = 5000
 
 
-@router.get("/{account_id}/balance/series")
+@router.get(
+    "/{account_id}/balance/series",
+    dependencies=[disclose(Emits(amount=("points[].delta",)))],
+    # A collapsed (withhold=amount) point has no delta or transaction id.
+    response_model_exclude_none=True,
+)
 def balance_series(
+    request: Request,
     account_id: uuid.UUID,
     token: ReadToken,
     session: DbSession,
@@ -610,12 +643,21 @@ def balance_series(
 ) -> BalanceSeries:
     """Balance history for one account over ``[start, end]``, one point per
     transaction that moved it, plus the ``opening`` balance carried into the
-    window.
+    window, so ``opening`` plus every ``delta`` equals the last point.
 
-    REST is not token-budgeted, so this is the full per-change series — the
-    downsampled, narrated form is MCP ``balance_history``. Both compose on
-    the same service functions, so they can never disagree. ``truncated`` is
-    set rather than silently dropping the tail past 5000 points."""
+    This is the postings history for every account type (``method`` is
+    always ``postings``): a brokerage account's points and opening are its
+    cash, a loan's its postings. A holdings market value or a valuation has
+    no per-transaction grain; for the balance the account reports day by
+    day (holdings added, valuations used), read ``/balance/history``.
+
+    REST is not token-budgeted, so this is the full per-change series.
+    ``truncated`` is set rather than silently dropping the tail past 5000
+    points.
+
+    ``withhold=amount`` collapses it to one end-of-day balance per day, with
+    no deltas or transaction ids: per change, the deltas are the amounts and
+    the balances give them away by subtraction (#613)."""
     try:
         account = ledger.get_account(session, account_id)
     except ledger.LedgerError as exc:
@@ -627,24 +669,18 @@ def balance_series(
     if window_end < window_start:
         raise HTTPException(422, "end must be >= start")
 
-    rows, truncated = balances.change_points(
+    opening, rows, truncated = balances.change_series(
         session, account.id, start=window_start, end=window_end, limit=_SERIES_MAX_POINTS
     )
-    # The opening balance is the day BEFORE the window: `start` itself is the
-    # first point a caller can see move, so carrying its own activity into
-    # the opening would double-count it.
-    opening_map, method = networth.account_balance_series(
-        session, account, dates=[window_start - timedelta(days=1)]
-    )
-    return BalanceSeries(
-        account_id=account.id,
-        path=account.path,
-        start=window_start,
-        end=window_end,
-        currency=account.currency.strip(),
-        method=method,
-        opening=next(iter(opening_map.values()), Decimal("0")),
-        points=[
+    disclosure = getattr(request.state, "disclosure", None)
+    amounts_withheld = disclosure is not None and "amount" in disclosure.requested
+    if amounts_withheld:
+        daily: dict[date, Decimal] = {}
+        for row in rows:
+            daily[row.date] = Decimal(row.balance)
+        points = [BalancePoint(date=d, balance=b) for d, b in daily.items()]
+    else:
+        points = [
             BalancePoint(
                 date=row.date,
                 balance=Decimal(row.balance),
@@ -652,8 +688,115 @@ def balance_series(
                 transaction_id=row.transaction_id,
             )
             for row in rows
-        ],
+        ]
+    return BalanceSeries(
+        account_id=account.id,
+        path=account.path,
+        start=window_start,
+        end=window_end,
+        currency=account.currency.strip(),
+        method="postings",
+        opening=opening,
+        points=points,
         truncated=truncated,
+        withheld=["amount"] if amounts_withheld else None,
+    )
+
+
+class HistoryPoint(BaseModel):
+    date: date
+    balance: Decimal
+
+
+class BalanceHistoryOut(BaseModel):
+    """One account's reported end-of-day balance over a window, sampled for
+    a chart (#594). Unlike ``/balance/series`` (postings, per change), every
+    point here is the overlay-aware balance the account header shows."""
+
+    account_id: uuid.UUID
+    path: str
+    currency: str
+    range: str | None
+    start: date
+    end: date
+    method: str  # "postings" | "valuation" | "postings+holdings"
+    interval_days: int
+    points: list[HistoryPoint]
+    current: Decimal
+    change: Decimal
+    change_pct: Decimal | None
+    low: HistoryPoint | None
+    high: HistoryPoint | None
+    first_activity: date | None
+
+
+ChartRange = Literal["1m", "3m", "6m", "ytd", "1y", "5y", "all"]
+_RANGE_DAYS: dict[str, int] = {"1m": 30, "3m": 91, "6m": 182, "1y": 365, "5y": 1826}
+
+
+@router.get("/{account_id}/balance/history", dependencies=[disclose(NOTHING)])
+def balance_history(
+    account_id: uuid.UUID,
+    token: ReadToken,
+    session: DbSession,
+    range_: Annotated[
+        ChartRange,
+        Query(alias="range", description="named window ending today; start/end override it"),
+    ] = "1y",
+    start: Annotated[date | None, Query()] = None,
+    end: Annotated[date | None, Query(description="defaults to the ledger day")] = None,
+    max_points: Annotated[int, Query(ge=2, le=1000)] = networth.CHART_MAX_POINTS,
+) -> BalanceHistoryOut:
+    """Balance history for a chart: the account's reported end-of-day
+    balance (holdings added for brokerage, valuations for loans) on dates
+    sampled across the window — daily for a year at the default cap,
+    weekly for five. ``start`` clamps forward to the account's first
+    activity. ``change``, ``change_pct`` and the extremes are computed
+    server-side. For every stored change of the postings basis, use
+    ``/balance/series``."""
+    try:
+        account = ledger.get_account(session, account_id)
+    except ledger.LedgerError as exc:
+        raise _handle(exc) from exc
+    if account.is_virtual:
+        raise HTTPException(422, f"{account.path} is a category; balances apply to real accounts")
+    window_end = end or clock.ledger_today()
+    label: str | None = None if start is not None else range_
+    if start is not None:
+        window_start = start
+    elif range_ == "ytd":
+        window_start = window_end.replace(month=1, day=1)
+    elif range_ == "all":
+        first = networth.account_first_activity(session, account)
+        window_start = min(first, window_end) if first else window_end
+    else:
+        window_start = window_end - timedelta(days=_RANGE_DAYS[range_])
+    if window_end < window_start:
+        raise HTTPException(422, "end must be >= start")
+
+    history = networth.account_balance_history(
+        session, account, start=window_start, end=window_end, max_points=max_points
+    )
+
+    def point(p: tuple[date, Decimal] | None) -> HistoryPoint | None:
+        return HistoryPoint(date=p[0], balance=p[1]) if p is not None else None
+
+    return BalanceHistoryOut(
+        account_id=account.id,
+        path=account.path,
+        currency=account.currency.strip(),
+        range=label,
+        start=history.start,
+        end=history.end,
+        method=history.method,
+        interval_days=history.interval_days,
+        points=[HistoryPoint(date=d, balance=b) for d, b in history.points],
+        current=history.current,
+        change=history.change,
+        change_pct=history.change_pct,
+        low=point(history.low),
+        high=point(history.high),
+        first_activity=history.first_activity,
     )
 
 
@@ -762,6 +905,7 @@ def update_account(
             min_balance=body.min_balance,
             min_balance_set=min_balance_set,
             feed_balance_is_cash=body.feed_balance_is_cash,
+            balance_true_up=body.balance_true_up,
             path=body.path,
             actor_token_id=token.id,
         )
@@ -968,7 +1112,7 @@ def reconcile_account(
     )
 
 
-@router.get("/{account_id}/reconciliations")
+@router.get("/{account_id}/reconciliations", dependencies=[disclose(NOTHING)])
 def list_reconciliations(
     account_id: uuid.UUID,
     token: ReadToken,
@@ -988,7 +1132,116 @@ def list_reconciliations(
     ]
 
 
-@categories_router.get("")
+class StartingBalanceRequest(BaseModel):
+    dry_run: bool = Field(
+        default=False,
+        description="Return exactly what the call would do, refusals included, without "
+        "writing anything.",
+    )
+
+
+class StartingBalanceResult(BaseModel):
+    """An account's starting balance from the bank, after the call (or, with
+    ``dry_run``, what it would be). Amounts are in ledger sign: a card is
+    negative when money is owed."""
+
+    account_id: uuid.UUID
+    # set: this call gave the account one. unchanged: it already had this one.
+    # removed: this call took it out. none: there was none to remove.
+    status: Literal["set", "unchanged", "removed", "none"]
+    amount: Decimal  # the entry's amount; 0 = the ledger already agreed, nothing posted
+    entry_date: date | None  # the day before the account's earliest row; null = nothing posted
+    basis: Literal["posted_only", "pending_inclusive"] | None
+    bank_balance: Decimal | None  # the bank's reported balance it is derived from
+    bank_balance_date: date | None
+    transaction_id: uuid.UUID | None
+    dry_run: bool
+
+    @classmethod
+    def from_outcome(cls, outcome: starting_balance.Outcome) -> "StartingBalanceResult":
+        return cls(
+            account_id=outcome.account.id,
+            status=outcome.status,
+            amount=outcome.amount,
+            entry_date=outcome.entry_date,
+            basis=outcome.basis,
+            bank_balance=outcome.reported,
+            bank_balance_date=outcome.balance_date,
+            transaction_id=outcome.transaction_id,
+            dry_run=outcome.dry_run,
+        )
+
+
+_STARTING_BALANCE_REFUSED = {
+    "description": "The bank's balance cannot be used. `detail.code` names why: "
+    "`account_type` (not a checking, savings, cash or credit-card account), `not_connected`, "
+    "`connection_disabled`, `account_closed`, `no_snapshot`, `account_missing`, "
+    "`ambiguous_account`, `no_bank_balance`, `currency_unknown`, `currency_mismatch`, "
+    "`stale_balance` (sync the connection first) or `reconciled` (the account is reconciled "
+    "to a statement and differs from the bank; reconcile a later statement instead)."
+}
+
+
+def _starting_balance_refusal(exc: starting_balance.StartingBalanceError) -> HTTPException:
+    return HTTPException(422, detail={"code": exc.code, "message": str(exc)})
+
+
+@router.post("/{account_id}/starting-balance", responses={422: _STARTING_BALANCE_REFUSED})
+def set_starting_balance(
+    account_id: uuid.UUID, body: StartingBalanceRequest, token: WriteToken, session: DbSession
+) -> StartingBalanceResult:
+    """Start a bank-fed checking, savings, cash or credit-card account from
+    the balance its bank reported in the latest sync (decision 123).
+
+    A bank feed delivers about three months of transactions and no balance
+    from before them. Purser posts ONE entry for the difference between the
+    bank's balance and the account's ledger, against the system account
+    ``equity.opening_balances`` (neither income nor spending), dated the day
+    before the account's earliest transaction. It chooses the date, the sign
+    and the basis; the caller passes none of them.
+
+    Purser then keeps the entry in step: when older history arrives (an
+    import, a backfill), it gives way by exactly those rows, so no balance on
+    or after the account's first feed transaction changes. It is not a
+    reconciliation: no claim is recorded and ``reconciled_through`` does not
+    move.
+
+    Safe to repeat: an account that has one is answered with it (``status:
+    unchanged``). Mapping a new account in the UI does this by default."""
+    try:
+        outcome = starting_balance.set_from_bank(
+            session, account_id=account_id, actor_token_id=token.id, dry_run=body.dry_run
+        )
+    except starting_balance.StartingBalanceError as exc:
+        raise _starting_balance_refusal(exc) from exc
+    except ledger.LedgerError as exc:
+        raise _handle(exc) from exc
+    if not outcome.dry_run:
+        session.commit()
+    return StartingBalanceResult.from_outcome(outcome)
+
+
+@router.delete("/{account_id}/starting-balance")
+def remove_starting_balance(
+    account_id: uuid.UUID,
+    token: WriteToken,
+    session: DbSession,
+    dry_run: Annotated[bool, Query()] = False,
+) -> StartingBalanceResult:
+    """Take an account's starting balance out again: the entry is reversed to
+    zero and Purser stops keeping it. ``status: none`` when there was none."""
+    try:
+        outcome = starting_balance.remove(
+            session, account_id=account_id, actor_token_id=token.id, dry_run=dry_run
+        )
+    except ledger.LedgerError as exc:
+        raise _handle(exc) from exc
+    if not outcome.dry_run:
+        session.commit()
+    return StartingBalanceResult.from_outcome(outcome)
+
+
+@categories_router.get("", dependencies=[disclose(NOTHING)])
 def list_categories(token: ReadToken, session: DbSession) -> list[AccountOut]:
     # Categories only: a system virtual account (equity.securities, the other
     # side of a trade's cash, decision 103) is not one anyone picks.
@@ -1052,7 +1305,7 @@ def delete_category(category_id: uuid.UUID, token: WriteToken, session: DbSessio
     session.commit()
 
 
-@categories_router.get("/{subtree}/rollup")
+@categories_router.get("/{subtree}/rollup", dependencies=[disclose(NOTHING)])
 def category_rollup(
     subtree: str,
     token: ReadToken,

@@ -11,6 +11,7 @@ from sqlalchemy import Engine, text
 
 from purser.feed import service, simplefin
 from tests import test_feed
+from tests.conftest import today
 from tests.test_feed import FeedHarness
 from tests.test_feed_outage import ACCOUNT, PATH, Bank, _descriptions, _row
 
@@ -23,7 +24,7 @@ PAGE = simplefin.BRIDGE_PAGE_DAYS
 def _span(request: dict[str, Any]) -> int:
     """Whole days a request covers; an open-ended one runs to now, so its
     whole days must stay below the span."""
-    end = request["end"] or date.today()
+    end = request["end"] or today()
     return (end - request["start"]).days + (0 if request["end"] else 1)
 
 
@@ -124,10 +125,9 @@ class TestEveryPathPages:
         harness.map_new(connection_id, ACCOUNT, PATH)
         bank.rows = [_row(d, f"-{d}.00", f"Row {d}") for d in (85, 50, 10)]
         bank.requests.clear()
-        today = date.today()
         body = {
-            "start": (today - timedelta(days=89)).isoformat(),  # 90 days inclusive
-            "end": today.isoformat(),
+            "start": (today() - timedelta(days=89)).isoformat(),  # 90 days inclusive
+            "end": today().isoformat(),
         }
         out = harness.client.post(f"/connections/{connection_id}/refetch", json=body).json()
         assert out["pages"] == 3 and len(bank.requests) == 3
@@ -151,10 +151,9 @@ class TestEveryPathPages:
                 {"c": connection_id},
             ).scalar_one()
         monkeypatch.setattr(simplefin, "BRIDGE_MAX_FETCHES_PER_DAY", fetched + 2)
-        today = date.today()
         body = {  # 90 days: three pages, two fetches left
-            "start": (today - timedelta(days=89)).isoformat(),
-            "end": today.isoformat(),
+            "start": (today() - timedelta(days=89)).isoformat(),
+            "end": today().isoformat(),
         }
         resp = harness.client.post(f"/connections/{connection_id}/refetch", json=body)
         assert resp.status_code == 422

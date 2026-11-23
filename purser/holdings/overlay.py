@@ -43,7 +43,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Date, Text, and_, cast, func, or_, select
+from sqlalchemy import Date, Text, and_, cast, func, or_, select, text
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Session
 
@@ -109,25 +109,70 @@ FEED_VALUE_SQL = """(
 )"""
 
 
+# From each symbol's newest stored close dated before :start (every source
+# on that date: a tie between them is decided in core.PriceBook) through
+# :upper; from :start when there is none. One backward index scan per symbol
+# finds that date (security_prices' primary key leads with symbol, date).
+_STORED_FROM = text(
+    """
+SELECT p.symbol, p.price_date, p.close, p.source
+FROM unnest(CAST(:symbols AS text[])) AS s(symbol)
+CROSS JOIN LATERAL (
+  SELECT coalesce(
+    (SELECT max(q.price_date) FROM security_prices q
+     WHERE q.symbol = s.symbol AND q.price_date < :start),
+    CAST(:start AS date)
+  ) AS from_date
+) b
+JOIN security_prices p
+  ON p.symbol = s.symbol AND p.price_date >= b.from_date AND p.price_date <= :upper
+"""
+)
+
+
+def stored_points(
+    session: Session, symbols: Iterable[str], *, upper: date, start: date | None = None
+) -> dict[str, list[core.PricePoint]]:
+    """Each symbol's STORED closes (manual and provider) dated on or before
+    ``upper``. With ``start`` (#404), only those a book needs to answer for
+    the days from ``start`` on: the closes dated ``start`` or later, and the
+    newest date before it (the close in effect when the window opens).
+    Resolution is newest date first (decision 89), so nothing older can
+    change an answer on those days. A stored close always fits a price
+    (``security_prices_close_positive``, NUMERIC(20,6))."""
+    wanted = sorted(set(symbols))
+    points: dict[str, list[core.PricePoint]] = defaultdict(list)
+    if not wanted:
+        return points
+    if start is None:
+        rows = session.execute(
+            select(
+                SecurityPrice.symbol,
+                SecurityPrice.price_date,
+                SecurityPrice.close,
+                SecurityPrice.source,
+            ).where(SecurityPrice.symbol.in_(wanted), SecurityPrice.price_date <= upper)
+        ).all()
+    else:
+        rows = session.execute(
+            _STORED_FROM, {"symbols": wanted, "start": start, "upper": upper}
+        ).all()
+    for symbol, price_date, close, source in rows:
+        points[symbol].append(core.PricePoint(price_date, Decimal(close), source))
+    return points
+
+
 def stored_books(
-    session: Session, symbols: Iterable[str], *, upper: date
+    session: Session, symbols: Iterable[str], *, upper: date, start: date | None = None
 ) -> dict[str, core.PriceBook]:
     """Each symbol's STORED closes dated on or before ``upper`` (manual and
-    provider): no feed-implied ones, which a zero row cannot supply."""
-    wanted = sorted(set(symbols))
-    if not wanted:
-        return {}
-    points: dict[str, list[core.PricePoint]] = defaultdict(list)
-    for symbol, price_date, close, source in session.execute(
-        select(
-            SecurityPrice.symbol,
-            SecurityPrice.price_date,
-            SecurityPrice.close,
-            SecurityPrice.source,
-        ).where(SecurityPrice.symbol.in_(wanted), SecurityPrice.price_date <= upper)
-    ):
-        points[symbol].append(core.PricePoint(price_date, Decimal(close), source))
-    return {symbol: core.PriceBook(rows) for symbol, rows in points.items()}
+    provider): no feed-implied ones, which a zero row cannot supply. With
+    ``start``, a book that answers for the days from ``start`` on
+    (``stored_points``)."""
+    return {
+        symbol: core.PriceBook(rows)
+        for symbol, rows in stored_points(session, symbols, upper=upper, start=start).items()
+    }
 
 
 @dataclass(frozen=True)

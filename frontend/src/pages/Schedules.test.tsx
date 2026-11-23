@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { components } from "../api/schema";
 import { overrideBody } from "../lib/utils";
 import { apiMock, fail, mockApi, ok } from "../test/api";
+import { shownText, spokenText } from "../test/a11y";
 import { renderWithProviders } from "../test/render";
 import Schedules, { cadenceLabel, ForecastChart, InstancesPanel, negateAmount } from "./Schedules";
 
@@ -405,6 +406,62 @@ describe("Scheduled transactions page (#535)", () => {
       payee: "Acme Gym",
       memo: "",
     });
+  });
+});
+
+describe("Estimated amounts (#556)", () => {
+  const power = listed({
+    id: "s-3",
+    name: "Example Power",
+    payee: "Example Power",
+    memo: null,
+    counterparty_account_id: null,
+    category_path: "expenses.fitness",
+    amount_type: "estimated",
+    amount: "-95.0000",
+    estimate_basis: "rolling_avg_3",
+  });
+
+  it("shows ≈ −$95.00 in the table and the phone list, heard as estimated", async () => {
+    mockApi(pageRoutes([power]));
+    renderWithProviders(<Schedules />);
+    const checking = await screen.findByRole("region", { name: "Checking" });
+
+    const cell = within(within(checking).getByRole("table")).getByRole("cell", { name: "estimated \u2212$95.00" });
+    expect(shownText(cell)).toBe("\u2248 \u2212$95.00");
+    expect(cell).toHaveClass("text-muted-foreground");
+    expect(cell).toHaveAttribute("title", "Estimated from the 3-payment average");
+
+    // The phone list: the same text, colour and tooltip.
+    const item = within(checking).getByRole("listitem");
+    const amount = within(item).getByTitle("Estimated from the 3-payment average");
+    expect(shownText(amount)).toBe("\u2248 \u2212$95.00");
+    expect(spokenText(amount)).toBe("estimated \u2212$95.00");
+    expect(amount).toHaveClass("text-muted-foreground");
+    expect(checking.textContent).not.toContain("~");
+  });
+
+  it("marks an estimated forecast event in its tooltip and the occurrence list", async () => {
+    const base = forecast(false);
+    const event = base.days[1].events[0];
+    const certainty = {
+      status: "estimated",
+      amount_estimated: true,
+      date_estimated: false,
+      amount: { state: "estimated", value: "-1200", source: "history", as_of: "2026-11-01" },
+      date: { state: "confirmed", value: "2026-11-02", source: "rule", as_of: "2026-11-01" },
+    } as const;
+    const fixed = { ...event, label: "Rent", amount: "-800.0000", basis: "fixed" as const };
+    base.days[1].events = [{ ...event, certainty }, fixed];
+    mockApi({ "GET /forecast": ok(base) });
+    const { container } = renderWithProviders(<ForecastChart accountPath="assets.checking" currency="USD" />);
+    await screen.findByText(/Low /);
+    const titles = [...container.querySelectorAll("circle title")].map((t) => t.textContent);
+    expect(titles[0]).toMatch(/^Citi payment \u2248 \u2212\$1,200\.00 · /);
+    expect(titles[1]).toMatch(/^Rent -\$800\.00 · /);
+    const listed = screen.getByText(/Citi payment/, { selector: "span" });
+    expect(shownText(listed)).toContain("Citi payment · \u2248 \u2212$1,200.00");
+    expect(spokenText(listed)).toContain("Citi payment · estimated \u2212$1,200.00");
   });
 });
 

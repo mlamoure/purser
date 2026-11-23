@@ -68,9 +68,10 @@ class TiingoProvider:
 
     name = TIINGO
     base_url = "https://api.tiingo.com/tiingo/daily"
+    TIMEOUT = 20.0  # seconds, per request (also the price job's shared client)
 
     def __init__(
-        self, api_key: str, *, client: httpx.Client | None = None, timeout: float = 20.0
+        self, api_key: str, *, client: httpx.Client | None = None, timeout: float = TIMEOUT
     ) -> None:
         self._key = api_key
         self._client = client

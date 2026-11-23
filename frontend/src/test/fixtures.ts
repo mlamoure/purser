@@ -19,6 +19,7 @@ export const accountOut = (over: Partial<Schemas["AccountOut"]> = {}): Schemas["
   feed_invert: false,
   holdings_source: "feed",
   feed_balance_is_cash: false,
+  balance_true_up: false,
   min_balance: null,
   closed_at: null,
   hidden_at: null,
@@ -102,7 +103,7 @@ export const transferLinkSuggestion = (
   source: "confirm",
   confidence: null,
   headline:
-    "Link transfers between assets.checking and assets.savings when the payee is " +
+    "Link transfers between Checking and Rainy Day Savings when the payee is " +
     "ZEPHYR BKG SVC SENT (or an alias)",
   draft: {
     version: 1,
@@ -143,7 +144,7 @@ export const matchSuggestion = (
   confidence: "0.612",
   headline:
     "Match City Utilities (-180.00 due 2026-07-15) to the -95.00 bank row of 2026-07-18 " +
-    "on assets.checking — variance 85.00",
+    "on Checking — variance 85.00",
   draft: {
     version: 1,
     expected_id: "e-1",
@@ -184,6 +185,7 @@ export const ruleOut = (over: Partial<Schemas["RuleOut"]> = {}): Schemas["RuleOu
   note: null,
   window_days: 3,
   payee_scope: "ZEPHYR BKG SVC SENT",
+  securities_trade: false,
   ...over,
 });
 
@@ -198,7 +200,7 @@ export const transferPairSuggestion = (
   source: "detected",
   confidence: null,
   headline:
-    "Link 250.00 from assets.checking (2026-10-14) to liabilities.card (2026-10-15) as one " +
+    "Link 250.00 from Checking (2026-10-14) to Example Card (2026-10-15) as one " +
     "transfer",
   draft: {
     version: 1,
@@ -254,11 +256,10 @@ export const configOut = (
   values: {
     sync_schedule: { preset: "daily", hour: 6, minute: 30 },
     transfer_auto_link: true,
-    privacy_purchase: false,
-    privacy_amount: false,
     ai_provider: "none",
     ai_model: null,
     ai_base_url: "https://api.example.com/v1",
+    ai_timeout_seconds: 30,
     grafana_url: null,
     session_ttl_days: 7,
     session_idle_hours: 8,
@@ -275,6 +276,18 @@ export const configOut = (
   },
   overridden: [],
   ai_api_key_set: false,
+  ai_disclosure: [
+    {
+      capability: "categorize",
+      when: "To categorize a transaction that no rule or earlier choice covers",
+      sends: ["its payee, description and amount", "your categories and their descriptions"],
+    },
+    {
+      capability: "review",
+      when: "With the review pass on, to review a transaction",
+      sends: ["its date and amount", "your reviewer checklist"],
+    },
+  ],
   oidc_client_secret_set: false,
   price_api_key_set: false,
   sync_reschedule_live: true,
@@ -285,5 +298,121 @@ export const configOut = (
     key_acknowledged_at: null,
     encrypted_scopes: [],
   },
+  ...over,
+});
+
+/** A split suggestion (#590, decision 118): a new 2550.00 paycheck offered
+ * the payee's last split, the 50.00 difference on the salary line and the
+ * 401(k) line backed by the one exact bank row. */
+export const splitSuggestion = (
+  over: Partial<Schemas["SuggestionOut"]> = {},
+): Schemas["SuggestionOut"] => ({
+  id: "s-5",
+  kind: "split",
+  status: "open",
+  source: "detected",
+  confidence: null,
+  headline: "Split the 2550.00 row of 2026-11-14 on Checking like last time (3 lines)",
+  draft: {
+    version: 1,
+    transaction_id: "t-pay",
+    template_id: "t-last",
+    account: "assets.checking",
+    date: "2026-11-14",
+    amount: "2550.00",
+    template_amount: "2500.00",
+    payee: "EXAMPLE PAYROLL",
+    lines: [
+      { target: "income.salary", amount: "4050.00", memo: null, backing_ids: [] },
+      { target: "expenses.taxes", amount: "-900.00", memo: "withholding", backing_ids: [] },
+      { target: "[assets.retirement]", amount: "-600.00", memo: null, backing_ids: ["t-401k"] },
+    ],
+  },
+  evidence_summary: {
+    count: 1,
+    first: "2026-10-31",
+    last: "2026-10-31",
+    amount_range: { low: "2500.00", high: "2500.00" },
+    cadence: null,
+  },
+  snooze_until: null,
+  seen_count: 1,
+  created_at: "2026-11-14T07:00:00Z",
+  decided_at: null,
+  reject_scope: null,
+  result_entity_type: null,
+  result_entity_id: null,
+  ...over,
+});
+
+/** A balance-history window (#594): three days, up then down. */
+export const balanceHistoryOut = (
+  over: Partial<Schemas["BalanceHistoryOut"]> = {},
+): Schemas["BalanceHistoryOut"] => ({
+  account_id: "a-1",
+  path: "assets.checking",
+  currency: "USD",
+  range: "1y",
+  start: "2026-11-01",
+  end: "2026-11-03",
+  method: "postings",
+  interval_days: 1,
+  points: [
+    { date: "2026-11-01", balance: "100.0000" },
+    { date: "2026-11-02", balance: "250.0000" },
+    { date: "2026-11-03", balance: "200.0000" },
+  ],
+  current: "200.0000",
+  change: "100.0000",
+  change_pct: "100.00",
+  low: { date: "2026-11-01", balance: "100.0000" },
+  high: { date: "2026-11-02", balance: "250.0000" },
+  first_activity: "2026-11-01",
+  ...over,
+});
+
+/** A brokerage account's holdings table (#595): two lines and some cash. */
+export const holdingsSummaryOut = (
+  over: Partial<Schemas["HoldingsSummaryOut"]> = {},
+): Schemas["HoldingsSummaryOut"] => ({
+  account_id: "a-1",
+  as_of: "2026-11-20",
+  source: "feed",
+  closed: false,
+  cash: "500.0000",
+  cash_weight_pct: "20.83",
+  market_value: "1900.0000",
+  cost_basis: "1500.0000",
+  unrealized_gain: "400.0000",
+  gain_pct: "26.67",
+  total: "2400.0000",
+  lines: [
+    holdingLine({ symbol: "AAAA", name: "Example Growth Fund", quantity: "10.000000", price: "150.000000", market_value: "1500.0000", cost_basis: "1000.0000", unrealized_gain: "500.0000", gain_pct: "50.00", weight_pct: "62.50" }),
+    holdingLine({ symbol: "BBBB", quantity: "4.000000", price: "100.000000", market_value: "400.0000", cost_basis: "500.0000", unrealized_gain: "-100.0000", gain_pct: "-20.00", weight_pct: "16.67" }),
+  ],
+  ...over,
+});
+
+export const holdingLine = (
+  over: Partial<Schemas["HoldingsSummaryLineOut"]> = {},
+): Schemas["HoldingsSummaryLineOut"] => ({
+  symbol: "AAAA",
+  name: null,
+  source: "feed",
+  position_id: null,
+  quantity: "1.000000",
+  price: "1.000000",
+  price_as_of: "2026-11-20",
+  price_source: null,
+  market_value: "1.0000",
+  cost_basis: null,
+  unrealized_gain: null,
+  gain_pct: null,
+  weight_pct: null,
+  in_transit: null,
+  stale_price: false,
+  no_price: false,
+  unpriceable: false,
+  value_out_of_range: false,
   ...over,
 });

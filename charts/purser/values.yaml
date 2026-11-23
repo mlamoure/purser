@@ -47,6 +47,15 @@ env:
   # other host). With ingress.enabled the chart derives
   # https://INGRESS_HOST; set it here when users reach Purser at another URL.
   # PURSER_PUBLIC_URL: https://purser.example.com
+  # Other exact names users reach Purser by (comma-separated, no wildcards);
+  # /mcp accepts them besides PURSER_PUBLIC_URL's host:
+  # PURSER_ALLOWED_HOSTS: purser.internal.example.com
+  # Settings -> Agents & API shows how Purser is reached. With the ingress
+  # (an https PURSER_PUBLIC_URL) that is "through a reverse proxy"; without
+  # it the Service and your network decide, so the chart reports nothing and
+  # Settings says "not reported" rather than guess. To report a LoadBalancer
+  # or NodePort Service on your home network, set:
+  # PURSER_BIND_ADDRESS: 0.0.0.0
   # Behind an ingress, trust the controller's forwarded client address so
   # sign-in throttling counts real clients (uvicorn's trusted-proxy list):
   # FORWARDED_ALLOW_IPS: 10.0.0.0/8

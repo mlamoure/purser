@@ -94,7 +94,7 @@ def _tx_lines(session: Session, event_rows: list[Event], materiality: Decimal) -
                 {
                     "payee": tx.payee.name if tx.payee else None,
                     # A payee-less row is labelled by its description, in its
-                    # own key so minimal disclosure can withhold it (#437).
+                    # own key so a call that withholds descriptions can drop it (#437).
                     **({"description": tx.description} if not tx.payee else {}),
                     "amount": str(amount),
                     "transaction_id": str(tx.id),
@@ -146,7 +146,7 @@ def _vanished_lines(
                     {
                         "payee": tx.payee.name if tx.payee else None,
                         # A payee-less row is labelled by its description, in its
-                        # own key so minimal disclosure can withhold it (#437).
+                        # own key so a call that withholds descriptions can drop it (#437).
                         **({"description": tx.description} if not tx.payee else {}),
                         "amount": str(amount),
                         "transaction_id": str(tx.id),
@@ -302,12 +302,13 @@ def _suggestions_block(session: Session) -> dict[str, Any]:
     from purser import suggestions
 
     rows = suggestions.list_suggestions(session, limit=SUGGESTIONS_CAP)
+    names = suggestions.AccountNames(session)
     return {
         "open": suggestions.open_count(session),
         "top": [
             {
                 "id": str(r.id),
-                "headline": suggestions.headline(r),
+                "headline": suggestions.headline(r, names),
                 "confidence": str(r.confidence) if r.confidence is not None else None,
                 "source": r.source,
             }

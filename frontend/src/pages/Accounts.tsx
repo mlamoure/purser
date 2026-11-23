@@ -2,10 +2,12 @@ import { useState } from "react";
 import { Button, Card, CardTitle } from "../components/ui";
 import { AddAssetForm } from "../components/AddAssetForm";
 import { QueryState } from "../components/QueryState";
-import { AccountsTable, NO_ACCOUNTS, useAccounts } from "../components/AccountsTable";
+import { GroupedAccountsTable, NO_ACCOUNTS, useAccounts } from "../components/AccountsTable";
 
 /** Every account by name with its type and balance, each opening its
- * register (#542). Hidden and closed accounts show on request. */
+ * register (#542), in the Dashboard's groups with a subtotal per group
+ * (#617). Hidden and closed accounts show on request, each in its own
+ * type's group. */
 export default function Accounts() {
   const [showHidden, setShowHidden] = useState(false);
   const [showClosed, setShowClosed] = useState(false);
@@ -25,7 +27,7 @@ export default function Accounts() {
         )}
       </div>
       <QueryState query={accounts} what="accounts" empty={NO_ACCOUNTS}>
-        {(rows) => <AccountsTable rows={rows} />}
+        {(rows) => <GroupedAccountsTable rows={rows} variant="detailed" />}
       </QueryState>
       <div className="mt-3 flex flex-wrap gap-4">
         <label className="flex items-center gap-2 text-sm text-muted-foreground">

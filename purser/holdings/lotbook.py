@@ -135,14 +135,21 @@ def load(session: Session, position_ids: Iterable[uuid.UUID]) -> dict[uuid.UUID,
 
 
 def book(loaded: Loaded | None, events: Sequence[core.Event]) -> core_lots.Book:
-    """The live book of one position, given its events."""
+    """The live book of one position, given its events: its live lots and
+    dispositions, and its effective splits (#624)."""
+    effective = core.effective_events(events)
+    splits = [
+        core_lots.SplitFact(e.occurred_on, e.split[0], e.split[1])
+        for e in effective
+        if e.kind == core.SPLIT and e.split is not None
+    ]
     if loaded is None:
-        return core_lots.Book(lots=())
-    effective = {e.id for e in core.effective_events(events)}
+        return core_lots.Book(lots=(), splits=tuple(splits))
     return core_lots.live(
         (lot_fact(r) for r in loaded.lots),
         (disposal_fact(d) for d in loaded.disposals),
-        effective,
+        {e.id for e in effective},
+        splits,
     )
 
 

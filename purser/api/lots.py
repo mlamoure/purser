@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from purser import ledger, networth
 from purser.admin import security
 from purser.admin.auth import ReadToken, WriteToken
+from purser.api.disclosure import NOTHING, Emits, disclose
 from purser.db import get_session
 from purser.holdings import awards as award_service
 from purser.holdings import captures, lots
@@ -171,7 +172,17 @@ class LotPageOut(BaseModel):
     next_cursor: str | None
 
 
-@router.get("/positions/{position_id}/lots")
+@router.get(
+    "/positions/{position_id}/lots",
+    dependencies=[
+        disclose(
+            Emits(
+                description=("lots[].plan",),
+                amount=("lots[].remaining_basis", "lots[].basis_per_share", "lots[].cost_basis"),
+            )
+        )
+    ],
+)
 def list_lots(
     position_id: uuid.UUID,
     token: ReadToken,
@@ -233,7 +244,24 @@ class LotDetailOut(LotOut):
     disposition_rows: list[DispositionOut]
 
 
-@router.get("/lots/{lot_id}")
+@router.get(
+    "/lots/{lot_id}",
+    dependencies=[
+        disclose(
+            Emits(
+                description=("plan",),
+                amount=(
+                    "remaining_basis",
+                    "basis_per_share",
+                    "cost_basis",
+                    "disposition_rows[].cost_basis",
+                    "disposition_rows[].proceeds",
+                    "disposition_rows[].realized_gain",
+                ),
+            )
+        )
+    ],
+)
 def get_lot(lot_id: uuid.UUID, token: ReadToken, session: DbSession) -> LotDetailOut:
     """One lot with every disposition that drew on it (reversed ones
     included, `live: false`)."""
@@ -538,7 +566,7 @@ class CaptureRecordOut(BaseModel):
     created_at: datetime
 
 
-@router.get("/accounts/{account_id}/captures")
+@router.get("/accounts/{account_id}/captures", dependencies=[disclose(NOTHING)])
 def list_captures(
     account_id: uuid.UUID,
     token: ReadToken,
@@ -717,7 +745,16 @@ def _awards_freshness(session: Session, account_id: uuid.UUID) -> FreshnessOut |
     )
 
 
-@router.get("/accounts/{account_id}/awards")
+@router.get(
+    "/accounts/{account_id}/awards",
+    dependencies=[
+        disclose(
+            # A vest's net shares times its fair market value is the basis of
+            # the lot it opened, a single amount (#667).
+            Emits(description=("awards[].plan",), amount=("awards[].vests[].vested_fmv",))
+        )
+    ],
+)
 def list_awards(
     account_id: uuid.UUID,
     token: ReadToken,
@@ -741,7 +778,10 @@ def list_awards(
     )
 
 
-@router.get("/awards/{award_id}")
+@router.get(
+    "/awards/{award_id}",
+    dependencies=[disclose(Emits(description=("plan",), amount=("vests[].vested_fmv",)))],
+)
 def get_award(award_id: uuid.UUID, token: ReadToken, session: DbSession) -> AwardOut:
     """One award with its whole vest schedule."""
     try:
@@ -1115,7 +1155,7 @@ class RealizedGainsOut(BaseModel):
     note: str = "Informational: Purser computes no tax."
 
 
-@router.get("/accounts/{account_id}/realized-gains")
+@router.get("/accounts/{account_id}/realized-gains", dependencies=[disclose(NOTHING)])
 def realized_gains(
     account_id: uuid.UUID,
     token: ReadToken,

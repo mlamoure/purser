@@ -8,7 +8,7 @@ import os
 import threading
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -39,12 +39,21 @@ from purser.models import (
     Transaction,
     User,
 )
-from tests.conftest import TEST_ENCRYPTION_KEY
+from tests.conftest import TEST_ENCRYPTION_KEY, now, today
 
-TODAY = datetime.now(UTC).date()
-OPENED = TODAY - timedelta(days=20)  # opening rows
-STATEMENT = TODAY - timedelta(days=10)  # the first statement date
-LATER = TODAY - timedelta(days=5)
+
+def _opened() -> date:
+    """The day of the opening rows."""
+    return today() - timedelta(days=20)
+
+
+def _statement() -> date:
+    """The first statement date."""
+    return today() - timedelta(days=10)
+
+
+def _later() -> date:
+    return today() - timedelta(days=5)
 
 
 # --------------------------------------------------------------------------
@@ -70,8 +79,8 @@ def seeded(admin_client: TestClient) -> dict[str, str]:
     )
     assert resp.status_code == 201, resp.text
     ids["category"] = resp.json()["id"]
-    _post(admin_client, "assets.checking", "100.00", OPENED)
-    _post(admin_client, "liabilities.card", "-400.00", OPENED)
+    _post(admin_client, "assets.checking", "100.00", _opened())
+    _post(admin_client, "liabilities.card", "-400.00", _opened())
     return ids
 
 
@@ -94,7 +103,7 @@ def _post(
 
 
 def _reconcile(client: TestClient, account_id: str, **body: Any) -> Any:
-    payload = {"as_of": STATEMENT.isoformat(), **body}
+    payload = {"as_of": _statement().isoformat(), **body}
     return client.post(f"/accounts/{account_id}/reconcile", json=payload)
 
 
@@ -122,21 +131,21 @@ def test_reconcile_posts_one_adjustment_and_exact_retry_is_idempotent(
     assert Decimal(result["ledger_balance"]) == Decimal("100.00")
     assert Decimal(result["adjustment"]) == Decimal("25.00")
     assert result["category"] == reconciliation.CATEGORY_PATH
-    assert result["reconciled_through"] == STATEMENT.isoformat()
+    assert result["reconciled_through"] == _statement().isoformat()
 
     retry = _reconcile(client, checking, statement_balance="125.00")
     assert retry.status_code == 200, retry.text
     assert retry.json() == {**result, "created": False}
 
     account = client.get(f"/accounts/{checking}").json()
-    assert account["reconciled_through"] == STATEMENT.isoformat()
+    assert account["reconciled_through"] == _statement().isoformat()
     status = account["reconciliation"]
     assert status["id"] == result["reconciliation_id"]
     assert status["in_balance"] is True
     assert Decimal(status["difference"]) == 0
     assert Decimal(status["ledger_balance"]) == Decimal("125.00")
     balance = client.get(
-        f"/accounts/{checking}/balance", params={"as_of": STATEMENT.isoformat()}
+        f"/accounts/{checking}/balance", params={"as_of": _statement().isoformat()}
     ).json()
     assert Decimal(balance["balance"]) == Decimal("125.00")
 
@@ -145,7 +154,7 @@ def test_reconcile_posts_one_adjustment_and_exact_retry_is_idempotent(
     detail = client.get(f"/transactions/{result['adjustment_tx_id']}").json()
     assert detail["status"] == "posted"
     assert detail["origin"] == "system"
-    assert detail["date"] == STATEMENT.isoformat()
+    assert detail["date"] == _statement().isoformat()
     assert detail["payee"] == reconciliation.PAYEE
     assert detail["category_path"] == reconciliation.CATEGORY_PATH
     assert sum(Decimal(p["amount"]) for p in detail["postings"]) == 0
@@ -195,7 +204,7 @@ def test_zero_difference_reconcile_is_recorded_without_an_adjustment(
         ).one()
     assert row.adjustment == 0 and row.adjustment_tx_id is None
     account = client.get(f"/accounts/{checking}").json()
-    assert account["reconciled_through"] == STATEMENT.isoformat()
+    assert account["reconciled_through"] == _statement().isoformat()
     assert account["reconciliation"]["in_balance"] is True
     assert (
         _count(migrated_engine, "SELECT COUNT(*) FROM events WHERE type = 'account.reconciled'")
@@ -215,10 +224,10 @@ def test_backdated_write_after_a_reconcile_is_reported_never_silent(
     checking = seeded["checking"]
     assert _reconcile(client, checking, statement_balance="125.00").status_code == 200
 
-    _post(client, "assets.checking", "10.00", STATEMENT - timedelta(days=1))
+    _post(client, "assets.checking", "10.00", _statement() - timedelta(days=1))
 
     account = client.get(f"/accounts/{checking}").json()
-    assert account["reconciled_through"] == STATEMENT.isoformat()
+    assert account["reconciled_through"] == _statement().isoformat()
     stale = account["reconciliation"]
     assert stale["in_balance"] is False
     assert Decimal(stale["difference"]) == Decimal("10.00")
@@ -242,15 +251,15 @@ def test_backdated_write_after_a_reconcile_is_reported_never_silent(
 
     # Reconciling a later date absorbs nothing silently: it is a new claim
     # (here already in balance), while the earlier one stays visibly stale.
-    later = _reconcile(client, checking, as_of=LATER.isoformat(), statement_balance="135.00")
+    later = _reconcile(client, checking, as_of=_later().isoformat(), statement_balance="135.00")
     assert later.status_code == 200, later.text
     assert Decimal(later.json()["adjustment"]) == 0
     history = client.get(f"/accounts/{checking}/reconciliations").json()
     assert [(h["as_of"], h["in_balance"]) for h in history] == [
-        (LATER.isoformat(), True),
-        (STATEMENT.isoformat(), False),
+        (_later().isoformat(), True),
+        (_statement().isoformat(), False),
     ]
-    assert client.get(f"/accounts/{checking}").json()["reconciled_through"] == LATER.isoformat()
+    assert client.get(f"/accounts/{checking}").json()["reconciled_through"] == _later().isoformat()
 
 
 def test_a_correction_before_the_reconciled_date_is_reported(
@@ -259,7 +268,7 @@ def test_a_correction_before_the_reconciled_date_is_reported(
     """Corrections are reversal+replacement pairs (§4): the live check reads
     chain heads, so an edited amount moves the reconciled balance exactly."""
     checking = seeded["checking"]
-    row = _post(client, "assets.checking", "-20.00", STATEMENT - timedelta(days=2))
+    row = _post(client, "assets.checking", "-20.00", _statement() - timedelta(days=2))
     assert _reconcile(client, checking, statement_balance="80.00").status_code == 200
     resp = client.patch(f"/transactions/{row}", json={"amount": "-23.50"})
     assert resp.status_code == 200, resp.text
@@ -273,7 +282,7 @@ def test_pending_basis_and_posted_basis_differ_by_the_pending_rows(
 ) -> None:
     checking = seeded["checking"]
     pending = _post(
-        client, "assets.checking", "-30.00", STATEMENT - timedelta(days=1), status="pending"
+        client, "assets.checking", "-30.00", _statement() - timedelta(days=1), status="pending"
     )
 
     posted = _reconcile(client, checking, statement_balance="100.00", dry_run=True).json()
@@ -315,7 +324,7 @@ def test_credit_card_statement_figure_is_converted_to_ledger_sign(
     assert Decimal(result["target_balance"]) == Decimal("-425.00")
     assert Decimal(result["ledger_balance"]) == Decimal("-400.00")
     assert Decimal(result["adjustment"]) == Decimal("-25.00")
-    balance = client.get(f"/accounts/{card}/balance", params={"as_of": STATEMENT.isoformat()})
+    balance = client.get(f"/accounts/{card}/balance", params={"as_of": _statement().isoformat()})
     assert Decimal(balance.json()["balance"]) == Decimal("-425.00")
     status = client.get(f"/accounts/{card}").json()["reconciliation"]
     assert Decimal(status["statement_balance"]) == Decimal("425.00")
@@ -369,13 +378,11 @@ def test_future_dates_are_rejected_and_today_is_accepted(
     seeded: dict[str, str], client: TestClient
 ) -> None:
     checking = seeded["checking"]
-    # Two days, not one: TODAY is fixed at import, so a run that crosses UTC
-    # midnight must still be asking about a future date.
-    future = TODAY + timedelta(days=2)
+    future = today() + timedelta(days=1)  # the server reads the test's clock
     resp = _reconcile(client, checking, as_of=future.isoformat(), statement_balance="100.00")
     assert resp.status_code == 422
     assert "future" in resp.json()["detail"]
-    ok = _reconcile(client, checking, as_of=TODAY.isoformat(), statement_balance="100.00")
+    ok = _reconcile(client, checking, as_of=today().isoformat(), statement_balance="100.00")
     assert ok.status_code == 200, ok.text
 
 
@@ -396,13 +403,13 @@ def test_conflicting_claims_are_409(seeded: dict[str, str], client: TestClient) 
     earlier = _reconcile(
         client,
         checking,
-        as_of=(STATEMENT - timedelta(days=1)).isoformat(),
+        as_of=(_statement() - timedelta(days=1)).isoformat(),
         statement_balance="100.00",
     )
     assert earlier.status_code == 409
     detail = earlier.json()["detail"]
     assert detail["code"] == "reconciliation_out_of_order"
-    assert detail["reconciled_through"] == STATEMENT.isoformat()
+    assert detail["reconciled_through"] == _statement().isoformat()
 
 
 def test_only_open_postings_balance_accounts_reconcile(
@@ -437,7 +444,11 @@ def test_reconcile_requires_write_scope(seeded: dict[str, str], client: TestClie
     for raw in tokens.values():
         resp = client.post(
             f"/accounts/{seeded['checking']}/reconcile",
-            json={"as_of": STATEMENT.isoformat(), "statement_balance": "100.00", "dry_run": True},
+            json={
+                "as_of": _statement().isoformat(),
+                "statement_balance": "100.00",
+                "dry_run": True,
+            },
             headers={"Authorization": f"Bearer {raw}"},
         )
         assert resp.status_code == 403
@@ -463,7 +474,7 @@ def test_audit_rows_and_event_payload(
         assert change.entity_id == uuid.UUID(seeded["card"])
         assert change.before_after["before"] == {"reconciled_through": None}
         after = change.before_after["after"]
-        assert after["reconciled_through"] == STATEMENT.isoformat()
+        assert after["reconciled_through"] == _statement().isoformat()
         assert after["reconciliation_id"] == result["reconciliation_id"]
         assert after["basis"] == "posted"
         assert Decimal(after["statement_balance"]) == Decimal("425.00")
@@ -487,7 +498,7 @@ def test_audit_rows_and_event_payload(
             "path": "liabilities.card",
             "currency": "USD",
             "reconciliation_id": result["reconciliation_id"],
-            "as_of": STATEMENT.isoformat(),
+            "as_of": _statement().isoformat(),
             "basis": "posted",
             "component": "balance",
             "statement_balance": "425.0000",
@@ -627,10 +638,13 @@ class TestReconcileProperties:
         token, account, category = _setup(db_session, type_=type_)
         if type_ == "brokerage":
             account.holdings_source = "manual"
+            account.balance_true_up = False  # feed holdings only (decision 119)
             db_session.flush()
         for back, amount, status in rows:
-            _row(db_session, token, account, category, amount, TODAY - timedelta(days=back), status)
-        as_of = TODAY - timedelta(days=days_back)
+            _row(
+                db_session, token, account, category, amount, today() - timedelta(days=back), status
+            )
+        as_of = today() - timedelta(days=days_back)
         kwargs: dict[str, Any] = {
             "account_id": account.id,
             "as_of": as_of,
@@ -638,7 +652,7 @@ class TestReconcileProperties:
             "component": "cash" if type_ == "brokerage" else "balance",
             "basis": basis,
             "token": token,
-            "today": TODAY,
+            "today": today(),
         }
 
         dry = reconciliation.reconcile(db_session, dry_run=True, **kwargs)
@@ -688,34 +702,34 @@ class TestReconcileProperties:
 def test_ledger_balances_batch_matches_single_points(clean_db: None, db_session: Session) -> None:
     token, account, category = _setup(db_session)
     _, other, other_category = _setup(db_session)
-    _row(db_session, token, account, category, Decimal("50.00"), TODAY - timedelta(days=9))
+    _row(db_session, token, account, category, Decimal("50.00"), today() - timedelta(days=9))
     _row(
         db_session,
         token,
         account,
         category,
         Decimal("-5.00"),
-        TODAY - timedelta(days=4),
+        today() - timedelta(days=4),
         core.Status.PENDING,
     )
-    _row(db_session, token, other, other_category, Decimal("7.00"), TODAY - timedelta(days=2))
+    _row(db_session, token, other, other_category, Decimal("7.00"), today() - timedelta(days=2))
     points = [
-        (account.id, TODAY - timedelta(days=10)),
-        (account.id, TODAY - timedelta(days=9)),
-        (account.id, TODAY),
-        (other.id, TODAY),
+        (account.id, today() - timedelta(days=10)),
+        (account.id, today() - timedelta(days=9)),
+        (account.id, today()),
+        (other.id, today()),
     ]
     batch = reconciliation.ledger_balances(db_session, points)
-    assert batch[(account.id, TODAY - timedelta(days=10))] == {
+    assert batch[(account.id, today() - timedelta(days=10))] == {
         "posted": Decimal("0"),
         "pending_inclusive": Decimal("0"),
     }
-    assert batch[(account.id, TODAY - timedelta(days=9))]["posted"] == Decimal("50.00")
-    assert batch[(account.id, TODAY)] == {
+    assert batch[(account.id, today() - timedelta(days=9))]["posted"] == Decimal("50.00")
+    assert batch[(account.id, today())] == {
         "posted": Decimal("50.00"),
         "pending_inclusive": Decimal("45.00"),
     }
-    assert batch[(other.id, TODAY)]["posted"] == Decimal("7.00")
+    assert batch[(other.id, today())]["posted"] == Decimal("7.00")
     for account_id, as_of in points:
         for basis in reconciliation.BASES:
             single = reconciliation.ledger_balance(db_session, account_id, as_of, basis)
@@ -726,17 +740,17 @@ def test_an_adjustment_never_settles_an_expected_bill(clean_db: None, db_session
     """origin=system puts the adjustment in the review set, which would also
     put it in the matcher's pool (§5) — it is excluded explicitly there."""
     token, account, category = _setup(db_session)
-    _row(db_session, token, account, category, Decimal("100.00"), OPENED)
+    _row(db_session, token, account, category, Decimal("100.00"), _opened())
     expected = _row(
-        db_session, token, account, category, Decimal("-42.00"), STATEMENT, core.Status.EXPECTED
+        db_session, token, account, category, Decimal("-42.00"), _statement(), core.Status.EXPECTED
     )
     done = reconciliation.reconcile(
         db_session,
         account_id=account.id,
-        as_of=STATEMENT,
+        as_of=_statement(),
         statement_balance=Decimal("58.00"),
         token=token,
-        today=TODAY,
+        today=today(),
     )
     assert done.adjustment == Decimal("-42.00")  # same amount, same date as the bill
     matching.run_matching(db_session)
@@ -750,15 +764,15 @@ def test_an_adjustment_never_settles_an_expected_bill(clean_db: None, db_session
 
 def test_delete_account_removes_its_reconciliations(clean_db: None, db_session: Session) -> None:
     token, account, category = _setup(db_session)
-    _row(db_session, token, account, category, Decimal("100.00"), OPENED)
-    for as_of, figure in [(STATEMENT, "110.00"), (LATER, "110.00")]:
+    _row(db_session, token, account, category, Decimal("100.00"), _opened())
+    for as_of, figure in [(_statement(), "110.00"), (_later(), "110.00")]:
         reconciliation.reconcile(
             db_session,
             account_id=account.id,
             as_of=as_of,
             statement_balance=Decimal(figure),
             token=token,
-            today=TODAY,
+            today=today(),
         )
     plan = account_delete.preflight(db_session, account)
     assert plan["reconciliations"] == 2
@@ -784,17 +798,18 @@ def test_concurrent_reconciles_serialize_on_the_account(
         token, account, category = _setup(setup, type_=type_)
         if type_ == "brokerage":
             account.holdings_source = "manual"
+            account.balance_true_up = False  # feed holdings only (decision 119)
             setup.flush()
-        _row(setup, token, account, category, Decimal("100.00"), OPENED)
+        _row(setup, token, account, category, Decimal("100.00"), _opened())
         setup.commit()
         token_id, account_id = token.id, account.id
 
     request: dict[str, Any] = {
         "account_id": account_id,
         "component": "cash" if type_ == "brokerage" else "balance",
-        "as_of": STATEMENT,
+        "as_of": _statement(),
         "statement_balance": Decimal("125.00"),
-        "today": TODAY,
+        "today": today(),
     }
     outcomes: dict[str, Any] = {}
     first = sessionmaker()
@@ -835,7 +850,7 @@ def test_concurrent_reconciles_serialize_on_the_account(
         _count(
             migrated_engine,
             "SELECT COUNT(*) FROM transactions WHERE origin = 'system' AND date = :d",
-            d=STATEMENT,
+            d=_statement(),
         )
         == 1
     )
@@ -901,7 +916,7 @@ def test_migration_0028_round_trips(scratch_db: tuple[Config, sa.Engine]) -> Non
                 "INSERT INTO account_reconciliations (account_id, as_of, target_balance,"
                 " adjustment) VALUES (:a, :d, 100, 0)"
             ),
-            {"a": account, "d": STATEMENT},
+            {"a": account, "d": _statement()},
         )
     # A nonzero adjustment must name its transaction (the shape CHECK) ...
     with pytest.raises(IntegrityError), engine.begin() as conn:
@@ -910,7 +925,7 @@ def test_migration_0028_round_trips(scratch_db: tuple[Config, sa.Engine]) -> Non
                 "INSERT INTO account_reconciliations (account_id, as_of, target_balance,"
                 " adjustment) VALUES (:a, :d, 100, 5)"
             ),
-            {"a": account, "d": LATER},
+            {"a": account, "d": _later()},
         )
     # ... and one reconciliation per account and date, whatever the basis.
     with pytest.raises(IntegrityError), engine.begin() as conn:
@@ -919,7 +934,7 @@ def test_migration_0028_round_trips(scratch_db: tuple[Config, sa.Engine]) -> Non
                 "INSERT INTO account_reconciliations (account_id, as_of, basis,"
                 " target_balance, adjustment) VALUES (:a, :d, 'pending_inclusive', 100, 0)"
             ),
-            {"a": account, "d": STATEMENT},
+            {"a": account, "d": _statement()},
         )
 
     command.downgrade(cfg, "0027")
@@ -953,33 +968,33 @@ def test_manual_brokerage_reconciles_cash_without_touching_investments(
     assert _reconcile(client, aid, statement_balance="25").status_code == 422
     assert _reconcile(client, seeded["checking"], **cash).status_code == 422
     assert _reconcile(client, aid, statement_balance="25", component="total").status_code == 422
-    _post(client, "assets.plan", "-100", OPENED)
+    _post(client, "assets.plan", "-100", _opened())
     pos = client.post(
         f"/accounts/{aid}/positions",
         json={
             "symbol": "SYN",
             "quantity": "10",
-            "as_of": OPENED.isoformat(),
+            "as_of": _opened().isoformat(),
         },
     )
     assert pos.status_code == 201, pos.text
     price = client.post(
-        "/prices", json={"symbol": "SYN", "date": STATEMENT.isoformat(), "close": "100"}
+        "/prices", json={"symbol": "SYN", "date": _statement().isoformat(), "close": "100"}
     )
     assert price.status_code in (200, 201), price.text
     award_body = {
-        "as_of": STATEMENT.isoformat(),
-        "captured_at": datetime.now(UTC).isoformat(),
+        "as_of": _statement().isoformat(),
+        "captured_at": now().isoformat(),
         "completeness": "complete",
         "awards": [
             {
                 "symbol": "SYN",
                 "grant_ref": "SYN-G1",
-                "granted_on": OPENED.isoformat(),
+                "granted_on": _opened().isoformat(),
                 "granted_quantity": "50",
                 "vested_quantity": "0",
                 "schedule": [
-                    {"vest_date": (TODAY + timedelta(days=30)).isoformat(), "quantity": "50"}
+                    {"vest_date": (today() + timedelta(days=30)).isoformat(), "quantity": "50"}
                 ],
             }
         ],
@@ -1023,11 +1038,11 @@ def test_manual_brokerage_reconciles_cash_without_touching_investments(
     assert tx["origin"] == "system" and tx["needs_review"]
     assert sum(Decimal(p["amount"]) for p in tx["postings"]) == 0
     assert client.post(
-        "/prices", json={"symbol": "SYN", "date": STATEMENT.isoformat(), "close": "110"}
+        "/prices", json={"symbol": "SYN", "date": _statement().isoformat(), "close": "110"}
     ).status_code in (200, 201)
     assert client.get(f"/accounts/{aid}").json()["reconciliation"]["in_balance"]
     assert not _reconcile(client, aid, **cash).json()["created"]
-    _post(client, "assets.plan", "3", STATEMENT)
+    _post(client, "assets.plan", "3", _statement())
     moved = _reconcile(client, aid, **cash)
     assert moved.status_code == 409 and moved.json()["detail"]["code"] == "reconciliation_moved"
     history = client.get(f"/accounts/{aid}/reconciliations").json()

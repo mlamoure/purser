@@ -7,7 +7,7 @@ proven across every write path; the DB trigger is the structural backstop.
 """
 
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
@@ -22,6 +22,7 @@ from purser import ledger, matching, networth, transfers
 from purser.core import ledger as core
 from purser.feed import service as feed_service
 from purser.models import Account, ApiToken, AuditLog, Connection, User, Valuation
+from tests.conftest import today
 
 # --------------------------------------------------------------------------
 # API-level fixture (mirrors tests/test_ledger_api.py)
@@ -65,7 +66,7 @@ def _post_balance(client: TestClient, account_id: str, category: str, amount: st
             "account": account_id,
             "category": category,
             "amount": amount,
-            "date": date.today().isoformat(),
+            "date": today().isoformat(),
             "payee": "Seed",
         },
     )
@@ -131,7 +132,7 @@ class TestCloseZeroesBalance:
                 account_ref=str(account.id),
                 category_ref=str(seed.id),
                 amount=balance,
-                date=date.today(),
+                date=today(),
                 requested_status=core.Status.POSTED,
                 token=token,
             )
@@ -181,7 +182,7 @@ class TestClosedIsReadOnly:
                 "account": acct,
                 "category": seeded["dining"],
                 "amount": "-5.00",
-                "date": date.today().isoformat(),
+                "date": today().isoformat(),
             },
         )
         assert resp.status_code == 422
@@ -195,7 +196,7 @@ class TestClosedIsReadOnly:
                 "from_account": acct,
                 "to_account": seeded["savings"],
                 "amount": "10.00",
-                "date": date.today().isoformat(),
+                "date": today().isoformat(),
             },
         )
         assert resp.status_code == 422
@@ -233,7 +234,7 @@ class TestClosedIsReadOnly:
             account_ref=str(account.id),
             category_ref=str(seed.id),
             amount=Decimal("-10.00"),
-            date=date.today(),
+            date=today(),
             requested_status=core.Status.POSTED,
             token=token,
         )
@@ -258,7 +259,7 @@ class TestClosedIsReadOnly:
                 "INSERT INTO transactions (date, status, origin) "
                 "VALUES (:d, 'pending', 'system') RETURNING id"
             ),
-            {"d": date.today()},
+            {"d": today()},
         ).scalar_one()
         with pytest.raises((IntegrityError, ProgrammingError)) as exc:
             db_session.execute(
@@ -296,7 +297,7 @@ class TestClosePreconditions:
                     "account": seeded["checking"],
                     "category": seeded["dining"],
                     "amount": "-9.00",
-                    "date": date.today().isoformat(),
+                    "date": today().isoformat(),
                 },
             ).status_code
             == 201
@@ -340,7 +341,7 @@ class TestClosePreconditions:
                 "account": seeded["checking"],
                 "category": seeded["dining"],
                 "amount": "-15.00",
-                "date": (date.today() + timedelta(days=5)).isoformat(),
+                "date": (today() + timedelta(days=5)).isoformat(),
                 "status": "expected",
             },
         )
@@ -602,14 +603,10 @@ class TestNetWorthCutoff:
             path=f"liabilities.mortgage_{suffix}",
             actor_token_id=token.id,
         )
-        # The cutoff compares `as_of` against `closed_at.date()`, and
-        # `close_account` stamps `closed_at` in UTC. Driving the assertions off
-        # a LOCAL `date.today()` fails deterministically on an ET host between
-        # 20:00 and 24:00, when the local date lags UTC by one day and the
-        # close date is therefore "tomorrow" (issue #140). Stay on the clock
-        # the code under test uses.
-        today = datetime.now(UTC).date()
-        as_of_val = today - timedelta(days=30)
+        # The cutoff compares `as_of` against the ledger day of `closed_at`,
+        # which `close_account` stamps in UTC (issue #140): the test's day is
+        # that same UTC day.
+        as_of_val = today() - timedelta(days=30)
         db_session.add(
             Valuation(
                 account_id=account.id, as_of=as_of_val, value=Decimal("-500000"), source="manual"
@@ -618,7 +615,7 @@ class TestNetWorthCutoff:
         db_session.flush()
 
         # Before close: valuation counts.
-        before = networth.net_worth_at(db_session, today - timedelta(days=1))
+        before = networth.net_worth_at(db_session, today() - timedelta(days=1))
         assert account.id in {b["account_id"] for b in before["breakdown"]}
 
         ledger.close_account(
@@ -667,7 +664,7 @@ class TestPoolHygiene:
             account_ref=str(checking.id),
             category_ref=str(cat.id),
             amount=Decimal("-100.00"),
-            date=date.today(),
+            date=today(),
             description="transfer to savings",
             requested_status=core.Status.POSTED,
             origin=core.Origin.IMPORT,
@@ -678,7 +675,7 @@ class TestPoolHygiene:
             account_ref=str(savings.id),
             category_ref=str(cat.id),
             amount=Decimal("100.00"),
-            date=date.today(),
+            date=today(),
             description="transfer from checking",
             requested_status=core.Status.POSTED,
             origin=core.Origin.IMPORT,
@@ -729,7 +726,7 @@ def test_reopen_makes_account_writable_again(seeded: dict[str, str], client: Tes
             "account": seeded["checking"],
             "category": seeded["dining"],
             "amount": "-3.00",
-            "date": date.today().isoformat(),
+            "date": today().isoformat(),
         },
     )
     assert blocked.status_code == 422
@@ -743,7 +740,7 @@ def test_reopen_makes_account_writable_again(seeded: dict[str, str], client: Tes
             "account": seeded["checking"],
             "category": seeded["dining"],
             "amount": "-3.00",
-            "date": date.today().isoformat(),
+            "date": today().isoformat(),
         },
     )
     assert ok.status_code == 201, ok.text

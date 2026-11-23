@@ -45,6 +45,10 @@ their amount from confirmed matches (`estimate_basis`: `last`, `rolling_avg_3`,
 Once two settled amounts differ, the forecast shows an estimated occurrence
 with its range — the lowest and highest of the last six together with the
 estimate (see [Estimate range](../../explanation/forecasting/#estimate-range)).
+The admin UI marks an estimated amount `≈ −$95.00`, muted, with its basis on
+hover, and a screen reader hears "estimated −$95.00"; the forecast, the
+overdue bills and the forecast widget mark an estimated occurrence the same
+way. A fixed amount carries no mark.
 
 `dtstart` is the rule's **anchor** — the date the recurrence counts from. Rules
 that name their day (`BYMONTHDAY=6,20`, `BYDAY=FR`) barely need it; rules that

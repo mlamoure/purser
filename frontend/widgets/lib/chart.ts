@@ -53,6 +53,8 @@ export interface ChartSpec {
    * ascending by x — the forecast's pessimistic/optimistic balances. Drawn
    * in the line's shape (stepped when `step`), filled with --chart-band. */
   band?: [number, number, number][];
+  /** The balance's ISO currency for the y-axis labels; USD when unset. */
+  currency?: string | null;
   ariaLabel: string;
 }
 
@@ -134,7 +136,7 @@ export function balanceChart(spec: ChartSpec): { svg: SVGElement; scales: ChartS
           "font-size": 11,
           fill: "var(--text-muted)",
         },
-        moneyCompact(tick),
+        moneyCompact(String(tick), spec.currency),
       ),
     );
   }

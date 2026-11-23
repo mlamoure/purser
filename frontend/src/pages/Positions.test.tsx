@@ -149,6 +149,51 @@ describe("PositionsPanel (#390)", () => {
     );
   });
 
+  it("records a split: new for old shares, and cash in lieu with its lots", async () => {
+    mockApi({
+      ...CLOCK,
+      "GET /accounts/{account_id}/positions": ok([position({ tracks_lots: true, open_lots: 2 })]),
+      "POST /positions/{position_id}/events": ok({}),
+    });
+    const { user } = renderWithProviders(<PositionsPanel accountId="acct-1" />);
+    await user.click(await screen.findByRole("button", { name: "Record split of ACME" }));
+    const record = screen.getByRole("button", { name: "Record split" });
+    expect(record).toBeDisabled(); // a ratio of whole numbers first
+    await user.type(screen.getByLabelText("New shares for ACME"), "1");
+    const old = screen.getByLabelText("Old shares for ACME");
+    await user.clear(old);
+    await user.type(old, "10");
+    expect(screen.queryByLabelText("Lots the fractional share comes from")).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("Cash in lieu for ACME (optional)"), "4.25");
+    await user.selectOptions(screen.getByLabelText("Lots the fractional share comes from"), "hifo");
+    await user.click(record);
+    await waitFor(() =>
+      expect(apiMock.POST).toHaveBeenCalledWith("/positions/{position_id}/events", {
+        params: { path: { position_id: "pos-1" } },
+        body: {
+          kind: "split",
+          occurred_on: LEDGER_DAY,
+          split_numerator: 1,
+          split_denominator: 10,
+          cash_in_lieu: "4.25",
+          lot_method: "hifo",
+        },
+      }),
+    );
+  });
+
+  it("offers no split on a position that holds nothing", async () => {
+    mockApi({
+      ...CLOCK,
+      "GET /accounts/{account_id}/positions": ok([
+        position({ id: "pos-0", symbol: "SOLD", quantity: "0.000000", market_value: "0.0000" }),
+      ]),
+    });
+    renderWithProviders(<PositionsPanel accountId="acct-1" />);
+    expect(await screen.findByRole("button", { name: "Close SOLD" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Record split of SOLD" })).not.toBeInTheDocument();
+  });
+
   it("adds a position and shows the server's refusal", async () => {
     mockApi({
       ...CLOCK,

@@ -76,10 +76,28 @@ export function usePathNames(): PathName {
   );
 }
 
+/** Which way a row's money moves on the account being viewed: "credit" is
+ * money in, "debit" money out (#589). */
+export type MoneyDirection = "credit" | "debit";
+
+/** A transfer reads from the viewed account's side (#589): money in is
+ * "Transfer from <account>", money out "Transfer to <account>". */
+export function transferLabel(accountName: string, direction: MoneyDirection = "debit"): string {
+  return direction === "credit" ? `Transfer from ${accountName}` : `Transfer to ${accountName}`;
+}
+
 /** A category-cell value for display: a category path reads as its name,
- * a "[account.path]" transfer target as "Transfer to <account name>". */
-export function categoryValueLabel(value: string | null | undefined, name: PathName): string {
+ * a "[account.path]" transfer target as "Transfer to <account name>", or
+ * "Transfer from <account name>" on a credit row (#589). */
+export function categoryValueLabel(
+  value: string | null | undefined,
+  name: PathName,
+  direction: MoneyDirection = "debit",
+): string {
   if (value == null || value === "") return "—";
+  // The register's "Securities trade" choice (CategorySelect's
+  // SECURITIES_TRADE_VALUE, #591): not a category path.
+  if (value === ":securities_trade") return "Securities trade";
   const transfer = /^\[(.*)\]$/.exec(value);
-  return transfer ? `Transfer to ${name(transfer[1])}` : name(value);
+  return transfer ? transferLabel(name(transfer[1]), direction) : name(value);
 }

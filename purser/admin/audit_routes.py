@@ -33,6 +33,9 @@ class ActivityFilter(BaseModel):
         Literal["shared", "empty", "denied", "failed", "uncertain", "legacy", "changed"] | None
     ) = None
     extra: bool = False
+    # requested: calls that asked to withhold fields (privacy used);
+    # identifiable: calls whose answer returned payees, descriptions or amounts.
+    privacy: Literal["requested", "identifiable"] | None = None
     since: datetime | None = None
     until: datetime | None = None
     request_id: uuid.UUID | None = None
@@ -63,6 +66,16 @@ class SharingSummary(BaseModel):
     empty: bool = False
 
 
+class PrivacyRecord(BaseModel):
+    """What a call row says about privacy (#613): the fields the call asked to
+    withhold, the fields its answer left out, and the payee, description and
+    amount fields it returned with real values."""
+
+    requested: list[str]
+    withheld: list[str]
+    identifiable: list[str]
+
+
 class AuditIdentity(BaseModel):
     token_id: str | None = None
     name: str = "System"
@@ -88,6 +101,8 @@ class ActivityOut(BaseModel):
     outcome: str
     identity: AuditIdentity
     sharing: SharingSummary | None
+    # Null on rows written before #613 and on rows that are not calls.
+    privacy: PrivacyRecord | None
     extra_fields: list[str]
     requested_extra: list[str]
     before_after: dict[str, Any] | None
@@ -155,6 +170,10 @@ def _query(filters: ActivityFilter) -> Select[AuditLog, ApiToken, str]:
         stmt = stmt.where(outcome == filters.outcome)
     if filters.extra:
         stmt = stmt.where(AuditLog.disclosed.is_not(None), AuditLog.channel.is_not(None))
+    if filters.privacy == "requested":
+        stmt = stmt.where(func.cardinality(AuditLog.privacy_requested) > 0)
+    elif filters.privacy == "identifiable":
+        stmt = stmt.where(func.cardinality(AuditLog.identifiable) > 0)
     if filters.since:
         stmt = stmt.where(AuditLog.at >= filters.since)
     if filters.until:
@@ -194,11 +213,12 @@ def _entry(session: Session, row: AuditLog, token: ApiToken | None, outcome: str
         outcome=outcome,
         identity=AuditIdentity.model_validate(who),
         sharing=SharingSummary.model_validate(detail["sharing"]) if detail.get("sharing") else None,
+        privacy=PrivacyRecord.model_validate(detail["privacy"]) if detail.get("privacy") else None,
         extra_fields=(row.disclosed or []) if row.channel else [],
         requested_extra=detail.get("requested_extra")
         or (row.disclosed or [] if not row.channel else []),
         before_after=row.before_after,
-        technical={k: v for k, v in detail.items() if k not in {"identity", "sharing"}},
+        technical={k: v for k, v in detail.items() if k not in {"identity", "sharing", "privacy"}},
         completion_point=detail.get("completion_point")
         or ("http_send" if row.channel == "rest" else None),
     )
@@ -299,6 +319,8 @@ def export_activity(
                     "integration_id",
                     "outcome",
                     "action",
+                    "privacy_requested",
+                    "identifiable",
                     "evidence_json",
                 ]
             )
@@ -328,6 +350,8 @@ def export_activity(
                             entry.identity.integration_id or "",
                             entry.outcome,
                             safe(entry.action),
+                            " ".join(entry.privacy.requested) if entry.privacy else "",
+                            " ".join(entry.privacy.identifiable) if entry.privacy else "",
                             entry.model_dump_json(),
                         ]
                     )

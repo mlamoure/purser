@@ -40,7 +40,7 @@ from purser import crypto
 from purser import rules as rules_service
 from purser import suggestions as service
 from purser.core import ledger as core_ledger
-from tests.conftest import TEST_ENCRYPTION_KEY
+from tests.conftest import TEST_ENCRYPTION_KEY, today
 from tests.test_mcp import (  # noqa: F401 (fixture re-export)
     LiveServer,
     _mcp_call,
@@ -215,8 +215,9 @@ class TestConfirmProposes:
             None,
             None,
         )
+        # The headline reads the accounts by name (#552); the draft keeps the paths.
         assert row["headline"] == (
-            f"Link transfers between {CHECKING} and {SAVINGS} "
+            "Link transfers between Checking and Reserve "
             f"when the payee is {OUT_TEXT} (or an alias)"
         )
         assert row["evidence_summary"]["count"] == 1
@@ -523,7 +524,7 @@ class TestRejectAndSnooze:
         assert snoozed.status_code == 200, snoozed.text
         assert snoozed.json()["suggestion"]["status"] == "open"
         until = date.fromisoformat(snoozed.json()["suggestion"]["snooze_until"])
-        assert until == date.today() + timedelta(days=service.DEFAULT_SNOOZE_DAYS)
+        assert until == today() + timedelta(days=service.DEFAULT_SNOOZE_DAYS)
         assert _links(client) == []
         listed = client.get(
             "/suggestions", params={"kind": "transfer_link", "include_snoozed": True}

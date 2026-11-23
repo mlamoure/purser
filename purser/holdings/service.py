@@ -13,7 +13,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_FLOOR, Decimal
 from typing import Any
 
 from sqlalchemy import func, select
@@ -334,6 +334,15 @@ def _validated(
 ) -> tuple[Decimal, Decimal | None, Decimal | None, Decimal | None]:
     if kind not in core.KINDS:
         raise LedgerError(f"kind must be one of: {', '.join(core.KINDS)}")
+    if kind == core.SPLIT:
+        # The split path (record_split) writes its own row: a ratio, and
+        # nothing a trade carries.
+        if quantity != 0 or any(v is not None for v in (price, fees, cost_basis)):
+            raise LedgerError(
+                "a split takes a ratio (split_numerator:split_denominator) and an optional "
+                "cash_in_lieu; no quantity, price, fees or cost_basis"
+            )
+        return Decimal(0), None, None, None
     quantity = checked(core.check_quantity, quantity)
     if kind == core.TRANSFER_OUT and (price is not None or fees is not None):
         raise LedgerError(
@@ -452,6 +461,8 @@ def _record(
     gross_quantity: Decimal | None = None,
     withheld_quantity: Decimal | None = None,
     defer_projection: bool = False,
+    split: tuple[int, int] | None = None,
+    in_lieu_of: uuid.UUID | None = None,
 ) -> _Written:
     """Record one event; the caller holds the account lock. A buy or sell
     that moves cash posts (or links) its cash first (``holdings.cash``):
@@ -474,6 +485,11 @@ def _record(
             f"occurred_on {occurred_on.isoformat()} is in the future; record an event "
             "once it has happened"
         )
+    if (kind == core.SPLIT) != (split is not None):
+        raise LedgerError(
+            "record a split with its ratio (record_split, or kind 'split' with "
+            "split_numerator and split_denominator)"
+        )
     quantity, price, fees, cost_basis = _validated(kind, quantity, price, fees, cost_basis)
     gross_quantity, withheld_quantity = _vest_counts(
         kind, quantity, gross_quantity, withheld_quantity
@@ -487,6 +503,7 @@ def _record(
         price=price,
         fees=fees,
         cost_basis=cost_basis,
+        split=split,
     )
     _facts, book = _facts_and_book(session, position, trial)
     allocations = _allocations(
@@ -569,6 +586,9 @@ def _record(
         transaction_id=cash_tx.id if cash_tx is not None else None,
         gross_quantity=gross_quantity,
         withheld_quantity=withheld_quantity,
+        split_numerator=split[0] if split is not None else None,
+        split_denominator=split[1] if split is not None else None,
+        in_lieu_of=in_lieu_of,
     )
     session.add(event)
     opened_before = position.opened_on
@@ -598,6 +618,8 @@ def _record(
             "note": event.note,
             "source_note": event.source_note,
             **({"replaces_id": str(replaces)} if replaces is not None else {}),
+            **({"split": f"{split[0]}:{split[1]}"} if split is not None else {}),
+            **({"in_lieu_of": str(in_lieu_of)} if in_lieu_of is not None else {}),
             **(
                 {
                     "gross_quantity": str(gross_quantity),
@@ -1259,6 +1281,175 @@ def record_sale(
 
 
 @dataclass(frozen=True)
+class SplitRecorded:
+    """A split (#624): the split event, and its cash-in-lieu sale when the
+    broker paid cash for the fractional share."""
+
+    split: PositionEvent
+    in_lieu: PositionEvent | None
+    before: Decimal  # shares held the day before the effective date
+    after: Decimal  # the shares those became
+    fraction: Decimal | None  # the fractional share paid in cash
+    cash_in_lieu: Decimal | None
+
+
+CENT = Decimal("0.01")
+
+
+def parse_ratio(raw: str) -> tuple[int, int]:
+    """A split ratio as people write it, ``2:1`` (forward) or ``1:10``
+    (reverse): new shares for old."""
+    parts = raw.strip().split(":")
+    if len(parts) != 2 or not all(p.strip().isdigit() for p in parts):
+        raise LedgerError(
+            f"a split ratio is new:old shares in whole numbers, e.g. 2:1 or 1:10 (got {raw!r})"
+        )
+    return int(parts[0]), int(parts[1])
+
+
+def check_ratio(numerator: int, denominator: int) -> tuple[int, int]:
+    for term in (numerator, denominator):
+        if isinstance(term, bool) or not 1 <= term <= core.MAX_SPLIT_TERM:
+            raise LedgerError(
+                f"a split ratio's terms are whole numbers from 1 to {core.MAX_SPLIT_TERM:,}"
+            )
+    if numerator == denominator:
+        raise LedgerError("a 1:1 split changes nothing")
+    return numerator, denominator
+
+
+def record_split(
+    session: Session,
+    *,
+    position_id: uuid.UUID,
+    occurred_on: date,
+    numerator: int,
+    denominator: int,
+    cash_in_lieu: Decimal | None = None,
+    note: str | None = None,
+    source_note: str | None = None,
+    replaces: uuid.UUID | None = None,
+    settle_on: date | None = None,
+    transaction_id: uuid.UUID | None = None,
+    force_cash: bool = False,
+    allocation: AllocationRequest | None = None,
+    token: ApiToken | None,
+    today: date | None = None,
+) -> SplitRecorded:
+    """Record a stock split effective ``occurred_on`` (#624, decision 127):
+    every share the position held the day before becomes
+    ``numerator / denominator`` shares at the start of that day (rounded to
+    six places), each lot keeping its basis, acquisition date and term.
+
+    ``cash_in_lieu``: the broker paid cash for the fractional share the
+    split left. The fraction (the shares after the split less their whole
+    number) leaves in a ``sell`` of that many shares whose net proceeds are
+    exactly this amount (in cents), recorded with the split and reversed with
+    it: cash, the double-count check, a link to the broker's row
+    (``transaction_id``), ``settle_on``, ``force_cash`` and, on a position
+    that tracks lots, the lots it draws on (``allocation``) work as for any
+    sale (decision 103). Refused on a position that holds nothing the day
+    before, a second split on one day, and a cash in lieu with no fraction
+    left."""
+    today = today or clock.ledger_today()
+    numerator, denominator = check_ratio(numerator, denominator)
+    account, position = lock_position(session, position_id)
+    if cash_in_lieu is None and (
+        settle_on is not None or transaction_id is not None or allocation is not None or force_cash
+    ):
+        raise LedgerError(
+            "settle_on, transaction_id, force_cash and lot allocations apply to a split's "
+            "cash_in_lieu"
+        )
+    if cash_in_lieu is not None:
+        cash_in_lieu = checked(core.check_money, cash_in_lieu, "cash_in_lieu")
+        if cash_in_lieu <= 0 or cash_in_lieu != cash_in_lieu.quantize(CENT):
+            raise LedgerError("cash_in_lieu is the cash paid for the fraction, in cents, above 0")
+    rows = projection.position_events(session, [position.id]).get(position.id, [])
+    facts = [projection.event_fact(r) for r in rows]
+    if any(
+        e.kind == core.SPLIT and e.occurred_on == occurred_on and e.id != replaces
+        for e in core.effective_events(facts)
+    ):
+        raise LedgerError(
+            f"{position.symbol} already has a split effective {occurred_on.isoformat()}; "
+            "reverse it to record another"
+        )
+    try:
+        before = core.Timeline(core.quantity_timeline(facts)).quantity_on(
+            occurred_on - timedelta(days=1)
+        )
+    except (core.NegativeQuantity, core.OutOfRange) as exc:  # never stored
+        raise LedgerError(f"{position.symbol}: {exc}") from exc
+    if before <= 0:
+        raise LedgerError(
+            f"{position.symbol} holds no shares on {(occurred_on - timedelta(days=1)).isoformat()}"
+            ", the day before the split takes effect; a split changes the shares held "
+            "before its effective date"
+        )
+    after = core.split_quantity(before, numerator, denominator)
+    fraction = after - after.to_integral_value(rounding=ROUND_FLOOR)
+    if cash_in_lieu is not None and fraction == 0:
+        raise LedgerError(
+            f"the split leaves {after} shares, a whole number: there is no fractional share "
+            "for cash in lieu"
+        )
+    written = _record(
+        session,
+        account,
+        position,
+        kind=core.SPLIT,
+        occurred_on=occurred_on,
+        quantity=Decimal(0),
+        note=note,
+        source_note=source_note,
+        replaces=replaces,
+        token=token,
+        today=today,
+        split=(numerator, denominator),
+        defer_projection=True,
+    )
+    in_lieu: PositionEvent | None = None
+    if cash_in_lieu is not None:
+        # The fraction leaves as a sale whose proceeds are exactly the cash:
+        # a price to six places whose product with the fraction rounds to it.
+        price = (cash_in_lieu / fraction).quantize(core.PRICE_QUANT)
+        if trade_cash.cash_amount(core.SELL, fraction, price, None) != cash_in_lieu:
+            raise LedgerError(  # unreachable for a fraction below 1 and a sum in cents
+                f"cash_in_lieu {cash_in_lieu} cannot be expressed for {fraction} shares"
+            )
+        in_lieu = _record(
+            session,
+            account,
+            position,
+            kind=core.SELL,
+            occurred_on=occurred_on,
+            quantity=fraction,
+            price=price,
+            note="cash in lieu of a fractional share",
+            source_note=source_note,
+            token=token,
+            today=today,
+            proceeds_to=trade_cash.CASH,
+            settle_on=settle_on,
+            transaction_id=transaction_id,
+            force_cash=force_cash,
+            allocation=allocation,
+            in_lieu_of=written.event.id,
+            defer_projection=True,
+        ).event
+    projection.project_account(session, account, from_date=occurred_on, today=today)
+    return SplitRecorded(
+        split=written.event,
+        in_lieu=in_lieu,
+        before=before,
+        after=after,
+        fraction=fraction if in_lieu is not None else None,
+        cash_in_lieu=cash_in_lieu,
+    )
+
+
+@dataclass(frozen=True)
 class Recorded:
     position: Position
     event: PositionEvent
@@ -1332,12 +1523,69 @@ def reverse_event(
     today: date | None = None,
 ) -> PositionEvent:
     """Reverse an event: a mirror row pointing at it, after which neither
-    counts. Refused when the rest of the history would then go below zero."""
+    counts. Refused when the rest of the history would then go below zero.
+    A split's cash in lieu goes with it: its sale is reversed first, so the
+    shares and the cash are back exactly as before the split (#624); that
+    sale alone is never reversed (reverse the split)."""
     today = today or clock.ledger_today()
     original = session.get(PositionEvent, event_id)
     if original is None:
         raise NotFoundError(f"position event {event_id} not found")
     account, position = lock_position(session, original.position_id)
+    if original.in_lieu_of is not None:
+        raise LedgerError(
+            f"position event {original.id} is the cash in lieu of split {original.in_lieu_of}; "
+            "reverse the split, which reverses its cash in lieu with it"
+        )
+    if original.kind == core.SPLIT and original.reverses_id is None:
+        in_lieu = _standing_in_lieu(session, original)
+        if in_lieu is not None:
+            _reverse(session, account, position, in_lieu, note=note, token=token, today=today)
+    reversal = _reverse(session, account, position, original, note=note, token=token, today=today)
+    projection.project_account(session, account, from_date=original.occurred_on, today=today)
+    return reversal
+
+
+def in_lieu_reversal(session: Session, reversal: PositionEvent) -> PositionEvent | None:
+    """For the reversal of a split, the reversal of its cash-in-lieu sale
+    written with it (None otherwise)."""
+    if reversal.kind != core.SPLIT or reversal.reverses_id is None:
+        return None
+    sale = session.execute(
+        select(PositionEvent.id).where(PositionEvent.in_lieu_of == reversal.reverses_id)
+    ).scalar_one_or_none()
+    if sale is None:
+        return None
+    return session.execute(
+        select(PositionEvent).where(PositionEvent.reverses_id == sale)
+    ).scalar_one_or_none()
+
+
+def _standing_in_lieu(session: Session, split: PositionEvent) -> PositionEvent | None:
+    """The split's cash-in-lieu sale, unless it is reversed."""
+    sale = session.execute(
+        select(PositionEvent).where(PositionEvent.in_lieu_of == split.id)
+    ).scalar_one_or_none()
+    if sale is None:
+        return None
+    reversed_ = session.execute(
+        select(PositionEvent.id).where(PositionEvent.reverses_id == sale.id)
+    ).first()
+    return None if reversed_ is not None else sale
+
+
+def _reverse(
+    session: Session,
+    account: Account,
+    position: Position,
+    original: PositionEvent,
+    *,
+    note: str | None,
+    token: ApiToken | None,
+    today: date,
+) -> PositionEvent:
+    """Write one reversal under the account lock the caller holds; the
+    caller projects."""
     if original.reverses_id is not None:
         raise LedgerError("a reversal cannot itself be reversed; record the event again instead")
     already = session.execute(
@@ -1366,6 +1614,8 @@ def reverse_event(
         transaction_id=undone.id if undone is not None else None,
         gross_quantity=original.gross_quantity,
         withheld_quantity=original.withheld_quantity,
+        split_numerator=original.split_numerator,
+        split_denominator=original.split_denominator,
     )
     session.add(reversal)
     session.flush()
@@ -1416,7 +1666,6 @@ def reverse_event(
             quantity_held=str(held),
         ),
     )
-    projection.project_account(session, account, from_date=original.occurred_on, today=today)
     return reversal
 
 
@@ -1680,6 +1929,11 @@ def switch_source(
     if source == "manual":
         account.manual_period_open = True
     switched: dict[str, Any] = {"holdings_source_changed_at": switched_at.isoformat()}
+    # The balance true-up (decision 119) belongs to feed holdings: off with
+    # hand-tracked ones (CHECK accounts_balance_true_up_feed_brokerage), and
+    # on again, the default for a feed-holdings account, back on the feed.
+    account.balance_true_up = source == "feed"
+    switched["balance_true_up"] = account.balance_true_up
     if source == "feed" and account.feed_balance_is_cash:
         # The cash opt-in (decision 103) belongs to manual holdings: a feed
         # account's balance is market value again, so it leaves the drift
@@ -1780,6 +2034,55 @@ class PositionState:
     open_lots: int = 0
 
 
+def _state_of(
+    position: Position,
+    facts: list[core.Event],
+    book: core.PriceBook | None,
+    lot_book: core_lots.Book | None,
+    *,
+    stale_days: int,
+    today: date,
+) -> PositionState:
+    try:
+        state = core.Timeline(core.quantity_timeline(facts)).state_on(today)
+    except core.OutOfRange as exc:  # never stored by the writes; a 422, not a 500
+        raise LedgerError(f"{position.symbol}: {exc}") from exc
+    quantity = state.quantity if state is not None else Decimal(0)
+    basis = state.basis if state is not None else Decimal(0)
+    lots_basis: core_lots.Basis | None = None
+    open_lots = 0
+    if lot_book is not None and lot_book.counted(today):
+        # The lots' basis, never the running average (decision 107).
+        lots_basis = core_lots.position_basis(lot_book, today, quantity)
+        basis = lots_basis.basis
+        open_lots = sum(1 for lot in lot_book.counted(today) if lot_book.remaining(lot) > 0)
+    # A value that does not fit an amount at this close keeps the close
+    # and has no value, as in the projection (core.valued). A close from
+    # before a split is in pre-split shares (core.adjusted_close, #624).
+    close = core.adjusted_close(
+        book.on(today) if book is not None else None, core.split_points(facts), today
+    )
+    worth = core.valued(quantity, close)
+    price, market = worth
+    return PositionState(
+        position=position,
+        quantity=quantity,
+        cost_basis=basis,
+        price=price,
+        market_value=market,
+        value_out_of_range=worth.out_of_range,
+        # Zero shares are valued on nothing: their close cannot be
+        # stale (the price job no longer asks for it either).
+        stale_price=quantity > 0
+        and price is not None
+        and core.stale(price.price_date, today, stale_days),
+        unrealized_gain=core.unrealized_gain(market, basis) if quantity > 0 else None,
+        events=len(core.effective_events(facts)),
+        lots=lots_basis,
+        open_lots=open_lots,
+    )
+
+
 def position_states(
     session: Session,
     account: Account,
@@ -1788,57 +2091,51 @@ def position_states(
     stale_days: int,
     today: date | None = None,
 ) -> list[PositionState]:
+    """Every position of ``account`` as it stands ``today``. The closes are
+    the ones in effect today only (``projection.latest_books``, #404)."""
     today = today or clock.ledger_today()
     stmt = select(Position).where(Position.account_id == account.id)
     if not include_closed:
         stmt = stmt.where(Position.closed_at.is_(None))
     positions = list(session.execute(stmt.order_by(Position.symbol, Position.opened_on)).scalars())
     rows = projection.position_events(session, [p.id for p in positions])
-    books = projection.price_books(session, {p.symbol for p in positions}, upper=today)
+    books = projection.latest_books(session, {p.symbol for p in positions}, today=today)
     all_facts = {p.id: [projection.event_fact(r) for r in rows.get(p.id, [])] for p in positions}
     lot_books = lotbook.books(session, all_facts)
-    out: list[PositionState] = []
-    for position in positions:
-        facts = all_facts[position.id]
-        book = books.get(position.symbol)
-        try:
-            state = core.Timeline(core.quantity_timeline(facts)).state_on(today)
-        except core.OutOfRange as exc:  # never stored by the writes; a 422, not a 500
-            raise LedgerError(f"{position.symbol}: {exc}") from exc
-        quantity = state.quantity if state is not None else Decimal(0)
-        basis = state.basis if state is not None else Decimal(0)
-        lots_basis: core_lots.Basis | None = None
-        open_lots = 0
-        lot_book = lot_books.get(position.id)
-        if lot_book is not None and lot_book.counted(today):
-            # The lots' basis, never the running average (decision 107).
-            lots_basis = core_lots.position_basis(lot_book, today, quantity)
-            basis = lots_basis.basis
-            open_lots = sum(1 for lot in lot_book.counted(today) if lot_book.remaining(lot) > 0)
-        # A value that does not fit an amount at this close keeps the close
-        # and has no value, as in the projection (core.valued).
-        worth = core.valued(quantity, book.on(today) if book is not None else None)
-        price, market = worth
-        out.append(
-            PositionState(
-                position=position,
-                quantity=quantity,
-                cost_basis=basis,
-                price=price,
-                market_value=market,
-                value_out_of_range=worth.out_of_range,
-                # Zero shares are valued on nothing: their close cannot be
-                # stale (the price job no longer asks for it either).
-                stale_price=quantity > 0
-                and price is not None
-                and core.stale(price.price_date, today, stale_days),
-                unrealized_gain=core.unrealized_gain(market, basis) if quantity > 0 else None,
-                events=len(core.effective_events(facts)),
-                lots=lots_basis,
-                open_lots=open_lots,
-            )
+    return [
+        _state_of(
+            position,
+            all_facts[position.id],
+            books.get(position.symbol),
+            lot_books.get(position.id),
+            stale_days=stale_days,
+            today=today,
         )
-    return out
+        for position in positions
+    ]
+
+
+def position_state(
+    session: Session, position: Position, *, stale_days: int, today: date | None = None
+) -> PositionState:
+    """One position as it stands ``today``: what ``position_states`` reports
+    for it, from its own events, lots and close alone (#404) — the REST
+    answer to a write on one position and MCP ``record_position``."""
+    today = today or clock.ledger_today()
+    facts = [
+        projection.event_fact(r)
+        for r in projection.position_events(session, [position.id]).get(position.id, [])
+    ]
+    books = projection.latest_books(session, {position.symbol}, today=today)
+    lot_books = lotbook.books(session, {position.id: facts})
+    return _state_of(
+        position,
+        facts,
+        books.get(position.symbol),
+        lot_books.get(position.id),
+        stale_days=stale_days,
+        today=today,
+    )
 
 
 def list_events(session: Session, position_id: uuid.UUID) -> list[PositionEvent]:

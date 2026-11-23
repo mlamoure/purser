@@ -1176,7 +1176,7 @@ def unvested(session: Session, account: Account, *, today: date | None = None) -
     for v in views:
         if v.unvested > 0:
             by_symbol.setdefault(v.award.symbol, []).append(v)
-    books = projection.price_books(session, set(by_symbol), upper=today)
+    books = projection.latest_books(session, set(by_symbol), today=today)
     out = []
     for symbol, vs in sorted(by_symbol.items()):
         units = sum((v.unvested for v in vs), Decimal(0))

@@ -15,10 +15,9 @@ from alembic import command
 from alembic.config import Config
 
 import purser.config
-from tests.conftest import TEST_ENCRYPTION_KEY
+from tests.conftest import TEST_ENCRYPTION_KEY, today
 
 DB = "purser_asset_ledger"
-TODAY = datetime.now(UTC).date()
 
 
 @pytest.fixture
@@ -100,7 +99,7 @@ def test_valuations_become_entries_and_the_downgrade_takes_them_back(
     scratch_db: tuple[Config, sa.Engine],
 ) -> None:
     cfg, engine = scratch_db
-    d = lambda n: TODAY - timedelta(days=n)  # noqa: E731
+    d = lambda n: today() - timedelta(days=n)  # noqa: E731
     closed_at = datetime.combine(d(10), datetime.min.time(), tzinfo=UTC) + timedelta(hours=12)
     with engine.begin() as conn:
         checking = _account(conn, "assets.checking", "checking")
@@ -133,11 +132,11 @@ def test_valuations_become_entries_and_the_downgrade_takes_them_back(
     assert _balance(engine, house, d(100)) == Decimal("50000")  # before any valuation
     assert _balance(engine, house, d(90)) == Decimal("300000")
     assert _balance(engine, house, d(30)) == Decimal("320000")
-    assert _balance(engine, house, TODAY) == Decimal("320000")
+    assert _balance(engine, house, today()) == Decimal("320000")
     assert _balance(engine, cabin, d(40)) == Decimal("90000")
     assert _balance(engine, cabin, d(11)) == Decimal("90000")
     assert _balance(engine, cabin, d(10)) == Decimal("0")  # its close date
-    assert _balance(engine, cabin, TODAY) == Decimal("0")
+    assert _balance(engine, cabin, today()) == Decimal("0")
     with engine.connect() as conn:
         reval = conn.execute(
             sa.text("SELECT id FROM accounts WHERE path = CAST('equity.revaluation' AS ltree)")
@@ -167,14 +166,14 @@ def test_valuations_become_entries_and_the_downgrade_takes_them_back(
         ).all()
         dirty = conn.execute(sa.text("SELECT networth_dirty_from FROM balance_watermark")).scalar()
     assert unbalanced == []
-    assert _balance(engine, reval, TODAY) == Decimal("-270000")  # house only; cabin nets to 0
+    assert _balance(engine, reval, today()) == Decimal("-270000")  # house only; cabin nets to 0
     assert Decimal(stored[house]) == Decimal("320000"), rows
     assert Decimal(stored[cabin]) == Decimal("0")
     assert dirty is not None and dirty <= d(90)
 
     command.downgrade(cfg, "0053")
-    assert _balance(engine, house, TODAY) == Decimal("50000")
-    assert _balance(engine, cabin, TODAY) == Decimal("0")
+    assert _balance(engine, house, today()) == Decimal("50000")
+    assert _balance(engine, cabin, today()) == Decimal("0")
     with engine.connect() as conn:
         left = conn.execute(
             sa.text(

@@ -106,7 +106,7 @@ describe("useFeedConnection", () => {
 
     expect(apiMock.POST).toHaveBeenCalledWith("/connections/{connection_id}/map", {
       params: { path: { connection_id: "c-1" } },
-      body: { external_id: "ext-1", create },
+      body: { external_id: "ext-1", starting_balance: false, create },
     });
     expect(result.current.discovered[0].mapped_account_path).toBe("assets.everyday_checking");
   });

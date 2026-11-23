@@ -23,15 +23,16 @@ from sqlalchemy.orm import Session
 from purser import clock
 from purser.mcp import presentation
 from purser.mcp._registry import _principal, _run, _token_row, audited_tool
-from purser.mcp.privacy import NOTHING, Emits
 from purser.mcp.toolschemas import (
     HoldingsResult,
     LotAllocationInput,
     RecordPositionResult,
     RecordSaleResult,
+    RecordSplitResult,
     ReopenPositionResult,
     ReversePositionEventResult,
 )
+from purser.privacy import NOTHING, Emits
 
 if TYPE_CHECKING:
     from purser.holdings.service import Sale
@@ -494,16 +495,11 @@ async def record_position(
         target = session.get(Account, recorded.position.account_id)
         assert target is not None
         today = clock.ledger_today()
-        state = next(
-            s
-            for s in holdings_service.position_states(
-                session,
-                target,
-                include_closed=True,
-                stale_days=appsettings.effective().price_stale_days,
-                today=today,
-            )
-            if s.position.id == recorded.position.id
+        state = holdings_service.position_state(
+            session,
+            recorded.position,
+            stale_days=appsettings.effective().price_stale_days,
+            today=today,
         )
         price = state.price
         payload: dict[str, Any] = {
@@ -812,6 +808,157 @@ def _sale_answer(sale: "Sale", *, sold: Decimal, trade_date: str) -> CallToolRes
     return presentation.three_tier(headline, payload)
 
 
+@audited_tool(
+    kind="write",
+    entity="position",
+    scope="write",
+    emits=Emits(
+        amount=(
+            "cash_in_lieu.amount",
+            "cash_in_lieu.lots.cost_basis",
+            "cash_in_lieu.lots.proceeds",
+            "cash_in_lieu.lots.realized_gain",
+        )
+    ),
+)
+async def record_split(
+    account: str,
+    symbol: str,
+    ratio: str,
+    effective_date: str,
+    cash_in_lieu: str | None = None,
+    settle_date: str | None = None,
+    transaction_id: str | None = None,
+    force_cash: bool = False,
+    lots: list[LotAllocationInput] | None = None,
+    lot_method: str | None = None,
+    note: str | None = None,
+) -> Annotated[CallToolResult, RecordSplitResult]:
+    """Record a stock split of symbol on a manually tracked brokerage
+    account (write scope). ratio is new:old shares — '2:1' for a 2-for-1
+    forward split, '1:10' for a 1-for-10 reverse split; effective_date
+    (YYYY-MM-DD, today or earlier) is the first day the shares trade split.
+    At the start of that day every share held the day before becomes that
+    many (six decimal places); each lot keeps its total basis, acquisition
+    date and term, so its basis per share is divided by the ratio. Value
+    stays continuous: a close from before the split is divided by the ratio.
+
+    cash_in_lieu (a decimal string, in cents): the cash the broker paid for
+    the fractional share the split left. The fraction leaves in a sale whose
+    proceeds are exactly that cash, recorded and later reversed with the
+    split; settle_date, transaction_id (link the broker's own cash row),
+    force_cash and, on a position that tracks lots, lots or lot_method
+    (fifo, lifo, hifo) apply to it as in record_sale, including the
+    cash_already_recorded refusal. A wrong split is undone with
+    reverse_position_event(event_id), which restores the shares, the lots
+    and the cash exactly; then record the right one. Refused when the
+    position holds nothing the day before, for a second split on one day,
+    and for cash_in_lieu when the split leaves a whole number of shares."""
+
+    def op(session: Session) -> CallToolResult:
+        import uuid
+
+        from purser.holdings import service as holdings_service
+        from purser.holdings.cash import CashAlreadyRecorded
+        from purser.ledger import LedgerError
+
+        principal = _principal()
+        numerator, denominator = holdings_service.parse_ratio(ratio)
+        try:
+            link = uuid.UUID(transaction_id) if transaction_id else None
+        except ValueError as exc:
+            raise ValueError(f"transaction_id must be a UUID, got {transaction_id!r}") from exc
+        acct = ledger_service_resolve(session, account)
+        position = holdings_service.open_position(
+            session, acct.id, holdings_service.symbol_of(symbol)
+        )
+        if position is None:
+            raise LedgerError(f"no open {symbol} position on {acct.path}")
+        allocation = (
+            holdings_service.resolve_allocation(
+                session, position.id, method=lot_method, items=_allocation_items(lots)
+            )
+            if lots or lot_method
+            else None
+        )
+        try:
+            recorded = holdings_service.record_split(
+                session,
+                position_id=position.id,
+                occurred_on=date_type.fromisoformat(effective_date),
+                numerator=numerator,
+                denominator=denominator,
+                cash_in_lieu=_decimal(cash_in_lieu, "cash_in_lieu"),
+                note=note,
+                settle_on=date_type.fromisoformat(settle_date) if settle_date else None,
+                transaction_id=link,
+                force_cash=force_cash,
+                allocation=allocation,
+                token=_token_row(session, principal),
+            )
+        except CashAlreadyRecorded as exc:
+            raise LedgerError(f"cash_already_recorded: {exc}") from exc
+        return _split_answer(
+            session,
+            position,
+            recorded,
+            ratio=f"{numerator}:{denominator}",
+            linked=link is not None,
+        )
+
+    return await _run(op)
+
+
+def _split_answer(
+    session: Session, position: Any, recorded: Any, *, ratio: str, linked: bool
+) -> CallToolResult:
+    """record_split's three tiers."""
+    from purser.models import LotDisposition, Transaction
+
+    in_lieu: dict[str, Any] | None = None
+    sale = recorded.in_lieu
+    if sale is not None:
+        cash_row = session.get(Transaction, sale.transaction_id) if sale.transaction_id else None
+        in_lieu = {
+            "event_id": str(sale.id),
+            "fraction": _plain(recorded.fraction),
+            "amount": _cents(recorded.cash_in_lieu),
+            "settle_on": (cash_row.date if cash_row is not None else sale.occurred_on).isoformat(),
+            "transaction_id": str(sale.transaction_id) if sale.transaction_id else None,
+            "linked": linked,
+        }
+        dispositions = list(
+            session.execute(
+                select(LotDisposition).where(LotDisposition.event_id == sale.id)
+            ).scalars()
+        )
+        if dispositions:
+            in_lieu["lots"] = _lots_summary(dispositions)
+    effective = recorded.split.occurred_on.isoformat()
+    payload: dict[str, Any] = {
+        "position": {
+            "position_id": str(position.id),
+            "symbol": position.symbol,
+            "quantity_before": _plain(recorded.before),
+            "quantity_after": _plain(recorded.after),
+        },
+        "ratio": ratio,
+        "effective_date": effective,
+        "event_id": str(recorded.split.id),
+        "cash_in_lieu": in_lieu,
+    }
+    headline = (
+        f"Recorded a {ratio} split of {position.symbol} effective {effective}: "
+        f"{_plain(recorded.before)} -> {_plain(recorded.after)} shares"
+    )
+    if in_lieu is not None:
+        headline += (
+            f"; {in_lieu['fraction']} share paid as {in_lieu['amount']} cash in lieu on "
+            f"{in_lieu['settle_on']}"
+        )
+    return presentation.three_tier(headline + ".", payload)
+
+
 @audited_tool(kind="write", entity="position", scope="write", emits=NOTHING)
 async def reverse_position_event(
     event_id: str, note: str | None = None
@@ -826,7 +973,9 @@ async def reverse_position_event(
     when the position is closed: a closed position is reopened first (REST
     PATCH /positions/{id} with closed=false). A trade's cash row in
     review_batch (flag securities_trade) is corrected this way, never with
-    update_transaction or confirm_transfer. note says why (optional)."""
+    update_transaction or confirm_transfer. Reversing a split (record_split)
+    reverses its cash-in-lieu sale with it; that sale is never reversed
+    alone. note says why (optional)."""
 
     def op(session: Session) -> CallToolResult:
         import uuid
@@ -864,11 +1013,30 @@ async def reverse_position_event(
             },
             "cash": cash,
         }
-        headline = (
-            f"Reversed the {original.kind} of {_plain(Decimal(original.quantity))} "
-            f"{position.symbol} on {original.occurred_on.isoformat()}: the position now holds "
-            f"{_plain(held)} shares"
-        )
+        if original.kind == "split":
+            what = (
+                f"the {original.split_numerator}:{original.split_denominator} split of "
+                f"{position.symbol} effective {original.occurred_on.isoformat()}"
+            )
+            lieu = holdings_service.in_lieu_reversal(session, reversal)
+            if lieu is not None:
+                sale = session.get(PositionEvent, lieu.reverses_id)
+                assert sale is not None
+                payload["cash_in_lieu"] = (
+                    {
+                        "transaction_id": str(sale.transaction_id),
+                        "undone_by": str(lieu.transaction_id),
+                    }
+                    if sale.transaction_id is not None and lieu.transaction_id is not None
+                    else None
+                )
+                what += " and its cash in lieu"
+        else:
+            what = (
+                f"the {original.kind} of {_plain(Decimal(original.quantity))} "
+                f"{position.symbol} on {original.occurred_on.isoformat()}"
+            )
+        headline = f"Reversed {what}: the position now holds {_plain(held)} shares"
         if cash is not None:
             headline += (
                 f"; its cash (transaction {cash['transaction_id']}) is undone by transaction "

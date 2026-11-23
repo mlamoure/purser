@@ -76,3 +76,62 @@ body {
     opacity: 1;
   }
 }
+
+/* The balance chart's entrance (#594): the line strokes itself in left to
+ * right (pathLength=1, so a dash of 1 is the whole line), the gradient fill
+ * is uncovered behind it at the same pace, the low/high and today dots pop in as the line
+ * arrives, and today's dot pulses softly twice. Motion is decoration only:
+ * with reduced motion everything is simply drawn. */
+@keyframes chart-draw {
+  from { stroke-dashoffset: 1; }
+  to { stroke-dashoffset: 0; }
+}
+@keyframes chart-rise {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes chart-reveal {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+@keyframes chart-pop {
+  0% { transform: scale(0); }
+  70% { transform: scale(1.3); }
+  100% { transform: scale(1); }
+}
+@keyframes chart-pulse {
+  0% { transform: scale(1); opacity: 0.45; }
+  100% { transform: scale(3.2); opacity: 0; }
+}
+.chart-draw {
+  stroke-dasharray: 1;
+  animation: chart-draw 1.1s cubic-bezier(0.65, 0, 0.35, 1) both;
+}
+.chart-rise {
+  animation: chart-rise 0.6s ease-out both;
+}
+.chart-reveal {
+  transform-box: fill-box;
+  transform-origin: left center;
+  animation: chart-reveal 1.1s cubic-bezier(0.65, 0, 0.35, 1) both;
+}
+.chart-pop {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: chart-pop 0.45s ease-out 0.95s both;
+}
+.chart-pulse {
+  transform-box: fill-box;
+  transform-origin: center;
+  opacity: 0;
+  animation: chart-pulse 1.8s ease-out 1.2s 2;
+}
+@media (prefers-reduced-motion: reduce) {
+  .chart-draw,
+  .chart-rise,
+  .chart-reveal,
+  .chart-pop,
+  .chart-pulse {
+    animation: none;
+  }
+}

@@ -1,26 +1,29 @@
-"""Minimal disclosure to agents (issue #437, DESIGN §9).
+"""Agent-requested privacy (issue #613, DESIGN §9; first built in #437).
 
-Everything a tool returns lands in the agent's model-vendor context, so a tool
-returns only what the user's privacy defaults allow, plus what the agent asks
-for with ``include``. There is no approval step: the agent decides, the tool
-guidance teaches it to choose well, and two user settings (both off by
-default) set the defaults:
+An agent that reads data into its conversation may send it to its model
+provider, so an agent can ask Purser, per call, to leave out what the
+question or action does not need. Nothing is withheld unless the call asks:
+most financial questions need payees or amounts, and a total is the answer
+when the question is about a total. ``withhold`` takes any of:
 
-- ``privacy_purchase``: payee names become stable references (``py_...``,
-  ``crypto.payee_ref``); descriptions, posting memos, schedule and
-  suggestion names and rule text are omitted.
-- ``privacy_amount``: single-transaction amounts are omitted. Aggregates
-  (totals, balances, net worth, series) stay exact: calling an aggregate
-  tool is already the disclosure choice.
+- ``payee``: payee names become stable references (``py_...``,
+  ``crypto.payee_ref``) the agent can filter and act with.
+- ``description``: descriptions, posting memos, schedule and suggestion
+  names and rule text are omitted.
+- ``amount``: single-transaction amounts (and running balances, which give
+  them away by subtraction) are omitted. Aggregates (totals, balances, net
+  worth, series) stay exact: calling an aggregate is the disclosure choice.
 
-External account identifiers are omitted for every agent unless included.
+External account identifiers are a separate, security default: omitted for
+every agent unless a call passes ``include: ["external_ids"]``.
 Amounts are exact or omitted, never rounded or noised, and every omitted
 field is NAMED in a ``withheld`` list: an agent that sees a field missing
 concludes "unknown" and may try to fix it (#176 Q1).
 
-Each tool declares what it emits (``Emits``) on ``audited_tool``, with no
-default, like its scope. The wrapper scrubs centrally, before the result is
-serialized into text, so neither tier leaks:
+The same engine serves MCP tools (``audited_tool``) and REST read routes
+(``purser.api.disclosure``). Each declares what it emits (``Emits``), with
+no default, like its scope. The wrapper scrubs centrally, after the result
+is built and before it is serialized, so no tier leaks:
 
 1. Declared key paths are dropped; the values dropped are remembered.
 2. Every string is then scrubbed BY VALUE: payee names become references,
@@ -41,6 +44,7 @@ a note, a name) is refused, so a reference can never become a payee's real
 name.
 """
 
+import copy
 import re
 import threading
 from collections.abc import Iterable, Mapping
@@ -54,6 +58,11 @@ DESCRIPTION = "description"
 AMOUNT = "amount"
 EXTERNAL_IDS = "external_ids"
 FIELDS = (PAYEE, DESCRIPTION, AMOUNT, EXTERNAL_IDS)
+# What a call may ask to leave out, and what it may ask to add back.
+WITHHOLDABLE = (PAYEE, DESCRIPTION, AMOUNT)
+INCLUDABLE = (EXTERNAL_IDS,)
+# Withheld when a call says nothing: external identifiers only.
+DEFAULT_WITHHELD = frozenset({EXTERNAL_IDS})
 
 WITHHELD_TEXT = "[withheld]"
 REF_RE = re.compile(r"\bpy_[a-z2-7]{10}\b")
@@ -80,7 +89,11 @@ _IDENTIFIER_RE = re.compile(
     r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
     r"|py_[a-z2-7]{10})$"
 )
-_AMOUNTISH_RE = re.compile(r"(?<![\w.])[-+]?\$?\d[\d,]*\.\d{2,4}(?!\d)")
+# A real minus sign: an estimated amount in a headline reads "≈ 95.00"
+# with U+2212 before the digits (#556), so the scrubbers know it as well as
+# the hyphen.
+MINUS_SIGN = "\u2212"
+_AMOUNTISH_RE = re.compile(r"(?<![\w.])[-+\u2212]?\$?\d[\d,]*\.\d{2,4}(?!\d)")
 
 
 @dataclass(frozen=True)
@@ -107,9 +120,17 @@ class Emits:
     # a payee named like a common word must not rewrite the conventions.
     skip: tuple[str, ...] = ()
     # The body is scrubbed by what the tool calls (read_series -> the
-    # purser:// resources, which honour the call's include): the wrapper adds
-    # include and records disclosure for every field, and leaves the body.
+    # purser:// resources, which honour the call's withhold and include): the
+    # wrapper adds both parameters and leaves the body.
     passthrough: bool = False
+
+    def withholdable(self) -> bool:
+        """Whether a call can ask this output to leave something out."""
+        return bool(self.fields() & set(WITHHOLDABLE))
+
+    def includable(self) -> bool:
+        """Whether this output can carry external identifiers."""
+        return EXTERNAL_IDS in self.fields()
 
     def fields(self) -> set[str]:
         if self.passthrough:
@@ -126,9 +147,9 @@ class Emits:
         return out
 
 
-# The fields the running tool call asked for with ``include``: the purser://
-# resources read it, so read_series honours the same override.
-current_include: ContextVar[set[str] | None] = ContextVar("current_include", default=None)
+# The fields withheld for the running tool call: the purser:// resources read
+# it, so read_series honours the same choice as the call that wraps it.
+current_withheld: ContextVar[set[str] | None] = ContextVar("current_withheld", default=None)
 
 NOTHING = Emits()
 # Errors are scrubbed as if every narrative surface could appear in them.
@@ -136,28 +157,66 @@ EVERYTHING = Emits(payee=True, narrative=True, rule_text=True)
 
 
 class DisclosureError(ValueError):
-    """A bad ``include`` value or a payee reference used where it cannot be."""
+    """A bad ``withhold``/``include`` value or a payee reference used where it
+    cannot be."""
 
 
-def parse_include(include: Iterable[str] | None) -> set[str]:
-    chosen = set(include or ())
-    unknown = chosen - set(FIELDS)
+def _split(values: Iterable[str] | None) -> set[str]:
+    """Values as a set; REST may pass one comma-separated string."""
+    return {v.strip() for raw in (values or ()) for v in str(raw).split(",") if v.strip()}
+
+
+def parse_withhold(withhold: Iterable[str] | None) -> set[str]:
+    chosen = _split(withhold)
+    if EXTERNAL_IDS in chosen:
+        chosen.discard(EXTERNAL_IDS)  # already withheld unless included
+    unknown = chosen - set(WITHHOLDABLE)
     if unknown:
         raise DisclosureError(
-            f"unknown include field(s) {sorted(unknown)}; expected any of {list(FIELDS)}"
+            f"unknown withhold field(s) {sorted(unknown)}; expected any of {list(WITHHOLDABLE)}"
         )
     return chosen
 
 
-def defaults(*, purchase: bool, amount: bool) -> set[str]:
-    """The fields withheld by default: the user's two settings, plus external
-    identifiers, which no agent task needs."""
-    out = {EXTERNAL_IDS}
-    if purchase:
-        out |= {PAYEE, DESCRIPTION}
-    if amount:
-        out.add(AMOUNT)
-    return out
+def parse_include(include: Iterable[str] | None) -> set[str]:
+    chosen = _split(include)
+    returned = chosen & set(WITHHOLDABLE)
+    if returned:
+        raise DisclosureError(
+            f"include takes only {list(INCLUDABLE)}: {sorted(returned)} are returned unless "
+            "the call passes withhold"
+        )
+    unknown = chosen - set(INCLUDABLE)
+    if unknown:
+        raise DisclosureError(
+            f"unknown include field(s) {sorted(unknown)}; expected any of {list(INCLUDABLE)}"
+        )
+    return chosen
+
+
+def withheld_for(*, withhold: set[str], include: set[str]) -> set[str]:
+    """The fields one call leaves out: what it asked to withhold, plus the
+    external identifiers unless it included them."""
+    return (set(DEFAULT_WITHHELD) - include) | withhold
+
+
+def audit_record(*, requested: set[str], withheld: set[str], observed: set[str]) -> dict[str, Any]:
+    """What a call row says about privacy, the same for MCP and REST:
+
+    - ``requested``: the fields the call asked to withhold (the privacy
+      feature in use);
+    - ``withheld``: the fields this answer actually left out;
+    - ``identifiable``: the payee, description and amount fields it returned
+      with real values (the answer could identify purchases).
+
+    The first and last are also stored as plain columns
+    (``audit_log.privacy_requested``, ``audit_log.identifiable``) so the
+    audit view can filter on them; the detail itself is encrypted."""
+    return {
+        "requested": sorted(requested & set(WITHHOLDABLE)),
+        "withheld": sorted(withheld & set(FIELDS)),
+        "identifiable": sorted((observed - withheld) & set(WITHHOLDABLE)),
+    }
 
 
 def needs_dictionary(withheld: set[str], emits: Emits) -> bool:
@@ -204,25 +263,38 @@ _cache_lock = threading.Lock()
 _cache: tuple[tuple[Any, ...], Dictionary] | None = None
 
 
+# Per table: how many rows and an order-independent digest of every row's
+# identity and version, the sum of a 64-bit hash of (id, xmin). An update
+# gives a row a new xmin, an insert adds a row and a delete removes one, so
+# the digest moves on every committed change the dictionary can see,
+# whatever order the writers commit in. Keying on the newest xmin did not
+# (#648 L3): a rename by an older transaction that committed after a newer
+# one, and after a build, left count and max where they were, and the
+# renamed payee went out in the clear under withhold=payee until a later
+# write. A sum of the xmins alone could still cancel out across rows.
+_FINGERPRINTED = (
+    "payees",
+    "schedules",
+    "rules",
+    "suggestions",
+    "transactions WHERE status IN ('expected', 'pending')",
+)
+_FINGERPRINT_SQL = "SELECT " + ", ".join(
+    f"(SELECT count(*) FROM {t}),"
+    f" (SELECT sum(hashtextextended(id::text || ':' || xmin::text, 0)) FROM {t})"
+    for t in _FINGERPRINTED
+)
+
+
 def _fingerprint(session: Any) -> tuple[Any, ...]:
-    """Changes whenever a payee, schedule, rule or suggestion row is added,
-    changed or removed: count plus the newest row version (xmin) per table."""
+    """Changes whenever a payee, schedule, rule or suggestion row (or a live
+    expected or pending row) is added, changed or removed and committed:
+    count plus a digest of the rows' versions per table. Read before the
+    dictionary is built, so a build is never older than the key it is
+    cached under (a commit in between only causes one more rebuild)."""
     from sqlalchemy import text
 
-    row = session.execute(
-        text(
-            "SELECT"
-            " (SELECT count(*) FROM payees), (SELECT max(xmin::text::bigint) FROM payees),"
-            " (SELECT count(*) FROM schedules), (SELECT max(xmin::text::bigint) FROM schedules),"
-            " (SELECT count(*) FROM rules), (SELECT max(xmin::text::bigint) FROM rules),"
-            " (SELECT count(*) FROM suggestions),"
-            " (SELECT max(xmin::text::bigint) FROM suggestions),"
-            " (SELECT count(*) FROM transactions WHERE status IN ('expected', 'pending')),"
-            " (SELECT max(xmin::text::bigint) FROM transactions"
-            "   WHERE status IN ('expected', 'pending'))"
-        )
-    ).one()
-    return tuple(row)
+    return tuple(session.execute(text(_FINGERPRINT_SQL)).one())
 
 
 def load_dictionary(session: Any) -> Dictionary:
@@ -645,7 +717,8 @@ def _drop(value: Any, path: list[str]) -> bool:
 
 def amount_forms(value: str) -> set[str]:
     """The spellings a headline may use for one amount: as stored, unsigned,
-    to the cent, with thousands separators."""
+    to the cent, with thousands separators, and a negative one with a real
+    minus sign (U+2212) too, as an estimate in a headline spells it (#556)."""
     try:
         d = Decimal(value)
     except InvalidOperation:
@@ -654,4 +727,29 @@ def amount_forms(value: str) -> set[str]:
     for x in (d, abs(d)):
         cents = x.quantize(Decimal("0.01"))
         forms |= {str(x), str(cents), f"{cents:,}", format(x.normalize(), "f")}
-    return {f for f in forms if f.lstrip("-") not in {"0", "0.00", "0E-4", "0.0000"}}
+    forms |= {MINUS_SIGN + f[1:] for f in forms if f.startswith("-")}
+    return {f for f in forms if f.lstrip("-" + MINUS_SIGN) not in {"0", "0.00", "0E-4", "0.0000"}}
+
+
+def scrub(value: Any, scrubber: Scrubber) -> Any:
+    """Scrub a dict (naming what it withheld) or each item of a bare list
+    (naming per item, so an item that lost nothing says nothing). Works on a
+    copy; the caller's value is unchanged."""
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            item_scrubber = scrubber.fork_item()
+            item = copy.deepcopy(item)
+            item_scrubber.collect(item)
+            item = item_scrubber.structure(item)
+            if item_scrubber.named and isinstance(item, dict):
+                item["withheld"] = item_scrubber.named
+            scrubber.hits |= item_scrubber.hits
+            out.append(item)
+        return out
+    value = copy.deepcopy(value)
+    scrubber.collect(value)
+    value = scrubber.structure(value)
+    if scrubber.named and isinstance(value, dict):
+        value["withheld"] = scrubber.named
+    return value

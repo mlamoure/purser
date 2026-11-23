@@ -1181,6 +1181,9 @@ def transfer_shape(tx: Transaction) -> core.TransferShape | None:
     question — the flat view, the MCP rows, unlink, conversions, the account
     purge — so a multi-posting row that merely touches two real accounts
     (#245) is never shown or handled as a transfer."""
+    if tx.split_account_id is not None:
+        # A split is never a transfer, whatever its shape (decision 118).
+        return None
     if any(p.account is None for p in tx.postings):
         return None
     return core.transfer_shape(
@@ -1189,15 +1192,17 @@ def transfer_shape(tx: Transaction) -> core.TransferShape | None:
 
 
 def split_lines(tx: Transaction) -> int:
-    """How many category lines ``tx`` has when it is a split transaction —
-    one real leg plus two or more category legs (DESIGN §3.3, decision 87) —
-    and 0 for every other row. Split rows are read-only in v1: the categorize
-    pass, a categorize rule's apply-history and the transfer pool leave them
-    alone."""
-    if any(p.account is None for p in tx.postings):
+    """How many lines ``tx`` has when it is a split transaction — the rows
+    carrying the split marker (DESIGN §3.3, decisions 87 and 118), category
+    and ``[Account]`` lines alike — and 0 for every other row. A split is
+    edited only through ``splits.split_transaction``: the categorize pass, a
+    categorize rule's apply-history, the AI classifier and the transfer pool
+    leave it alone."""
+    if tx.split_account_id is None or any(p.account is None for p in tx.postings):
         return 0
     return core.split_line_count(
-        [core.Leg(p.account_id, Decimal(p.amount), p.account.is_virtual) for p in tx.postings]
+        [core.Leg(p.account_id, Decimal(p.amount), p.account.is_virtual) for p in tx.postings],
+        tx.split_account_id,
     )
 
 
@@ -1862,6 +1867,42 @@ def _release_settlements_of(
         )
 
 
+def resurrect_original(
+    session: Session, child: Transaction, *, status: core.Status, token: ApiToken | None
+) -> tuple[Transaction, str | None]:
+    """Bring one voided original back as a fresh clone carrying ``status``
+    (its status before it was merged): same postings, date, payee, text,
+    origin and source fetch, its ``content_hash`` MOVED onto the clone and
+    its review mark copied. Shared by unlink and un-split (decision 118).
+    Returns the clone and the hash it took over."""
+    moved_hash = child.content_hash
+    child.content_hash = None
+    session.flush()  # release the unique index before the clone claims it
+    clone = ledger_service._persist_transaction(
+        session,
+        specs=ledger_service._specs_of(child),
+        date=child.date,
+        payee_name=child.payee.name if child.payee else None,
+        description=child.description,
+        requested_status=status,
+        origin=core.Origin(child.origin),
+        token=token,
+        source_fetch_id=child.source_fetch_id,
+        content_hash=moved_hash,
+    )
+    # The clone carries the original's bank line on (#386 review): the
+    # original now points at it, as a posted pending points at its
+    # successor. So the clone's lineage reaches the original's — it stays a
+    # bank line for pairing even without a hash (a replacement never had
+    # one) — and the original no longer reads as merged into what it backed.
+    child.superseded_by = clone.id
+    session.flush()
+    # Review state moves with the row identity: the clone IS that bank line,
+    # so it inherits that line's review state (#175, decision 29).
+    review_service.copy_to_clone(session, void_id=child.id, clone_id=clone.id)
+    return clone, moved_hash
+
+
 def unlink_transfer(
     session: Session, *, transfer_id: uuid.UUID, token: ApiToken | None
 ) -> dict[str, Any]:
@@ -1917,33 +1958,14 @@ def unlink_transfer(
     prior_statuses = _prior_statuses_for(session, tx.id)
     resurrected: list[tuple[Transaction, str | None]] = []
     for child in children:
-        moved_hash = child.content_hash
-        child.content_hash = None
-        session.flush()  # release the unique index before the clone claims it
-        clone = ledger_service._persist_transaction(
-            session,
-            specs=ledger_service._specs_of(child),
-            date=child.date,
-            payee_name=child.payee.name if child.payee else None,
-            description=child.description,
-            requested_status=core.Status(prior_statuses.get(str(child.id), tx.status)),
-            origin=core.Origin(child.origin),
-            token=token,
-            source_fetch_id=child.source_fetch_id,
-            content_hash=moved_hash,
+        resurrected.append(
+            resurrect_original(
+                session,
+                child,
+                status=core.Status(prior_statuses.get(str(child.id), tx.status)),
+                token=token,
+            )
         )
-        resurrected.append((clone, moved_hash))
-        # The clone carries the original's bank line on (#386 review): the
-        # original now points at it, as a posted pending points at its
-        # successor. So the clone's lineage reaches the original's — it
-        # stays a bank line for pairing even without a hash (a replacement
-        # never had one) — and the original no longer reads as merged into
-        # this transfer, so it backs none of its legs.
-        child.superseded_by = clone.id
-        session.flush()
-        # Review state moves with the row identity: the clone IS that bank
-        # line, so it inherits that line's review state (#175, decision 29).
-        review_service.copy_to_clone(session, void_id=child.id, clone_id=clone.id)
 
     transfer_voided = False
     if _was_merge_created(session, tx.id):

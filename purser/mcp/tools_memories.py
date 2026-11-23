@@ -2,7 +2,7 @@
 
 Reads need ``read`` and writes ``write``, like every surface (#437 retired
 ``read:redacted``, which this surface used to refuse). Payee names inside a
-memory's text are scrubbed by value under the purchase-privacy setting.
+memory's text are scrubbed by value when the call withholds payees.
 """
 
 from typing import Any
@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from purser.mcp._registry import _principal, _run, _token_row, audited_tool
-from purser.mcp.privacy import NOTHING, Emits
+from purser.privacy import NOTHING, Emits
 
 
 @audited_tool(kind="read", entity="memory", scope="read", emits=Emits(payee=True, narrative=True))

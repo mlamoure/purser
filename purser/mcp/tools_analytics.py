@@ -19,7 +19,6 @@ from purser import clock
 from purser.core import forecasting as core_forecasting
 from purser.mcp import presentation
 from purser.mcp._registry import _amount, _run, audited_tool
-from purser.mcp.privacy import Emits
 from purser.mcp.resources import (
     balance_window_segment,
     explicit_balance_window,
@@ -32,6 +31,7 @@ from purser.mcp.toolschemas import (
     RecurringResult,
     WhatsNewResult,
 )
+from purser.privacy import Emits
 
 
 def _payees_for(session: Session, transaction_ids: list[Any]) -> dict[Any, str | None]:
@@ -741,12 +741,17 @@ async def balance_history(
     """One account's balance over time, in a single call. period = 30d | 90d
     | 1y | all (or pass start and end for an explicit window, which wins).
     Adaptive density chosen server-side and reported in `density` — 30d is a
-    true daily series. `low`/`high` are the lowest and highest END-OF-DAY
-    balance over EVERY day with activity in the window, not just the returned
-    points, so they stay true under downsampling, and the order of one day's
-    rows (pay posted before its deductions) never creates one; `movers` names
-    the biggest balance movements. Full per-transaction resolution is behind
-    series_uri. This is the historical counterpart to forecast_balance; for
+    true daily series. `series`, `current`, `low` and `high` are the balance
+    the account reports, by `method`: postings, postings+holdings (brokerage:
+    cash plus holdings market value) or valuation (loan). `low`/`high` are
+    the lowest and highest END-OF-DAY balance over EVERY day with activity in
+    the window (a transaction, and for brokerage a holdings snapshot, for a
+    loan a valuation), not just the returned points, so they stay true under
+    downsampling, and the order of one day's rows (pay posted before its
+    deductions) never creates one; `movers` names the biggest balance
+    movements. Full per-transaction resolution is behind series_uri: the
+    postings history, so for brokerage it is the cash alone and for a loan
+    its postings. This is the historical counterpart to forecast_balance; for
     the whole portfolio use net_worth.
     Never reconstruct a balance series by walking transactions."""
 
@@ -789,8 +794,10 @@ async def balance_history(
         delta = current - opening
         pct = str((delta / abs(opening) * 100).quantize(Decimal("0.1"))) if opening != 0 else None
 
-        low, high = balance_service.window_extremes(
-            session, target.id, start=window_start, end=window_end
+        # On the series' own basis (decision 129): a brokerage or loan account
+        # ranks its reported balance, not the postings store's cash.
+        low, high = networth_service.account_window_extremes(
+            session, target, start=window_start, end=window_end
         )
         rows, _truncated = balance_service.change_points(
             session, target.id, start=window_start, end=window_end
@@ -816,12 +823,10 @@ async def balance_history(
             "current": _cents(current),
             "change": {"period": label, "delta": _cents(delta), "pct": pct},
             "low": (
-                {"date": low.date.isoformat(), "balance": _cents(Decimal(low.balance))}
-                if low is not None
-                else None
+                {"date": low[0].isoformat(), "balance": _cents(low[1])} if low is not None else None
             ),
             "high": (
-                {"date": high.date.isoformat(), "balance": _cents(Decimal(high.balance))}
+                {"date": high[0].isoformat(), "balance": _cents(high[1])}
                 if high is not None
                 else None
             ),
@@ -848,8 +853,8 @@ async def balance_history(
             f"{target.path} is {payload['current']}, {sign}{_cents(delta)}"
             f"{f' ({sign}{pct}%)' if pct else ''} over {label}"
         )
-        if low is not None and Decimal(low.balance) != current:
-            headline += f" — low {_cents(Decimal(low.balance))} on {low.date.isoformat()}"
+        if low is not None and low[1] != current:
+            headline += f" — low {_cents(low[1])} on {low[0].isoformat()}"
         if movers:
             top = movers[0]
             name = payees.get(top.transaction_id) or "a transaction"

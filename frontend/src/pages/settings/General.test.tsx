@@ -50,6 +50,5 @@ describe("Settings, General: labelled fields (#538)", () => {
     expect(screen.getByLabelText("Grafana URL")).toHaveValue("");
     // The security and agent topics moved to their own sections (#542).
     expect(screen.queryByLabelText("Issuer URL")).not.toBeInTheDocument();
-    expect(screen.queryByText("Privacy with agents")).not.toBeInTheDocument();
   });
 });

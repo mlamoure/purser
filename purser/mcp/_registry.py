@@ -29,9 +29,8 @@ from mcp.types import CallToolResult, TextContent
 from pydantic import TypeAdapter
 from sqlalchemy.orm import Session
 
-from purser import audit
+from purser import audit, privacy
 from purser.admin import security
-from purser.mcp import privacy
 
 # --------------------------------------------------------------------------
 # Principal plumbing: the ASGI wrapper authenticates the Bearer token and
@@ -119,10 +118,12 @@ mcp = FastMCP(
         "the user's authority: write directly when carrying out the user's "
         "request; when acting on your own initiative (a pattern you noticed, a "
         "rule you think would help), propose instead — leave activate false, or "
-        "use the suggestions inbox. Disclose only what a task needs: request "
-        "withheld fields with include only when the question needs them, filter "
-        "and act with payee references and transaction ids, and call present to "
-        "show the user details instead of repeating them. Aggregates are exact."
+        "use the suggestions inbox. Privacy is your choice per call: when the "
+        "question or action does not need payee names, descriptions or single "
+        "amounts (a count, a category, which account, a total), pass withhold "
+        "with those fields and work with payee references and transaction ids; "
+        "call present to show the user details instead of repeating them. "
+        "Nothing is withheld unless you ask, and aggregates are always exact."
     ),
 )
 
@@ -185,35 +186,34 @@ def _ensure_text_block(result: Any) -> Any:
 # walks it to prove each emitting tool is exercised (#437).
 EMITS: dict[str, privacy.Emits] = {}
 
+WITHHOLD_DOC = (
+    "\n\nwithhold: fields to leave out of this answer — any of payee (payees "
+    "become stable references such as py_8k2mq4x7ra), description, amount "
+    "(single amounts; totals stay exact). Pass it when the question or action "
+    "does not need them; nothing is withheld otherwise. The response names what "
+    "it withheld in `withheld`."
+)
 INCLUDE_DOC = (
-    "\n\ninclude: fields to return although the user's privacy defaults withhold "
-    "them — any of payee, description, amount, external_ids. Ask only for what "
-    "the user's question needs; a response names what it withheld in `withheld`."
+    '\n\ninclude: ["external_ids"] returns the bank\'s account and connection '
+    "identifiers, which are left out unless asked for."
 )
 
 
-def _with_include(fn: Callable[..., Any]) -> inspect.Signature:
-    """The tool's signature plus the ``include`` parameter every tool that
-    emits privatizable fields takes (#437). Injected here rather than written
-    on each tool, so no tool can forget it."""
+def _with_params(fn: Callable[..., Any], names: list[str]) -> inspect.Signature:
+    """The tool's signature plus the disclosure parameters it takes
+    (``withhold``, ``include``; #613). Injected here rather than written on
+    each tool, so no tool can forget them."""
     sig = inspect.signature(fn)
-    if "include" in sig.parameters:
-        raise TypeError(f"{fn.__name__}: include is added by audited_tool, not declared")
-    param = inspect.Parameter(
-        "include",
-        inspect.Parameter.KEYWORD_ONLY,
-        default=None,
-        annotation=list[str] | None,
-    )
-    params = list(sig.parameters.values())
-    return sig.replace(parameters=[*params, param])
-
-
-def _privacy_settings() -> tuple[bool, bool]:
-    from purser import appsettings
-
-    eff = appsettings.effective()
-    return eff.privacy_purchase, eff.privacy_amount
+    for name in names:
+        if name in sig.parameters:
+            raise TypeError(f"{fn.__name__}: {name} is added by audited_tool, not declared")
+    added = [
+        inspect.Parameter(
+            name, inspect.Parameter.KEYWORD_ONLY, default=None, annotation=list[str] | None
+        )
+        for name in names
+    ]
+    return sig.replace(parameters=[*sig.parameters.values(), *added])
 
 
 def _dictionary() -> privacy.Dictionary:
@@ -221,28 +221,6 @@ def _dictionary() -> privacy.Dictionary:
 
     with get_sessionmaker()() as session:
         return privacy.load_dictionary(session)
-
-
-def _scrub_value(value: Any, scrubber: privacy.Scrubber) -> Any:
-    """Scrub a dict (naming what it withheld) or each item of a bare list
-    (naming per item, so an item that lost nothing says nothing)."""
-    if isinstance(value, list):
-        out = []
-        for item in value:
-            item_scrubber = scrubber.fork_item()
-            item = copy.deepcopy(item)
-            item_scrubber.collect(item)
-            item = item_scrubber.structure(item)
-            if item_scrubber.named and isinstance(item, dict):
-                item["withheld"] = item_scrubber.named
-            out.append(item)
-        return out
-    value = copy.deepcopy(value)
-    scrubber.collect(value)
-    value = scrubber.structure(value)
-    if scrubber.named and isinstance(value, dict):
-        value["withheld"] = scrubber.named
-    return value
 
 
 def _scrub_result(result: Any, scrubber: privacy.Scrubber) -> Any:
@@ -271,29 +249,29 @@ def _scrub_result(result: Any, scrubber: privacy.Scrubber) -> Any:
                 )
         return result.model_copy(update={"structured_content": structured, "content": content})
     if isinstance(result, (dict, list)):
-        return _scrub_value(result, scrubber)
+        return privacy.scrub(result, scrubber)
     return result
 
 
-async def withheld_now() -> set[str]:
-    """The fields withheld for the running request: the user's defaults
-    minus the surrounding tool call's ``include``."""
-    chosen = privacy.current_include.get() or set()
-    purchase, amount = await anyio.to_thread.run_sync(_privacy_settings)
-    return privacy.defaults(purchase=purchase, amount=amount) - chosen
+def withheld_now() -> set[str]:
+    """The fields withheld for the running request: the surrounding tool
+    call's choice (read_series), else only the external identifiers (a
+    purser:// resource read directly asks for nothing)."""
+    current = privacy.current_withheld.get()
+    return set(privacy.DEFAULT_WITHHELD) if current is None else set(current)
 
 
 async def disclose(payload: dict[str, Any], emits: privacy.Emits) -> dict[str, Any]:
-    """Minimal disclosure for a value served outside a tool's return path —
-    the purser:// resources, read directly or through read_series. Uses the
-    surrounding tool call's ``include`` when there is one."""
-    withheld = await withheld_now()
+    """Disclosure for a value served outside a tool's return path — the
+    purser:// resources, read directly or through read_series. Uses the
+    surrounding tool call's ``withhold``/``include`` when there is one."""
+    withheld = withheld_now()
     dictionary = (
         await anyio.to_thread.run_sync(_dictionary)
         if privacy.needs_dictionary(withheld, emits)
         else privacy.Dictionary()
     )
-    scrubbed = _scrub_value(
+    scrubbed = privacy.scrub(
         payload, privacy.Scrubber(withheld=withheld, emits=emits, dictionary=dictionary)
     )
     return scrubbed  # type: ignore[no-any-return]
@@ -317,13 +295,15 @@ def audited_tool(
     reach the wire with no check at all — which is what hand-rolled
     ``_require`` closures allowed.
 
-    ``emits`` is REQUIRED too (#437): what the tool's output carries that the
-    user's privacy settings govern (``privacy.NOTHING`` for none). The
-    wrapper scrubs the result centrally to the call's withheld set — the
-    defaults minus what the agent asked for with ``include``, a parameter
-    added to every tool that emits something — and names what it withheld.
+    ``emits`` is REQUIRED too (#437, #613): what the tool's output carries
+    that a call can ask to withhold (``privacy.NOTHING`` for none). A tool
+    that emits payees, narrative or amounts takes ``withhold``; one that
+    emits external identifiers takes ``include``. The wrapper scrubs the
+    result centrally to the call's withheld set and names what it withheld.
     Payee references in the arguments are resolved, and refused in free text,
-    for every tool. Error messages are scrubbed like results.
+    for every tool. Error messages are scrubbed like results. The call row
+    records what the call asked to withhold, what the answer withheld, and
+    which identifiable fields it returned (``detail.privacy``).
 
     The check runs INSIDE the try, so a denial still records its ok=false call
     row in the finally below — asserted by test_mcp.py's audit tests.
@@ -338,7 +318,9 @@ def audited_tool(
         raise ValueError(f"unknown scope {scope!r}; expected one of {sorted(SCOPE_CHECKS)}")
     if not isinstance(emits, privacy.Emits):
         raise TypeError("emits must be a privacy.Emits (privacy.NOTHING for none)")
-    takes_include = bool(emits.fields())
+    takes_withhold = emits.withholdable()
+    takes_include = emits.includable()
+    scrubs = bool(emits.fields()) and not emits.passthrough
 
     def decorate(fn: Callable[..., Any]) -> Any:
         output_schema = _declared_output_schema(fn)
@@ -356,27 +338,29 @@ def audited_tool(
             error: str | None = None
             disclosed: list[str] | None = None
             requested_extra: list[str] | None = None
+            requested_withhold: set[str] = set()
+            named: list[str] = []
             withheld: set[str] = set()
             dictionary: privacy.Dictionary | None = None
+            withhold = kwargs.pop("withhold", None) if takes_withhold else None
             include = kwargs.pop("include", None) if takes_include else None
             try:
                 _enforce_scope(scope)
+                requested_withhold = privacy.parse_withhold(withhold)
                 chosen = privacy.parse_include(include)
-                purchase, amount = await anyio.to_thread.run_sync(_privacy_settings)
-                default = privacy.defaults(purchase=purchase, amount=amount)
-                withheld = default - chosen
-                requested_extra = sorted(chosen & default & emits.fields()) or None
+                withheld = privacy.withheld_for(withhold=requested_withhold, include=chosen)
+                requested_extra = sorted(chosen & emits.fields()) or None
                 dictionary = (
                     await anyio.to_thread.run_sync(_dictionary)
                     if privacy.has_ref(kwargs) or privacy.needs_dictionary(withheld, emits)
                     else None
                 )
                 call_kwargs = privacy.resolve_inputs(kwargs, dictionary or privacy.Dictionary())
-                include_reset = privacy.current_include.set(chosen)
+                withheld_reset = privacy.current_withheld.set(withheld)
                 try:
                     result = await fn(*args, **call_kwargs)
                 finally:
-                    privacy.current_include.reset(include_reset)
+                    privacy.current_withheld.reset(withheld_reset)
                 if output_schema is not None and isinstance(result, CallToolResult):
                     # Server-side contract check the SDK-bundled FastMCP used to do:
                     # drift between a payload builder and toolschemas fails the call.
@@ -389,18 +373,16 @@ def audited_tool(
                             f"{fn.__name__}: output contract drift at {where}"
                         ) from None
                 # `result` itself stays the tool's value: the audit row below counts its rows.
-                shown = (
-                    _scrub_result(
-                        result,
-                        privacy.Scrubber(
-                            withheld=withheld,
-                            emits=emits,
-                            dictionary=dictionary or privacy.Dictionary(),
-                        ),
+                if scrubs:
+                    scrubber = privacy.Scrubber(
+                        withheld=withheld,
+                        emits=emits,
+                        dictionary=dictionary or privacy.Dictionary(),
                     )
-                    if takes_include and not emits.passthrough
-                    else result
-                )
+                    shown = _scrub_result(result, scrubber)
+                    named = scrubber.named
+                else:
+                    shown = result
                 shown = _ensure_text_block(shown)
                 return shown
             except BaseException as exc:
@@ -434,7 +416,11 @@ def audited_tool(
                         "ok": ok,
                         "ms": int((time.monotonic() - started) * 1000),
                     }
-                    logged = dict(kwargs, include=include) if include is not None else kwargs
+                    logged = dict(kwargs)
+                    if withhold is not None:
+                        logged["withhold"] = withhold
+                    if include is not None:
+                        logged["include"] = include
                     clipped = audit.clip_values(logged) if logged else None
                     if clipped:
                         detail["args"] = clipped
@@ -455,6 +441,11 @@ def audited_tool(
                         identity=principal.identity,
                         sharing=summary,
                         requested_extra=requested_extra or [],
+                        privacy=privacy.audit_record(
+                            requested=requested_withhold,
+                            withheld=set(named) | set(summary["withheld"]),
+                            observed=observed if ok else set(),
+                        ),
                         completion_point="tool_return",
                     )
                     outcome = (
@@ -485,10 +476,18 @@ def audited_tool(
                     await anyio.to_thread.run_sync(audit.record_receipt, event)
 
         EMITS[fn.__name__] = emits
-        if takes_include:
-            wrapper.__signature__ = _with_include(fn)  # type: ignore[attr-defined]
-            wrapper.__doc__ = (fn.__doc__ or "").rstrip() + INCLUDE_DOC
-            wrapper.__annotations__ = {**fn.__annotations__, "include": list[str] | None}
+        added = [n for n, on in (("withhold", takes_withhold), ("include", takes_include)) if on]
+        if added:
+            wrapper.__signature__ = _with_params(fn, added)  # type: ignore[attr-defined]
+            wrapper.__doc__ = (
+                (fn.__doc__ or "").rstrip()
+                + (WITHHOLD_DOC if takes_withhold else "")
+                + (INCLUDE_DOC if takes_include else "")
+            )
+            wrapper.__annotations__ = {
+                **fn.__annotations__,
+                **dict.fromkeys(added, list[str] | None),
+            }
         register_kwargs: dict[str, Any] = {}
         if meta is not None:
             register_kwargs["meta"] = meta
@@ -552,6 +551,11 @@ def audited_resource(fn: Callable[..., Any]) -> Callable[..., Any]:
                             "identity": principal.identity,
                             "args": audit.clip_values(kwargs),
                             "sharing": summary,
+                            "privacy": privacy.audit_record(
+                                requested=set(),
+                                withheld=set(summary["withheld"]),
+                                observed=set(summary["sensitive_fields"]) if ok else set(),
+                            ),
                             "completion_point": "resource_return",
                         },
                     )

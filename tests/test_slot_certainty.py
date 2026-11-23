@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, text
 
+from tests.conftest import today
 from tests.test_mcp import LiveServer, _mcp_call, live_server  # noqa: F401
 from tests.test_occurrence_certainty import evidence
 from tests.test_schedules import seeded  # noqa: F401
@@ -36,7 +37,7 @@ def create(
             "name": "Example recurring model",
             "account": "assets.checking",
             "rrule": "FREQ=WEEKLY",
-            "dtstart": date.today().isoformat(),
+            "dtstart": today().isoformat(),
             "amount": amount,
             "amount_type": kind,
             "date_type": date_mode,
@@ -49,7 +50,7 @@ def create(
         },
     )
     assert response.status_code == 201, response.text
-    return response.json()["id"], date.today() + timedelta(days=70)
+    return response.json()["id"], today() + timedelta(days=70)
 
 
 def path(sid: str, slot: date) -> str:
@@ -226,7 +227,7 @@ def test_slot_address_never_changes_values_and_clear_is_metadata_only(
     seeded: None, client: TestClient, materialized: bool
 ) -> None:
     sid, projected = create(client)
-    slot = date.today() if materialized else projected
+    slot = today() if materialized else projected
     before = financial_shape(forecast(client))
     for body in (
         {"amount": evidence("estimated", "-999")},
@@ -246,7 +247,7 @@ def test_slot_address_never_changes_values_and_clear_is_metadata_only(
 def test_invalid_slots_rejected(seeded: None, client: TestClient, offset: int) -> None:
     sid, _ = create(client)
     response = client.patch(
-        path(sid, date.today() + timedelta(days=offset)), json={"amount": evidence("estimated")}
+        path(sid, today() + timedelta(days=offset)), json={"amount": evidence("estimated")}
     )
     assert response.status_code == 422, response.text
 
@@ -318,11 +319,16 @@ def test_slot_mcp_write_read_and_privacy(
     assert readback["amount_estimated"] is True
     assert Decimal(readback["original"]["amount"]) == Decimal("-100")
     assert client.patch(f"/schedules/{sid}", json={"amount": "-125"}).status_code == 200
-    assert (
-        client.put("/config", json={"privacy_amount": True, "privacy_purchase": True}).status_code
-        == 200
+    (private,) = _mcp_call(
+        live_server.url,
+        token,
+        [
+            (
+                "get_schedule_occurrence",
+                {**address, "withhold": ["payee", "description", "amount"]},
+            )
+        ],
     )
-    (private,) = _mcp_call(live_server.url, token, [("get_schedule_occurrence", address)])
     assert "value" not in private["amount"]
     assert "evidence_value" not in private["amount"]
     assert "amount" not in private["original"]
@@ -342,7 +348,7 @@ def test_fixed_value_with_actual_history_stays_fixed_and_preserves_match(
         migrated_engine,
         "assets.checking",
         "-175",
-        date.today(),
+        today(),
         payee="Example recurring model",
     )
     assert (
@@ -371,7 +377,7 @@ def test_history_refresh_keeps_estimate_provenance_and_calculation_basis(
         migrated_engine,
         "assets.checking",
         "-175",
-        date.today(),
+        today(),
         payee="Example recurring model",
     )
     assert (
@@ -490,7 +496,7 @@ def test_first_metadata_on_migrated_instance_keeps_fixed_basis(
             {"s": sid},
         )
     before = financial_shape(forecast(client))
-    write(client, sid, date.today(), amount=evidence("estimated"))
+    write(client, sid, today(), amount=evidence("estimated"))
     assert financial_shape(forecast(client)) == before
 
 
@@ -499,10 +505,7 @@ def test_projected_evidence_write_scope_and_validation(seeded: None, client: Tes
     invalid = [
         {"amount": evidence("confirmed", source="history")},
         {"amount": evidence("estimated") | {"note": " "}},
-        {
-            "amount": evidence("estimated")
-            | {"as_of": (date.today() + timedelta(days=1)).isoformat()}
-        },
+        {"amount": evidence("estimated") | {"as_of": (today() + timedelta(days=1)).isoformat()}},
         {"amount": evidence("estimated"), "clear": ["amount"]},
         {},
     ]
@@ -534,12 +537,12 @@ def test_reset_and_clear_keep_calculation_separate_from_evidence(
         == 200
     )
     assert basis() == "override"
-    write(client, sid, date.today(), clear=["amount"])
+    write(client, sid, today(), clear=["amount"])
     assert basis() == "override"
     assert client.post(f"/transactions/{tx}/reset-instance").status_code == 200
-    write(client, sid, date.today(), amount=evidence("estimated"))
+    write(client, sid, today(), amount=evidence("estimated"))
     assert basis() == "fixed"
-    assert Decimal(read(client, sid, date.today())["amount"]["value"]) == Decimal("-100")
+    assert Decimal(read(client, sid, today())["amount"]["value"]) == Decimal("-100")
 
 
 def test_slot_evidence_key_rotation_preserves_notes_history_and_original(

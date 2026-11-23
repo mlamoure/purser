@@ -1390,6 +1390,11 @@ def import_qif(
     # What it left unlinked becomes the inbox's transfer_pair cards and the
     # transfer.candidate events (#386); its counts stay out of the import's.
     transfers.sync_candidate_suggestions(session, actor_token_id=actor)
+    # Older history may have landed before an account's horizon: its starting
+    # balance gives way by exactly those rows (decision 123). Never raises.
+    from purser import starting_balance
+
+    reseated = starting_balance.reseat_all(session)
 
     result = {
         **stats,
@@ -1401,7 +1406,11 @@ def import_qif(
         actor_token_id=actor,
         action=f"{fmt}.import",
         entity_type="system",
-        after={**result, "raw_fetch_id": str(raw.id) if raw is not None else None},
+        after={
+            **result,
+            "raw_fetch_id": str(raw.id) if raw is not None else None,
+            **({"starting_balances": reseated} if reseated else {}),
+        },
     )
     return result
 

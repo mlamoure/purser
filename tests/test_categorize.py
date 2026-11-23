@@ -2,7 +2,6 @@
 corrections feeding back — and full function with AI off."""
 
 import json
-from datetime import date
 
 import httpx
 import pytest
@@ -10,6 +9,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine, text
 
 from purser import crypto
+from tests.conftest import today
 
 
 @pytest.fixture
@@ -34,7 +34,7 @@ def _pending(client: TestClient, payee: str, category: str = "expenses.uncategor
             "account": "assets.checking",
             "category": category,
             "amount": "-25.00",
-            "date": date.today().isoformat(),
+            "date": today().isoformat(),
             "payee": payee,
             "status": "pending",
         },
@@ -50,7 +50,7 @@ def _posted(client: TestClient, payee: str, category: str) -> None:
             "account": "assets.checking",
             "category": category,
             "amount": "-20.00",
-            "date": date.today().isoformat(),
+            "date": today().isoformat(),
             "payee": payee,
             "status": "posted",
         },
@@ -379,7 +379,7 @@ class TestBornCategorizedImports:
                 account_ref=str(account.id),
                 category_ref=str(category.id),
                 amount=core.quantize(__import__("decimal").Decimal("-25.00")),
-                date=date.today(),
+                date=today(),
                 payee_name=payee,
                 requested_status=core.Status.POSTED,
                 origin=core.Origin.IMPORT,
@@ -649,7 +649,7 @@ class TestTransferCategorization:
                 "account": "assets.savings",
                 "category": "expenses.uncategorized",
                 "amount": "25.00",
-                "date": date.today().isoformat(),
+                "date": today().isoformat(),
                 "payee": "Online Transfer",
                 "status": "pending",
             },
@@ -690,7 +690,7 @@ class TestTransferCategorization:
                 "account": "assets.savings",
                 "category": "expenses.uncategorized",
                 "amount": "25.00",
-                "date": date.today().isoformat(),
+                "date": today().isoformat(),
                 "payee": "Online Transfer",
                 "status": "posted",
             },

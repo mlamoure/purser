@@ -1,11 +1,13 @@
 # ruff: noqa: F811  (pytest fixtures re-exported from sibling modules)
-"""Minimal disclosure to agents (issue #437): the canary test.
+"""Agent-requested privacy on MCP (issues #437, #613): the canary test.
 
 Seeds distinctive synthetic payees, descriptions, schedule names, rule text
-and amounts; turns both privacy settings on; calls every tool that emits
-something privatizable, with no `include`; and asserts none of the seeded
+and amounts; calls every tool that emits something withholdable with
+``withhold=[payee, description, amount]``; and asserts none of the seeded
 values appears in any tier — the text blocks, `structuredContent`, or an
-error. Then each `include` field brings back exactly its own field.
+error. Then each ``withhold`` field leaves out exactly its own field, and a
+call that withholds nothing gets everything. The REST side is
+tests/test_privacy_rest.py.
 
 Every amount is chosen so no aggregate an agent may legitimately see (a
 category or payee total, a balance, a weekly bill total) equals a single
@@ -15,6 +17,7 @@ schedules are weekly.
 
 import asyncio
 import json
+import re
 import uuid
 from datetime import date, timedelta
 from decimal import Decimal
@@ -25,8 +28,8 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from tests.conftest import today
 from tests.test_mcp import (  # noqa: F401 (fixture re-export)
-    TODAY,
     LiveServer,
     live_server,
 )
@@ -68,23 +71,56 @@ RULE_AMOUNT = "-71.93"
 # record_sale dry run finds it (already_recorded) and would post the same
 # amount, a single transaction's amount either way.
 SALE_ROW = ("418.27", "CANARY-DESC-INDIA")
+# The cash in lieu a record_split pays for a fractional share (#624): one
+# transaction's amount.
+SPLIT_CASH = "13.57"
 SINGLE_AMOUNTS = (
     [r[2] for r in ROWS]
     + [a for _, a in CARD_ROWS]
-    + [LATE_BILL[2], *SCHEDULE_AMOUNTS, RULE_AMOUNT, SALE_ROW[0]]
+    + [LATE_BILL[2], *SCHEDULE_AMOUNTS, RULE_AMOUNT, SALE_ROW[0], SPLIT_CASH]
 )
+
+
+ALL = ["payee", "description", "amount"]
+
+
+def _private(
+    calls: list[tuple[str, dict[str, Any]]], fields: list[str] = ALL
+) -> list[tuple[str, dict[str, Any]]]:
+    """The calls with ``withhold`` added wherever the tool takes it."""
+    import purser.mcp.server  # noqa: F401  (registers every tool)
+    from purser.mcp._registry import EMITS
+
+    return [
+        (tool, {**args, "withhold": list(fields)}) if EMITS[tool].withholdable() else (tool, args)
+        for tool, args in calls
+    ]
 
 
 def _next_20th() -> date:
     """The card payment schedule's next instance (BYMONTHDAY=20)."""
-    this_month = TODAY.replace(day=20)
-    if this_month >= TODAY:
+    this_month = today().replace(day=20)
+    if this_month >= today():
         return this_month
-    return (TODAY.replace(day=1) + timedelta(days=32)).replace(day=20)
+    return (today().replace(day=1) + timedelta(days=32)).replace(day=20)
 
 
 def _forms(amount: str) -> list[str]:
-    return [amount, amount.lstrip("-")]
+    # An estimate in a headline spells a negative amount with a real minus
+    # sign, U+2212 (#556).
+    return [amount, "\u2212" + amount.lstrip("-"), amount.lstrip("-")]
+
+
+def _amount_at(text: str, amount: str) -> int:
+    """Where ``text`` states ``amount`` as a number of its own (signed or
+    not, any trailing zeros: ``-3.3100``), or -1. Never inside a longer
+    number: a timestamp's ``13.317000`` seconds is not ``3.31``, which a
+    plain substring test reported as a leak whenever the clock lined up."""
+    for form in _forms(amount):
+        m = re.search(r"(?<![\d.])" + re.escape(form) + r"0*(?!\d)", text)
+        if m:
+            return m.start()
+    return -1
 
 
 def _call_all(
@@ -119,7 +155,8 @@ def _call_all(
 
 
 def _dump(answer: dict[str, Any]) -> str:
-    return json.dumps(answer["structured"]) + "\n".join(answer["text"])
+    # Unescaped: "\\u2212" would hide "52.83" behind a digit from _amount_at.
+    return json.dumps(answer["structured"], ensure_ascii=False) + "\n".join(answer["text"])
 
 
 @pytest.fixture
@@ -150,7 +187,7 @@ def seeded(admin_client: TestClient) -> dict[str, Any]:
                 "account": account,
                 "category": "expenses.dining",
                 "amount": opening,
-                "date": (TODAY - timedelta(days=60)).isoformat(),
+                "date": (today() - timedelta(days=60)).isoformat(),
                 "status": "posted",
             },
         )
@@ -167,7 +204,7 @@ def seeded(admin_client: TestClient) -> dict[str, Any]:
                 # group the month boundary splits to one row would report
                 # that row's amount as its total (the canary failed on the
                 # 10th, when the last row fell into the previous month).
-                "date": max(TODAY - timedelta(days=3 + i), TODAY.replace(day=1)).isoformat(),
+                "date": max(today() - timedelta(days=3 + i), today().replace(day=1)).isoformat(),
                 **({"payee": payee} if payee else {}),
                 "description": description,
                 "status": status,
@@ -183,7 +220,7 @@ def seeded(admin_client: TestClient) -> dict[str, Any]:
                 "category": "expenses.groceries",
                 "amount": amount,
                 # In this month too: they share payee groups with ROWS.
-                "date": max(TODAY - timedelta(days=4 + i), TODAY.replace(day=1)).isoformat(),
+                "date": max(today() - timedelta(days=4 + i), today().replace(day=1)).isoformat(),
                 "payee": payee,
                 "status": "posted",
             },
@@ -196,7 +233,7 @@ def seeded(admin_client: TestClient) -> dict[str, Any]:
             "account": "assets.checking",
             "category": category,
             "amount": amount,
-            "date": (TODAY - timedelta(days=12)).isoformat(),
+            "date": (today() - timedelta(days=12)).isoformat(),
             "payee": payee,
             "description": description,
             "status": "expected",
@@ -214,7 +251,7 @@ def seeded(admin_client: TestClient) -> dict[str, Any]:
                 "name": name,
                 "account": "assets.checking",
                 "rrule": "FREQ=WEEKLY",
-                "dtstart": (TODAY - timedelta(days=2)).isoformat(),
+                "dtstart": (today() - timedelta(days=2)).isoformat(),
                 "amount": schedule_amount,
                 "payee": schedule_payee,
                 "category": "expenses.dining",
@@ -228,20 +265,23 @@ def seeded(admin_client: TestClient) -> dict[str, Any]:
             "name": "Card payment",
             "account": "assets.checking",
             "rrule": "FREQ=MONTHLY;BYMONTHDAY=20",
-            "dtstart": TODAY.isoformat(),
+            "dtstart": today().isoformat(),
             "amount_type": "estimated",
             "estimate_basis": "counterparty_balance",
             "counterparty_account": "liabilities.card",
         },
     )
     assert r.status_code in ok, r.text
-    # A proposal: an inbox card whose headline names a payee.
+    # A proposal: an inbox card whose headline names a payee and an
+    # estimated amount (#556).
     r = c.post(
         "/schedules",
         json={
             "name": "Proposed Orrery bill",
             "account": "assets.checking",
             "rrule": "FREQ=MONTHLY;BYMONTHDAY=9",
+            "amount_type": "estimated",
+            "estimate_basis": "last",
             "amount": "-52.83",
             "payee": "Orrery Utilities",
             "category": "expenses.groceries",
@@ -285,7 +325,17 @@ def seeded(admin_client: TestClient) -> dict[str, Any]:
         json={
             "symbol": "CNRY",
             "quantity": "10",
-            "as_of": (TODAY - timedelta(days=30)).isoformat(),
+            "as_of": (today() - timedelta(days=30)).isoformat(),
+        },
+    )
+    assert r.status_code == 201, r.text
+    # And 7 CNRS, which the canary's record_split halves (cash in lieu).
+    r = c.post(
+        f"/accounts/{broker}/positions",
+        json={
+            "symbol": "CNRS",
+            "quantity": "7",
+            "as_of": (today() - timedelta(days=30)).isoformat(),
         },
     )
     assert r.status_code == 201, r.text
@@ -296,8 +346,8 @@ def seeded(admin_client: TestClient) -> dict[str, Any]:
     )
     assert r.status_code in ok, r.text
     for amount, on, description in (
-        ("2500.00", TODAY - timedelta(days=60), None),  # never a row's own balance
-        (SALE_ROW[0], TODAY - timedelta(days=1), SALE_ROW[1]),
+        ("2500.00", today() - timedelta(days=60), None),  # never a row's own balance
+        (SALE_ROW[0], today() - timedelta(days=1), SALE_ROW[1]),
     ):
         r = c.post(
             "/transactions",
@@ -320,12 +370,10 @@ def seeded(admin_client: TestClient) -> dict[str, Any]:
     for amount, days in (("350000.00", 90), ("7000.00", 10)):
         r = c.post(
             f"/accounts/{house}/value-changes",
-            json={"as_of": (TODAY - timedelta(days=days)).isoformat(), "amount": amount},
+            json={"as_of": (today() - timedelta(days=days)).isoformat(), "amount": amount},
         )
         assert r.status_code in ok, r.text
         value_changes.append(r.json()["transaction_id"])
-    r = c.put("/config", json={"privacy_purchase": True, "privacy_amount": True})
-    assert r.status_code == 200, r.text
     agent = c.post("/tokens", json={"name": "agent", "scopes": ["read", "write"]}).json()
     return {
         "token": agent["token"],
@@ -339,7 +387,7 @@ def seeded(admin_client: TestClient) -> dict[str, Any]:
 
 
 def _read_calls(seeded: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-    period = TODAY.strftime("%Y-%m")
+    period = today().strftime("%Y-%m")
     return [
         ("describe", {}),
         ("list_accounts", {}),
@@ -380,7 +428,7 @@ def _write_calls(seeded: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
             "record_value_change",
             {
                 "account": "assets.house",
-                "as_of": TODAY.isoformat(),
+                "as_of": today().isoformat(),
                 "amount": "2500.00",
                 "note": f"{DESCRIPTIONS[0]} {PAYEES[0]}",
             },
@@ -388,7 +436,7 @@ def _write_calls(seeded: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
         ("reverse_value_change", {"transaction_id": seeded["value_change"]}),
         (
             "dispose_asset",
-            {"account": "assets.house", "as_of": TODAY.isoformat(), "dry_run": True},
+            {"account": "assets.house", "as_of": today().isoformat(), "dry_run": True},
         ),
         (
             "update_occurrence_certainty",
@@ -397,7 +445,7 @@ def _write_calls(seeded: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
                 "amount": {
                     "state": "confirmed",
                     "source": "invoice",
-                    "as_of": TODAY.isoformat(),
+                    "as_of": today().isoformat(),
                     "note": f"{DESCRIPTIONS[0]} {PAYEES[0]} {SCHEDULE_AMOUNTS[0]}",
                 },
             },
@@ -413,12 +461,28 @@ def _write_calls(seeded: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
             },
         ),
         ("match", {"expected_id": seeded["late_bill"], "posted_id": seeded["tx_ids"][5]}),
+        # A manual pending row splits in place (its id stays), then un-splits
+        # (#590): the result's amounts, line amounts and memos are withheld.
+        (
+            "split_transaction",
+            {
+                "transaction_id": seeded["tx_ids"][3],
+                "lines": [
+                    {"category": "expenses.dining", "amount": "-60.00", "memo": DESCRIPTIONS[0]},
+                    {"category": "expenses.groceries", "amount": "-1.29"},
+                ],
+            },
+        ),
+        (
+            "unsplit_transaction",
+            {"transaction_id": seeded["tx_ids"][3], "category": "expenses.groceries"},
+        ),
         (
             "decide_suggestion",
             {
                 "suggestion_id": seeded["suggestion"],
                 "decision": "snooze",
-                "snooze_until": (TODAY + timedelta(days=7)).isoformat(),
+                "snooze_until": (today() + timedelta(days=7)).isoformat(),
             },
         ),
         (
@@ -438,8 +502,18 @@ def _write_calls(seeded: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
                 "symbol": "CNRY",
                 "quantity": "1",
                 "price": SALE_ROW[0],
-                "trade_date": (TODAY - timedelta(days=2)).isoformat(),
+                "trade_date": (today() - timedelta(days=2)).isoformat(),
                 "dry_run": True,
+            },
+        ),
+        (
+            "record_split",
+            {
+                "account": "assets.broker",
+                "symbol": "CNRS",
+                "ratio": "1:2",
+                "effective_date": (today() - timedelta(days=10)).isoformat(),
+                "cash_in_lieu": SPLIT_CASH,
             },
         ),
     ]
@@ -454,10 +528,9 @@ def _assert_clean(answers: list[dict[str, Any]]) -> None:
             if secret in dumped:
                 leaks.append((answer["tool"], secret))
         for amount in SINGLE_AMOUNTS:
-            for form in _forms(amount):
-                if form in dumped:
-                    i = dumped.index(form)
-                    leaks.append((answer["tool"], form, dumped[max(0, i - 120) : i + 20]))
+            i = _amount_at(dumped, amount)
+            if i >= 0:
+                leaks.append((answer["tool"], amount, dumped[max(0, i - 120) : i + 20]))
     assert not leaks, leaks
 
 
@@ -472,7 +545,7 @@ class TestCanary:
         # read_series needs URIs another call hands out: TestSeries covers it.
         covered = {tool for tool, _ in calls} | {"read_series"}
         assert emitting <= covered, emitting - covered
-        answers = _call_all(live_server.url, seeded["token"], calls)
+        answers = _call_all(live_server.url, seeded["token"], _private(calls))
         failed = [(a["tool"], a["text"]) for a in answers if a["error"]]
         assert not failed, "\n".join(f"{tool}: {text}" for tool, text in failed)
         _assert_clean(answers)
@@ -483,7 +556,7 @@ class TestCanary:
         assert all(i["payee"].startswith("py_") for i in search["items"] if i["payee"])
         assert all("amount" not in i for i in search["items"])
 
-    def test_include_brings_back_exactly_its_field(
+    def test_withhold_leaves_out_exactly_its_field(
         self, seeded: dict[str, Any], live_server: LiveServer
     ) -> None:
         tx = seeded["tx_ids"][0]
@@ -491,20 +564,37 @@ class TestCanary:
             live_server.url,
             seeded["token"],
             [
-                ("get_transaction", {"transaction_id": tx, "include": ["payee"]}),
-                ("get_transaction", {"transaction_id": tx, "include": ["description"]}),
-                ("get_transaction", {"transaction_id": tx, "include": ["amount"]}),
+                ("get_transaction", {"transaction_id": tx, "withhold": ["payee"]}),
+                ("get_transaction", {"transaction_id": tx, "withhold": ["description"]}),
+                ("get_transaction", {"transaction_id": tx, "withhold": ["amount"]}),
             ],
         )
         p, d, a = payee["structured"], description["structured"], amount["structured"]
-        assert p["payee"] == "Zephyrine Bakery" and "description" not in p
-        assert all("amount" not in leg for leg in p["postings"])
-        assert p["withheld"] == ["amount", "description"]
-        assert d["description"] == "CANARY-DESC-ALPHA" and d["payee"].startswith("py_")
-        assert d["withheld"] == ["amount", "payee"]
-        assert {leg["amount"] for leg in a["postings"]} == {"-317.4300", "317.4300"}
-        assert a["payee"].startswith("py_") and "description" not in a
-        assert a["withheld"] == ["description", "payee"]
+        assert p["payee"].startswith("py_") and p["description"] == "CANARY-DESC-ALPHA"
+        assert {leg["amount"] for leg in p["postings"]} == {"-317.4300", "317.4300"}
+        assert p["withheld"] == ["payee"]
+        assert d["payee"] == "Zephyrine Bakery" and "description" not in d
+        assert d["withheld"] == ["description"]
+        assert all("amount" not in leg for leg in a["postings"])
+        assert a["payee"] == "Zephyrine Bakery" and a["description"] == "CANARY-DESC-ALPHA"
+        assert a["withheld"] == ["amount"]
+
+    def test_withhold_and_include_refuse_what_they_do_not_take(
+        self, seeded: dict[str, Any], live_server: LiveServer
+    ) -> None:
+        """include adds back external identifiers only: payees, descriptions
+        and amounts are returned unless withheld, and the error says so."""
+        tx = seeded["tx_ids"][0]
+        old, unknown = _call_all(
+            live_server.url,
+            seeded["token"],
+            [
+                ("list_accounts", {"include": ["payee"]}),
+                ("get_transaction", {"transaction_id": tx, "withhold": ["memo"]}),
+            ],
+        )
+        assert old["error"] and "returned unless the call passes withhold" in old["text"][0]
+        assert unknown["error"] and "unknown withhold field" in unknown["text"][0]
 
     def test_external_ids_are_withheld_by_default(
         self, seeded: dict[str, Any], live_server: LiveServer
@@ -534,7 +624,9 @@ class TestSeries:
         )
         uris = [forecast["structured"]["daily_uri"], history["structured"]["series_uri"]]
         answers = _call_all(
-            live_server.url, seeded["token"], [("read_series", {"uri": u}) for u in uris]
+            live_server.url,
+            seeded["token"],
+            [("read_series", {"uri": u, "withhold": ALL}) for u in uris],
         )
         assert not [a for a in answers if a["error"]], answers
         _assert_clean(answers)
@@ -542,33 +634,59 @@ class TestSeries:
         assert body["withheld"] == ["amount"]
         assert all(set(p) == {"date", "balance"} for p in body["points"])
 
-        (included,) = _call_all(
+        (full,) = _call_all(
             live_server.url,
             seeded["token"],
-            [("read_series", {"uri": uris[1], "include": ["amount"]})],
+            [("read_series", {"uri": uris[1]})],
         )
-        assert "delta" in json.loads(included["text"][0])["points"][0]
+        assert "delta" in json.loads(full["text"][0])["points"][0]
 
 
-class TestOneSettingAndNone:
+class TestPartialAndNone:
     def test_amount_only_withholds_rule_and_bill_amounts(
-        self, seeded: dict[str, Any], live_server: LiveServer, admin_client: TestClient
+        self, seeded: dict[str, Any], live_server: LiveServer
     ) -> None:
-        """Review finding 3: with only the amount setting on, amounts quoted
-        in rule text and suggestion headlines are withheld too."""
-        r = admin_client.put("/config", json={"privacy_purchase": False})
-        assert r.status_code == 200, r.text
+        """Review finding 3: withholding only amounts withholds the amounts
+        quoted in rule text and suggestion headlines too."""
         rules, suggestions = _call_all(
             live_server.url,
             seeded["token"],
-            [("list_rules", {}), ("list_suggestions", {})],
+            [
+                ("list_rules", {"withhold": ["amount"]}),
+                ("list_suggestions", {"withhold": ["amount"]}),
+            ],
         )
         for answer in (rules, suggestions):
             dumped = _dump(answer)
             for amount in (RULE_AMOUNT, "-52.83"):
-                for form in _forms(amount):
-                    assert form not in dumped, (answer["tool"], form)
+                assert _amount_at(dumped, amount) < 0, (answer["tool"], amount)
         assert "Orrery Utilities" in _dump(suggestions)  # payees are not withheld
+
+    def test_headlines_name_accounts_and_still_lose_the_withheld_values(
+        self, seeded: dict[str, Any], live_server: LiveServer
+    ) -> None:
+        """#552: a suggestion headline names its account ("on Checking"), and
+        a name is not an identifier the scrubber leaves whole, so the
+        headline is scrubbed like any text: the payee becomes its reference
+        and the bill's name and amount go, in the inbox and the digest."""
+        (plain,) = _call_all(live_server.url, seeded["token"], [("list_suggestions", {})])
+        (shown,) = plain["structured"]["items"]
+        # The estimate's own spelling (#556): U+2248, a space, U+2212.
+        assert "monthly \u2248 \u221252.83 on Checking" in shown["headline"], shown["headline"]
+        inbox, news = _call_all(
+            live_server.url,
+            seeded["token"],
+            _private([("list_suggestions", {}), ("whats_new", {})]),
+        )
+        (card,) = inbox["structured"]["items"]
+        (top,) = news["structured"]["suggestions"]["top"]
+        for headline in (card["headline"], top["headline"]):
+            assert " on Checking with py_" in headline, headline
+            assert "assets.checking" not in headline
+            assert "monthly \u2248 [withheld] on" in headline, headline
+            for secret in ("Orrery", "Proposed", "52.83", "\u2212"):
+                assert secret not in headline, (secret, headline)
+        assert card["draft"]["account"] == "assets.checking"  # the path stays for calls
 
     def test_aggregates_are_never_overwritten(
         self, seeded: dict[str, Any], live_server: LiveServer
@@ -578,11 +696,13 @@ class TestOneSettingAndNone:
         forecast, recurring, news = _call_all(
             live_server.url,
             seeded["token"],
-            [
-                ("forecast_balance", {"account": "assets.checking", "days": 30}),
-                ("list_recurring", {}),
-                ("whats_new", {}),
-            ],
+            _private(
+                [
+                    ("forecast_balance", {"account": "assets.checking", "days": 30}),
+                    ("list_recurring", {}),
+                    ("whats_new", {}),
+                ]
+            ),
         )
         f = forecast["structured"]
         for value in (f["end_balance"], f["start_balance"], f["low"]["balance"]):
@@ -591,11 +711,9 @@ class TestOneSettingAndNone:
         Decimal(news["structured"]["transactions"]["total"])
         Decimal(news["structured"]["upcoming"]["total"])
 
-    def test_privacy_off_returns_everything_and_names_nothing(
-        self, seeded: dict[str, Any], live_server: LiveServer, admin_client: TestClient
+    def test_no_withhold_returns_everything_and_names_nothing(
+        self, seeded: dict[str, Any], live_server: LiveServer
     ) -> None:
-        r = admin_client.put("/config", json={"privacy_purchase": False, "privacy_amount": False})
-        assert r.status_code == 200, r.text
         search, forecast, transaction = _call_all(
             live_server.url,
             seeded["token"],
@@ -620,13 +738,13 @@ class TestReferences:
         (first,) = _call_all(
             live_server.url,
             seeded["token"],
-            [("get_transaction", {"transaction_id": seeded["tx_ids"][0]})],
+            [("get_transaction", {"transaction_id": seeded["tx_ids"][0], "withhold": ["payee"]})],
         )
         ref = first["structured"]["payee"]
         (search,) = _call_all(
             live_server.url,
             seeded["token"],
-            [("search_transactions", {"payee": ref})],
+            [("search_transactions", {"payee": ref, "withhold": ["payee"]})],
         )
         items = search["structured"]["items"]
         assert {i["id"] for i in items} == set(seeded["tx_ids"][:2])
@@ -638,7 +756,7 @@ class TestReferences:
         (first,) = _call_all(
             live_server.url,
             seeded["token"],
-            [("get_transaction", {"transaction_id": seeded["tx_ids"][0]})],
+            [("get_transaction", {"transaction_id": seeded["tx_ids"][0], "withhold": ["payee"]})],
         )
         ref = first["structured"]["payee"]
         refused, unknown = _call_all(
@@ -651,7 +769,7 @@ class TestReferences:
                         "account": "assets.checking",
                         "category": "expenses.dining",
                         "amount": "-1.00",
-                        "date_": TODAY.isoformat(),
+                        "date_": today().isoformat(),
                         "description": f"lunch at {ref}",
                     },
                 ),
@@ -661,7 +779,7 @@ class TestReferences:
                         "account": "assets.checking",
                         "category": "expenses.dining",
                         "amount": "-1.00",
-                        "date_": TODAY.isoformat(),
+                        "date_": today().isoformat(),
                         "payee": "py_aaaaaaaaaa",
                     },
                 ),
@@ -676,7 +794,7 @@ class TestReferences:
         (first,) = _call_all(
             live_server.url,
             seeded["token"],
-            [("get_transaction", {"transaction_id": seeded["tx_ids"][0]})],
+            [("get_transaction", {"transaction_id": seeded["tx_ids"][0], "withhold": ["payee"]})],
         )
         ref = first["structured"]["payee"]
         (created,) = _call_all(
@@ -689,7 +807,7 @@ class TestReferences:
                         "account": "assets.checking",
                         "category": "expenses.dining",
                         "amount": "-2.00",
-                        "date_": TODAY.isoformat(),
+                        "date_": today().isoformat(),
                         "payee": ref,
                     },
                 )
@@ -713,32 +831,30 @@ class TestReferences:
 
 
 class TestErrors:
-    def test_a_refusal_is_scrubbed_of_payee_and_schedule_names(
+    def test_a_refusal_is_scrubbed_when_the_call_withholds(
         self, seeded: dict[str, Any], live_server: LiveServer
     ) -> None:
-        (refused,) = _call_all(
+        """An error from a call that withholds amounts loses the single amount
+        it would quote; one that withholds nothing keeps it."""
+        args = {
+            "transaction_id": seeded["tx_ids"][0],
+            "lines": [
+                {"category": "expenses.dining", "amount": "-100.00"},
+                {"category": "expenses.groceries", "amount": "-100.00"},
+            ],
+            "dry_run": True,
+        }
+        private, plain = _call_all(
             live_server.url,
             seeded["token"],
             [
-                (
-                    "create_schedule",
-                    {
-                        "name": "Again",
-                        "account": "assets.checking",
-                        "rrule": "FREQ=WEEKLY",
-                        "amount": "-1.00",
-                        "payee": "Xylophone Streaming",
-                        "category": "expenses.dining",
-                        "propose": True,
-                    },
-                )
+                ("split_transaction", {**args, "withhold": ["amount"]}),
+                ("split_transaction", args),
             ],
         )
-        assert refused["error"]
-        message = refused["text"][0]
-        assert "already has a schedule" in message
-        assert "Xylophone Streaming" not in message
-        assert "Canary Subscription Xylo" not in message
+        assert private["error"] and plain["error"], (private, plain)
+        assert "317.43" in plain["text"][0]
+        assert "317.43" not in private["text"][0]
 
 
 class TestPresent:
@@ -777,31 +893,72 @@ class TestPresent:
 
 
 class TestAudit:
-    def test_a_call_that_includes_beyond_the_defaults_is_marked_disclosed(
+    def test_a_call_that_includes_external_ids_records_the_request(
         self, seeded: dict[str, Any], live_server: LiveServer, admin_client: TestClient
     ) -> None:
+        """include is recorded as requested; ``disclosed`` (and its filter)
+        needs the identifiers to have been returned, and these accounts have
+        none, so a request alone proves nothing."""
         _call_all(
             live_server.url,
             seeded["token"],
-            [
-                ("search_transactions", {"include": ["payee"]}),
-                ("search_transactions", {}),
-            ],
+            [("list_accounts", {"include": ["external_ids"]}), ("list_accounts", {})],
         )
-        rows = admin_client.get("/audit", params={"disclosed": "true", "limit": 50}).json()
-        items = rows["items"] if isinstance(rows, dict) else rows
-        disclosed = [
-            r for r in items if (r.get("detail") or {}).get("tool") == "search_transactions"
-        ]
-        assert len(disclosed) == 1
-        assert disclosed[0]["disclosed"] == ["payee"]
+        rows = admin_client.get("/audit", params={"limit": 100}).json()["items"]
+        calls = [r for r in rows if (r.get("detail") or {}).get("tool") == "list_accounts"]
+        requested = [r for r in calls if r["detail"]["requested_extra"]]
+        assert len(requested) == 1
+        assert requested[0]["detail"]["requested_extra"] == ["external_ids"]
+        assert requested[0]["disclosed"] is None
+
+    def test_the_row_says_whether_privacy_was_used_or_the_answer_was_identifiable(
+        self, seeded: dict[str, Any], live_server: LiveServer, admin_client: TestClient
+    ) -> None:
+        """#613: every call row records what it asked to withhold, what the
+        answer withheld, and which identifiable fields it returned."""
+        _call_all(
+            live_server.url,
+            seeded["token"],
+            [("search_transactions", {"withhold": ALL}), ("search_transactions", {})],
+        )
+
+        def search_rows(**params: str) -> list[dict[str, Any]]:
+            rows = admin_client.get("/audit", params={"limit": 100, **params}).json()
+            return [
+                r
+                for r in rows["items"]
+                if (r.get("detail") or {}).get("tool") == "search_transactions"
+            ]
+
+        (private,) = search_rows(privacy_requested="true")
+        assert private["privacy_requested"] == sorted(ALL)
+        assert private["identifiable"] == []
+        assert set(private["detail"]["privacy"]["withheld"]) >= {"amount", "payee"}
+        assert "payee" in str(private["detail"]["args"]["withhold"])
+
+        (plain,) = search_rows(identifiable="true")
+        assert plain["privacy_requested"] == []
+        assert {"amount", "payee"} <= set(plain["identifiable"])
+
+        activity = admin_client.get(
+            "/audit/activity", params={"view": "sharing", "privacy": "requested"}
+        ).json()["items"]
+        assert any(
+            e["action"] == "mcp.search_transactions" and set(e["privacy"]["requested"]) == set(ALL)
+            for e in activity
+        )
+        identifiable = admin_client.get(
+            "/audit/activity", params={"view": "sharing", "privacy": "identifiable"}
+        ).json()["items"]
+        assert all(e["privacy"]["identifiable"] for e in identifiable)
+        assert any(e["action"] == "mcp.search_transactions" for e in identifiable)
 
 
 class TestScrubberUnits:
     """The value scrub on its own (review findings 7 and 8)."""
 
     def _scrubber(self, withheld: set[str]) -> Any:
-        from purser.mcp import privacy
+        from purser import privacy
 
         dictionary = privacy.Dictionary(
             payees={"BP": "py_aaaaaaaaaa", "Zephyrine Bakery": "py_bbbbbbbbbb"},
@@ -822,14 +979,39 @@ class TestScrubberUnits:
     def test_numbers_are_never_value_scrubbed(self) -> None:
         s = self._scrubber({"amount"})
         assert s.text("-23.41") == "-23.41"  # an aggregate that equals a bill
-        assert s.text("Gym: weekly ~-23.41 on assets.checking") == (
-            "Gym: weekly ~[withheld] on assets.checking"
+        assert s.text("Gym: weekly -23.41 on assets.checking") == (
+            "Gym: weekly [withheld] on assets.checking"
         )
+
+    def test_an_estimate_loses_its_amount_whole(self) -> None:
+        """#556: an estimate reads "≈" and the amount with a real minus sign
+        (U+2212); the whole amount goes, the sign with it, so the direction
+        does not leak."""
+        from decimal import Decimal
+
+        from purser import privacy, suggestions
+
+        s = self._scrubber({"amount"})
+        estimate = suggestions.estimate_text(Decimal("-23.4100"))
+        assert estimate == "\u2248 \u221223.41"
+        assert s.text(f"Gym: weekly {estimate} on assets.checking") == (
+            "Gym: weekly \u2248 [withheld] on assets.checking"
+        )
+        assert s.text("Gym: weekly \u2248 \u221223.4100 on assets.checking") == (
+            "Gym: weekly \u2248 [withheld] on assets.checking"
+        )
+        assert s.text("\u221223.41") == "[withheld]"  # not a plain number: scrubbed
+        assert s.error(f"Gym is {estimate} weekly") == "Gym is \u2248 [withheld] weekly"
+        assert s.error("due \u22121,234.56 today") == "due [withheld] today"
+        forms = privacy.amount_forms("-1234.5")
+        assert {"\u22121234.50", "\u22121,234.50", "-1,234.50", "1,234.50"} <= forms
+        assert not any(f.startswith("\u2212") for f in privacy.amount_forms("1234.5"))
+        assert privacy.amount_forms("-0.00") == set()
 
     def test_nested_references_resolve_and_free_text_refuses(self) -> None:
         import pytest
 
-        from purser.mcp import privacy
+        from purser import privacy
 
         dictionary = privacy.Dictionary(refs={"py_aaaaaaaaaa": "BP"})
         out = privacy.resolve_inputs(
@@ -852,7 +1034,7 @@ class TestIdentifiersSurvive:
     segment must not rewrite the path, or the agent's next call breaks."""
 
     def test_paths_uris_and_ids_are_never_value_scrubbed(self) -> None:
-        from purser.mcp import privacy
+        from purser import privacy
 
         dictionary = privacy.Dictionary(
             payees={"Mortgage": "py_cccccccccc", "76": "py_dddddddddd"},
@@ -888,7 +1070,7 @@ class TestIdentifiersSurvive:
                 "account": "assets.checking",
                 "category": "expenses.dining",
                 "amount": "-4.44",
-                "date": TODAY.isoformat(),
+                "date": today().isoformat(),
                 "payee": "Checking",
                 "status": "posted",
             },
@@ -897,22 +1079,24 @@ class TestIdentifiersSurvive:
         (forecast,) = _call_all(
             live_server.url,
             seeded["token"],
-            [("forecast_balance", {"account": "assets.checking", "days": 30})],
+            [("forecast_balance", {"account": "assets.checking", "days": 30, "withhold": ALL})],
         )
         f = forecast["structured"]
         assert f["account"] == "assets.checking"
         (series,) = _call_all(
-            live_server.url, seeded["token"], [("read_series", {"uri": f["daily_uri"]})]
+            live_server.url,
+            seeded["token"],
+            [("read_series", {"uri": f["daily_uri"], "withhold": ALL})],
         )
         assert not series["error"], series["text"]
         assert json.loads(series["text"][0])["account"] == "assets.checking"
 
 
 class TestSeriesDisclosure:
-    def test_read_series_with_include_is_recorded(
+    def test_read_series_with_withhold_is_recorded(
         self, seeded: dict[str, Any], live_server: LiveServer, admin_client: TestClient
     ) -> None:
-        """Second review, finding 3."""
+        """Second review, finding 3: the series read records the call's choice."""
         (forecast,) = _call_all(
             live_server.url,
             seeded["token"],
@@ -921,14 +1105,9 @@ class TestSeriesDisclosure:
         _call_all(
             live_server.url,
             seeded["token"],
-            [
-                (
-                    "read_series",
-                    {"uri": forecast["structured"]["daily_uri"], "include": ["amount"]},
-                )
-            ],
+            [("read_series", {"uri": forecast["structured"]["daily_uri"], "withhold": ALL})],
         )
-        rows = admin_client.get("/audit", params={"disclosed": "true", "limit": 50}).json()
+        rows = admin_client.get("/audit", params={"privacy_requested": "true", "limit": 50}).json()
         tools = [(r.get("detail") or {}).get("tool") for r in rows["items"]]
         assert "read_series" in tools
 
@@ -947,7 +1126,7 @@ def test_attention_latest_amount_respects_mcp_disclosure(
     hidden, included = _call_all(
         live_server.url,
         seeded["token"],
-        [("list_suggestions", {}), ("list_suggestions", {"include": ["amount"]})],
+        [("list_suggestions", {"withhold": ["amount"]}), ("list_suggestions", {})],
     )
     assert "73.19" not in _dump(hidden)
     assert "73.19" in _dump(included)

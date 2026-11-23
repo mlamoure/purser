@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
@@ -9,7 +10,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from purser import networth
+from purser.admin import security
 from purser.admin.auth import AdminToken, ReadToken, WriteToken
+from purser.api.disclosure import NOTHING, disclose
 from purser.crypto import EncryptionKeyMissing
 from purser.db import get_session
 from purser.feed import service
@@ -58,6 +61,29 @@ class HealthOut(ConnectionOut):
     backfill_complete: bool
 
 
+class ProposalOut(BaseModel):
+    """What Purser proposes for a delivered bank account nothing takes yet
+    (decision 126), from what the feed states about it. The feed carries no
+    account type, so ``type_basis`` says what the type rests on: `name` (the
+    bank's own words), `holdings` (the name says nothing and the feed lists
+    holdings), `balance` (a debt, with or without credit left) or `default`
+    (nothing says; offered as checking). ``confident`` is false when the type
+    deserves a second look, and ``note`` says why when the name names a cash
+    product but the feed lists holdings for it too."""
+
+    action: Literal["map", "ignore", "blocked"]
+    name: str
+    type: str
+    type_basis: str
+    confident: bool
+    path: str
+    starting_balance: bool
+    # A ledger account path, or another delivered account's ref: the same
+    # account arriving through a second login at the same bank.
+    duplicate_of: str | None = None
+    note: str | None = None
+
+
 class DiscoveredOut(BaseModel):
     external_id: str
     name: str | None
@@ -70,6 +96,9 @@ class DiscoveredOut(BaseModel):
     ambiguous: bool = False
     # An admin chose not to track this unmapped account (#560).
     ignored: bool = False
+    # Purser's proposal for an unmapped account that is not ignored; the map
+    # form starts from it. Null once mapped, ignored or ambiguous.
+    proposal: ProposalOut | None = None
     currency: str
     balance: str | None
     # The bank's available balance (#483), on cash and card accounts only and
@@ -79,6 +108,8 @@ class DiscoveredOut(BaseModel):
     balance_date: date | None = None
     mapped_account_id: uuid.UUID | None
     mapped_account_path: str | None
+    # The mapped Purser account's name, what the screens show (#552).
+    mapped_account_name: str | None = None
     # Live reported-vs-ledger drift (DESIGN §7.3), mapped cash/card accounts
     # only, plus a hand-tracked brokerage account whose feed_balance_is_cash
     # is on (decision 103). Tri-state: both None = not applicable (unmapped /
@@ -154,6 +185,9 @@ class MapRequest(BaseModel):
     external_id: str
     account_id: uuid.UUID | None = None
     create: dict[str, str] | None = None
+    # Start the account from the bank's reported balance once its rows are
+    # in (decision 123). The mapping form sends true unless it is unticked.
+    starting_balance: bool = False
 
 
 class IgnoreRequest(BaseModel):
@@ -189,6 +223,17 @@ class GapRepairOut(BaseModel):
     skipped_redescribed: int = 0
     # Rows that took over a hand-tracked trade's cash (#408, decision 103).
     linked_trade_cash: int = 0
+
+
+class TrueUpOut(BaseModel):
+    """A balance true-up this sync posted (#591, decision 119)."""
+
+    account_id: uuid.UUID
+    amount: Decimal = Field(
+        description="Signed, in ledger sign: the cash the account's postings were short (+) or "
+        "over (-) against the broker's balance less its holdings."
+    )
+    transaction_id: uuid.UUID
 
 
 class SyncOut(BaseModel):
@@ -239,6 +284,9 @@ class SyncOut(BaseModel):
     # Outage repair (#481): set when accounts came back from an outage whose
     # rows this sync's window did not reach; see GapRepairOut.
     gap_repair: GapRepairOut | None = None
+    # Feed-holdings brokerage accounts whose cash this sync put in step with
+    # the broker's balance (#591, decision 119). Skips are on the audit row.
+    balance_true_ups: list[TrueUpOut] = []
 
 
 class RefetchRequest(BaseModel):
@@ -328,7 +376,7 @@ def create_connection(
     )
 
 
-@router.get("/inventory")
+@router.get("/inventory", dependencies=[disclose(NOTHING)])
 def feed_inventory(token: ReadToken, session: DbSession) -> list[InventoryConnectionOut]:
     """Every account SimpleFIN delivers, connected or not, grouped by bank
     login: the login's issue, and per account whether it feeds a ledger
@@ -344,7 +392,7 @@ def feed_inventory(token: ReadToken, session: DbSession) -> list[InventoryConnec
     ]
 
 
-@router.get("")
+@router.get("", dependencies=[disclose(NOTHING)])
 def list_connections(token: ReadToken, session: DbSession) -> list[HealthOut]:
     return [HealthOut(**h) for h in service.connection_health(session)]
 
@@ -423,7 +471,7 @@ def trigger_refetch(
     return RefetchOut(**result)
 
 
-@router.get("/{connection_id}/discovered")
+@router.get("/{connection_id}/discovered", dependencies=[disclose(NOTHING)])
 def discovered_accounts(
     connection_id: uuid.UUID, token: AdminToken, session: DbSession
 ) -> list[DiscoveredOut]:
@@ -445,14 +493,120 @@ def map_account(
             external_id=body.external_id,
             account_id=body.account_id,
             create=body.create,
+            starting_balance=body.starting_balance,
             actor_token_id=token.id,
         )
     except service.FeedError as exc:
         raise _wrap(exc) from exc
     except Exception as exc:  # ledger errors (bad type/path)
         raise HTTPException(422, str(exc)) from exc
+    from purser import starting_balance
+
+    started = starting_balance.get(session, account.id)
     session.commit()
-    return {"account_id": str(account.id), "path": account.path}
+    return {
+        "account_id": str(account.id),
+        "path": account.path,
+        # Present when the account now starts from the bank's balance.
+        **({"starting_balance": str(started.amount)} if started is not None else {}),
+    }
+
+
+class MapAccountItem(BaseModel):
+    """One line of a mapping batch. Everything but ``ref`` is optional: what
+    is left out takes the plan's proposal."""
+
+    ref: str = Field(description="The delivered account's `ref` from the plan.")
+    action: Literal["map", "ignore"] | None = Field(
+        default=None, description="Default: the plan's own action (map, or ignore a duplicate)."
+    )
+    name: str | None = None
+    type: str | None = Field(
+        default=None,
+        description="checking, savings, credit_card, cash, brokerage, loan or property. "
+        "It cannot be changed after mapping.",
+    )
+    path: str | None = None
+    account: str | None = Field(
+        default=None,
+        description="Map onto this existing open account (path or id) instead of a new one.",
+    )
+    starting_balance: bool | None = Field(
+        default=None,
+        description="Start the account from the bank's balance (decision 123). Default: yes "
+        "for a new checking, savings, cash or credit-card account, no for an existing one.",
+    )
+    replace_feed: bool | None = Field(
+        default=None,
+        description="With `account`: map onto it although it already takes another bank "
+        "account's feed, which then waits to be mapped again (decision 134). Admin scope only; "
+        "without it a line onto an account that has a feed is refused, naming that feed.",
+    )
+
+
+class MapAccountsRequest(BaseModel):
+    accounts: list[MapAccountItem] | None = Field(
+        default=None,
+        description="The lines to apply. Omit to get the plan and write nothing.",
+    )
+    dry_run: bool = Field(
+        default=False, description="Check the lines and answer what they would do, unwritten."
+    )
+
+
+class MapAccountsOut(BaseModel):
+    # plan: Purser's proposal for every bank account waiting to be mapped
+    # (no `accounts` sent). results: what the sent lines did, or would do.
+    plan: list[dict[str, Any]] | None = None
+    results: list[dict[str, Any]] | None = None
+    dry_run: bool = False
+
+
+@router.post("/map-accounts")
+def map_accounts(body: MapAccountsRequest, token: WriteToken, session: DbSession) -> MapAccountsOut:
+    """Map the bank accounts SimpleFIN delivers onto ledger accounts, in one
+    batch (decision 126; write scope).
+
+    Without ``accounts`` it answers the **plan** and writes nothing: for each
+    delivered account no ledger account takes, a proposed name, type and
+    ledger path, derived from what the feed states (its name, its bank, its
+    balance and whether it lists holdings; the feed carries no type). A
+    duplicate, the same account through a second login at the same bank, is
+    proposed as ``ignore``.
+
+    With ``accounts`` it applies those lines: each names a delivered account
+    by its ``ref`` and takes the proposal unless it overrides a field. The
+    whole batch is checked first and lands whole or not at all; ``dry_run``
+    answers the same without writing. Mapping imports what was already
+    fetched and, by default, starts a cash or card account from the bank's
+    balance. **An account's type cannot be changed afterwards**, so confirm
+    the plan with the person before applying it.
+
+    A line onto an existing account that already takes a feed is refused,
+    naming that feed, unless it says ``replace_feed`` and the token is an
+    admin's (decision 134); such a line names the feed it replaces in
+    ``replaces``, the dry run included.
+
+    The bank's account ids and balances are never part of the answer."""
+    from purser.feed import proposals
+
+    try:
+        if body.accounts is None:
+            return MapAccountsOut(plan=[p.as_dict() for p in proposals.plan(session)])
+        results = proposals.apply(
+            session,
+            items=[item.model_dump(exclude_none=True) for item in body.accounts],
+            actor_token_id=token.id,
+            dry_run=body.dry_run,
+            may_replace=security.is_admin(token.scopes),
+        )
+    except service.FeedError as exc:
+        raise _wrap(exc) from exc
+    except Exception as exc:  # ledger errors (bad type/path), mapping errors
+        raise HTTPException(422, str(exc)) from exc
+    if not body.dry_run:
+        session.commit()
+    return MapAccountsOut(results=results, dry_run=body.dry_run)
 
 
 @router.post("/{connection_id}/ignore")

@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from purser import memories as memories_service
 from purser.admin.auth import AdminToken, ReadToken, WriteToken
+from purser.api.disclosure import Emits, disclose
 from purser.db import get_session
 from purser.ledger import LedgerError, NotFoundError
 from purser.models import Memory
@@ -78,7 +79,7 @@ def _out(session: Session, memory: Memory, stale: set[uuid.UUID]) -> MemoryOut:
     )
 
 
-@router.get("")
+@router.get("", dependencies=[disclose(Emits(payee=True, narrative=True))])
 def list_memories(
     token: ReadToken,
     session: DbSession,

@@ -34,9 +34,76 @@ Select **Map** beside it (admins only) and either create a new Purser account
 (name, type and ledger path; cards and loans default under `liabilities.`) or
 pick an existing open account in the same currency. Picking an account that
 another feed account already feeds moves the feed onto the new one. The
-already-fetched transactions import as soon as you map. Only mapped accounts
+already-fetched transactions import as soon as you map. **Start from the
+bank's balance** (ticked for a new account) then adds one starting entry so
+the account matches the balance the bank reports:
+[Start an account from the bank's balance](../starting-balance/). Only mapped accounts
 sync. Closing a ledger account unmaps it, and the feed account reappears as
 unmapped — reopen and remap to resume.
+
+### What Purser proposes
+
+SimpleFIN states an account's name, its bank, its currency, its balances and
+(for investment accounts) its holdings. It does not state what kind of account
+it is, and **the account type cannot be changed after mapping**. Purser
+therefore proposes one and says what the proposal rests on:
+
+| The feed shows | Proposed type |
+| --- | --- |
+| A word for the product in the name ("Savings", "Visa", "Mortgage") | That product |
+| A cash product's name, and holdings as well | That product, marked unsure: say whether it is really an investment account |
+| No such word, and holdings | Brokerage |
+| No such word, and a debt with credit left | Credit card |
+| No such word, and a debt with no transactions | Loan (marked unsure) |
+| Nothing that says | Checking (marked unsure) |
+
+It also proposes a name (the bank's, without the masked account digits) and a
+ledger path, both kept clear of accounts you already have, and it points out
+an account that a second login at the same bank delivers again (a joint
+account), which should be ignored rather than mapped twice. The map form
+starts from this proposal; change anything before you confirm.
+
+### Let your agent map them
+
+An agent with a `read + write` token can do the mapping. `map_feed_accounts`
+with no arguments answers the plan above for every account still waiting and
+changes nothing. The agent shows you that plan, and after your answer applies
+the lines you agreed to with your corrections, in one batch that lands whole
+or not at all. It names each account by an opaque reference: the bank's
+account ids, the masked digits and the balances are never shown to it. Over
+REST the same call is `POST /connections/map-accounts`.
+
+```json
+{
+  "plan": [
+    {
+      "ref": "fa_k3v9q2m7x4tb",
+      "institution": "Example Bank",
+      "bank_name": "Everyday Checking",
+      "action": "map",
+      "name": "Everyday Checking",
+      "type": "checking",
+      "type_basis": "name",
+      "confident": true,
+      "path": "assets.everyday_checking",
+      "starting_balance": true
+    }
+  ]
+}
+```
+
+An agent can also map a bank account onto an existing account (`account` on
+the line), but only one that takes no feed yet. If the account already takes
+another bank account's feed, the line is refused and the answer names that
+feed: mapping onto it would replace the feed, the other bank account would wait
+to be mapped again, and the new bank's rows would land in the account. Only an
+admin can replace a feed: use the map form, which marks such accounts "replaces
+its current feed", or send `"replace_feed": true` with an admin token. The
+answer then names the feed it replaced, in the dry run too.
+
+Mapping cannot be undone from the app. To remove an account that was mapped
+with the wrong type, use the `delete-account` command described in the
+[CLI reference](../../reference/cli/), then map the bank account again.
 
 Until you decide, the Dashboard lists each such account under **bank accounts
 not in Purser yet**, with a link that opens its row.
@@ -215,6 +282,11 @@ budget, and the per-connection guard fails soft beyond it. Each run starts
 at a random point in the 10 minutes after its slot, as SimpleFIN asks apps to
 spread their fetches. Agents should call
 `trigger_sync` when the user wants fresh data, not on every question.
+
+A sync whose time passes while the machine is asleep or Purser is stopped is
+not lost: Purser runs it once when it wakes or starts, however many were
+missed. A connection whose last attempt failed is not tried again at every
+restart.
 
 The daily time is a clock time in the household time zone (`PURSER_TIMEZONE`,
 **Settings -> General**), stored as the hour and minute of `sync_schedule` in

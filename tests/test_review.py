@@ -6,7 +6,7 @@ not a formality: it proves marking touched no ledger column.
 """
 
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from purser import review
 from purser.models import ApiToken, TransactionReview
+from tests.conftest import today
 
 
 @pytest.fixture
@@ -64,7 +65,7 @@ def _feed_row(
         account_ref="assets.checking",
         category_ref=category,
         amount=Decimal("-25.00"),
-        date=when or date.today(),
+        date=when or today(),
         payee_name="Feed Row",
         description="FEED ROW",
         requested_status=core.Status.POSTED if status == "posted" else core.Status.PENDING,
@@ -94,7 +95,7 @@ class TestScope:
                 "account": "assets.checking",
                 "category": "expenses.dining",
                 "amount": "-10.00",
-                "date": date.today().isoformat(),
+                "date": today().isoformat(),
                 "status": "posted",
             },
         )
@@ -418,7 +419,7 @@ def _shaped_row(session: Session, *, origin: str, status: str, from_feed: bool) 
         account_ref="assets.checking",
         category_ref="expenses.uncategorized",
         amount=Decimal("-5.00"),
-        date=date.today(),
+        date=today(),
         payee_name="Synthetic Payee",
         requested_status=core.Status(status),
         origin=core.Origin(origin),
@@ -467,7 +468,7 @@ class TestNeedsReviewFlag:
                 "account": "assets.checking",
                 "category": "expenses.dining",
                 "amount": "-10.00",
-                "date": date.today().isoformat(),
+                "date": today().isoformat(),
                 "status": "posted",
             },
         )
@@ -482,7 +483,7 @@ class TestNeedsReviewFlag:
                 "account": "assets.checking",
                 "category": "expenses.dining",
                 "amount": "-11.00",
-                "date": date.today().isoformat(),
+                "date": today().isoformat(),
             },
         )
         assert agent.status_code == 201, agent.text
@@ -589,7 +590,7 @@ class TestAgedSweep:
 
         # Dated old at CREATION: a posted row's date is immutable (migration
         # 0005), which is the same guard this feature had to route around.
-        tx_id = _feed_row(db_session, when=datetime.now(UTC).date() - timedelta(days=200))
+        tx_id = _feed_row(db_session, when=today() - timedelta(days=200))
         db_session.commit()
 
         assert review.aged_sweep(db_session, max_age_days=90) == 1

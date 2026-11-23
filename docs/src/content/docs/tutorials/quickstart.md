@@ -10,8 +10,9 @@ connected over MCP.
 [Set up Purser with your AI](../ai-setup/): it runs the same steps and tells
 you exactly when it needs you.
 
-**You need:** Docker with Compose on linux/amd64 or linux/arm64 (including an
-Apple Silicon Mac; see [Docker on macOS](../../how-to/macos-uvx/)) and curl;
+**You need:** Docker with Compose on linux/amd64 or linux/arm64 and curl. On a
+Mac without Docker, [Docker on macOS](../../how-to/macos-uvx/) has a script
+that installs it;
 optionally, for live bank data, a [SimpleFIN Bridge](https://bridge.simplefin.org/)
 account. You do not need Git, and nothing is built: Compose pulls the published
 image.
@@ -20,16 +21,16 @@ image.
 
 ```bash
 mkdir purser && cd purser
-curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.5/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.6/docker-compose.yml
 PURSER_ENCRYPTION_KEY=keygen docker compose pull
-PURSER_ENCRYPTION_KEY=keygen docker compose run --rm --no-deps purser keygen
+docker run --rm ghcr.io/mlamoure/purser:v2026.11.6 keygen
 ```
 
-The compose file belongs to the latest release, 2026.11.5, and names its image,
-`ghcr.io/mlamoure/purser:v2026.11.5` (linux/amd64 and linux/arm64). Every
+The compose file belongs to the latest release, 2026.11.6, and names its image,
+`ghcr.io/mlamoure/purser:v2026.11.6` (linux/amd64 and linux/arm64). Every
 release publishes its own at the same address under its tag (`vYYYY.M.PATCH`).
-The temporary `keygen` value satisfies Compose interpolation for these utility
-commands. The last one generates a key without starting the app or connecting
+The temporary `keygen` value satisfies Compose interpolation for the pull.
+The last command generates a key without starting the app or connecting
 to the database.
 
 Record the generated key in a password manager, separately from your backups.
@@ -49,10 +50,10 @@ Instead of exporting the key in every shell, you can put the line
 
 Expected: `{"status":"ok","database":"ok"}`. Two containers run: the app and
 PostgreSQL 16. Migrations apply automatically on startup. Purser refuses to
-start without the key. Configure `PURSER_PUBLIC_URL` if you access the app
-through another host or reverse proxy. Compose binds to localhost by default.
-Finish admin setup first, then set `PURSER_BIND_ADDRESS` to the interface that
-should accept remote traffic and use HTTPS for remote access.
+start without the key. If another program already uses port 8000, add
+`PURSER_HOST_PORT=8010` to `.env` and use that port below. Compose publishes
+Purser on this machine only; to use it from another machine at home, see
+[Another machine on your home network](../../how-to/docker-compose/#another-machine-on-your-home-network).
 
 ## 3. Run the setup wizard
 
@@ -64,11 +65,13 @@ everything else:
    until you acknowledge it. Check that it matches the key you stored, then
    acknowledge it.
 3. (Optional) Paste a SimpleFIN **setup token** to connect your bank, then
-   map the discovered accounts.
+   map the discovered accounts: Purser proposes a type for each from the
+   bank's name, and starts each account from the balance your bank reports.
 4. (Optional) Import bank history from a QIF or CSV export.
-5. Connect your AI agent: the wizard mints a scoped **read + write** API
-   token and shows exact connection steps for your client — Claude, Codex,
-   OpenClaw, Gemini, or any other MCP client. That scope pair lets your agent
+5. Connect your AI agent: the wizard creates a scoped **read + write** API
+   token and shows the exact steps for your client, with the address and
+   token filled in: Claude Code, Claude Desktop, Codex, Gemini, OpenClaw or
+   any other MCP client. That scope pair lets your agent
    act for you: every write it makes is recorded in the audit log and can be
    reversed, and when it acts on its own idea it proposes instead.
 
@@ -86,6 +89,16 @@ mapping its accounts, connecting an agent), each with the reason and a link to
 where it gets done. The card disappears once everything is done, or when you
 dismiss it. A bank account that arrives after setup is not part of this card:
 the Dashboard lists it separately until you map or ignore it.
+
+## Balances match your bank from the start
+
+A bank feed delivers about three months of transactions and no balance from
+before them. With **Start from the bank's balance** ticked in the map form
+(the default for a new account), Purser adds one starting entry per account,
+so balances and net worth match your bank as soon as the accounts are mapped.
+Import older history whenever you like: Purser lowers the starting entry by
+what the file brings in. See
+[Start an account from the bank's balance](../../how-to/starting-balance/).
 
 ## Build from source
 

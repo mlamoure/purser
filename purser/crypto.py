@@ -13,20 +13,26 @@ Since #137 the *narrative* layer (payee names, transaction descriptions,
 posting memos, schedule names, audit/event payloads) is encrypted too, via the
 ``EncryptedText`` / ``EncryptedJSON`` SQLAlchemy TypeDecorators (transparent
 bind=encrypt / result=decrypt on ``*_enc`` BYTEA columns). Two derived
-capabilities keep equality lookups and dedup working over ciphertext:
+capabilities keep equality lookups and dedup working over ciphertext, and a
+third names payees to agents without their names:
 
 - ``blind_index(value)`` — a deterministic HMAC over normalized payee text,
   stored plaintext in ``payees.name_bidx`` (a non-unique index), so payee
   identity resolves without decrypting every row.
 - ``keyed_hash(v1_hex)`` — HMAC-composed transaction ``content_hash`` (harden
   the dedup identity against dictionary attack on a DB dump).
+- ``payee_ref(payee_id)`` — the stable ``py_`` reference agents receive in
+  place of a payee name (#437, decision 91); ``feed_account_ref`` derives
+  under the same key with its own domain prefix.
 
-Both HMAC keys are *wrapped data-encryption keys* (DEKs): migration 0016
-generates two random 32-byte keys, stores them Fernet-wrapped in the
-``encryption_keys`` table, and loads them lazily (cached, fail-closed). Wrapped
-DEKs make key rotation re-encrypt ciphertext + re-wrap two rows while leaving
-every blind index and content hash **byte-identical** — HKDF-from-primary would
-instead force a global rehash on every rotation (decision 36).
+All three HMAC keys are *wrapped data-encryption keys* (DEKs), one
+``encryption_keys`` row each: migration 0016 generates ``blind_index`` and
+``content_hash``, migration 0038 adds ``payee_ref``. Each is a random 32-byte
+key, stored Fernet-wrapped and loaded lazily (cached, fail-closed). Wrapped
+DEKs make key rotation re-encrypt ciphertext + re-wrap three rows while leaving
+every blind index, content hash and payee reference **byte-identical** —
+HKDF-from-primary would instead force a global rehash on every rotation
+(decision 36).
 """
 
 import base64
@@ -46,7 +52,7 @@ from purser.config import get_settings
 
 CANARY_SENTINEL = "purser-canary-v1"
 
-# encryption_keys.purpose values for the two wrapped DEKs (#137).
+# encryption_keys.purpose values for the three wrapped DEKs (#137, #437).
 BLIND_INDEX_PURPOSE = "blind_index"
 CONTENT_HASH_PURPOSE = "content_hash"
 # Payee references handed to agents (#437): HMAC over the payee id, so a
@@ -83,8 +89,7 @@ class EncryptionKeyMismatch(Exception):
         )
 
 
-def _keys() -> list[str]:
-    raw = get_settings().encryption_key
+def _split_keys(raw: str | None) -> list[str]:
     if not raw:
         raise EncryptionKeyMissing()
     keys = [k.strip() for k in raw.split(",") if k.strip()]
@@ -93,11 +98,33 @@ def _keys() -> list[str]:
     return keys
 
 
+def _keys() -> list[str]:
+    return _split_keys(get_settings().encryption_key)
+
+
+# The MultiFernet for the configured key material (#658): building one parses
+# and validates every key, which cost about a sixth of each decrypt when it
+# happened per call. The cache is keyed by the raw PURSER_ENCRYPTION_KEY
+# string, so a changed key (a rotation's "new,old", a test that swaps keys, a
+# reloaded setting) never gets the object built for the old one. One tuple,
+# replaced in one assignment, so a reader on another thread sees a matching
+# (key, object) pair or none.
+_fernet_cache: tuple[str, MultiFernet] | None = None
+
+
 def _fernet() -> MultiFernet:
+    global _fernet_cache
+    raw = get_settings().encryption_key
+    cached = _fernet_cache
+    if cached is not None and cached[0] == raw:
+        return cached[1]
+    keys = _split_keys(raw)  # raises for a missing key, so raw is a str below
     try:
-        return MultiFernet([Fernet(k.encode()) for k in _keys()])
+        fernet = MultiFernet([Fernet(k.encode()) for k in keys])
     except ValueError as exc:
         raise EncryptionKeyInvalid() from exc
+    _fernet_cache = (str(raw), fernet)
+    return fernet
 
 
 def ensure_key() -> None:
@@ -160,7 +187,7 @@ def verify_canary(connection: Connection) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Wrapped data-encryption keys (DEKs) for blind index + keyed content hash
+# Wrapped data-encryption keys (DEKs): blind index, keyed content hash, payee ref
 # ---------------------------------------------------------------------------
 
 
@@ -254,6 +281,25 @@ def payee_ref(payee_id: uuid.UUID) -> str:
     byte-identical across ``purser admin rotate-key``."""
     digest = hmac.new(_load_dek(PAYEE_REF_PURPOSE), payee_id.bytes, hashlib.sha256).digest()
     return PAYEE_REF_PREFIX + base64.b32encode(digest).decode().lower()[:PAYEE_REF_LENGTH]
+
+
+FEED_ACCOUNT_REF_PREFIX = "fa_"
+FEED_ACCOUNT_REF_LENGTH = 12  # base32 characters: 60 bits
+
+
+def feed_account_ref(connection_id: uuid.UUID, external_id: str) -> str:
+    """A delivered bank account's stable reference for agents (#583): ``fa_``
+    plus the first characters of an HMAC over the connection and the bank's
+    account id. It names the account in a mapping call without disclosing
+    the bank's id, which non-admin tokens never see (decision 100). Derived
+    under the payee-ref key with its own domain prefix, so it needs no key of
+    its own and survives ``purser admin rotate-key``."""
+    message = b"feed-account\x00" + connection_id.bytes + b"\x00" + external_id.encode()
+    digest = hmac.new(_load_dek(PAYEE_REF_PURPOSE), message, hashlib.sha256).digest()
+    return (
+        FEED_ACCOUNT_REF_PREFIX
+        + base64.b32encode(digest).decode().lower()[:FEED_ACCOUNT_REF_LENGTH]
+    )
 
 
 # ---------------------------------------------------------------------------

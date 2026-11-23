@@ -4,6 +4,7 @@ import { api, errorDetail } from "../../lib/api";
 import { Button, Card, CardTitle, ErrorText, Input, Label } from "../../components/ui";
 import type { components } from "../../api/schema";
 import { formatDate } from "../../lib/dates";
+import { useAccountNames } from "../../lib/names";
 
 type RefetchOut = components["schemas"]["RefetchOut"];
 type GapRepair = components["schemas"]["GapRepairOut"];
@@ -30,6 +31,7 @@ function isoDaysAgo(days: number): string {
 export function RefetchCard({ connectionId }: { connectionId: string }) {
   const qc = useQueryClient();
   const inventory = useQuery(inventoryQuery);
+  const accountName = useAccountNames();
   const mapped = (inventory.data ?? [])
     .flatMap((c) => c.logins)
     .flatMap((l) => l.accounts)
@@ -87,7 +89,7 @@ export function RefetchCard({ connectionId }: { connectionId: string }) {
           >
             {mapped.map((path) => (
               <option key={path} value={path}>
-                {path}
+                {accountName(path)}
               </option>
             ))}
           </select>

@@ -17,12 +17,21 @@ export interface ForecastLow {
   range?: ForecastRange & { low_date: string };
 }
 
+/** A schedule event's certainty (#512): flags present only when true. */
+export interface ForecastCertainty {
+  status: string;
+  amount_estimated?: boolean;
+  date_estimated?: boolean;
+}
+
 export interface ForecastEvent {
   date: string;
   name: string;
   amount: string;
   balance_after: string;
   transaction_id: string | null;
+  /** On a schedule's event; amount_estimated marks it "≈ −$95" (#556). */
+  certainty?: ForecastCertainty;
   /** Expanded from the rule past the materialized horizon (#235). */
   projected?: boolean;
   /** Dated before today and still due — lands on day 0. */

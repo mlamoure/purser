@@ -161,19 +161,20 @@ def create_split_transaction(
     token: ApiToken | None,
     content_hash: str | None = None,
 ) -> Transaction:
-    """A split transaction (DESIGN §3.3, decision 87): ONE row with one real
-    leg carrying ``amount`` and one category leg per line, zero-sum by
-    construction (``core.expand_split``). Not a transfer, and read-only once
-    written in v1 (``_flat_legs`` refuses it). Every line names a category;
-    money that reaches another real account is a transfer of its own (the QIF
-    importer carves those lines out, decision 87)."""
+    """A split transaction with category lines only (DESIGN §3.3, decision
+    87) — the QIF import's: ONE row with one real leg carrying ``amount`` and
+    one category leg per line, zero-sum by construction
+    (``core.expand_split``), carrying the split marker (decision 118). Every
+    line names a category here; the QIF importer carves ``[X]`` lines out as
+    transfers (decision 87). A split with ``[Account]`` lines, and every edit
+    of a split, goes through ``splits.split_transaction``."""
     account = resolve_account(session, account_ref)
     if account.is_virtual:
         raise LedgerError(f"{account.path} is a category; a split needs a real account")
     currency = account.currency.strip()
     for line in lines:
         category = get_account(session, line.category_id)
-        if not category.is_virtual:
+        if line.is_account or not category.is_virtual:
             raise LedgerError(f"{category.path} is not a category (virtual account)")
         refuse_system_account(category)
         if category.currency.strip() != currency:
@@ -194,6 +195,7 @@ def create_split_transaction(
         origin=origin,
         token=token,
         content_hash=content_hash,
+        split_account_id=account.id,
     )
 
 
@@ -291,6 +293,7 @@ def _persist_transaction(
     source_fetch_id: uuid.UUID | None = None,
     content_hash: str | None = None,
     reverses_id: uuid.UUID | None = None,
+    split_account_id: uuid.UUID | None = None,
 ) -> Transaction:
     if not core.is_balanced(specs):
         raise LedgerError("postings do not balance")  # unreachable via public forms
@@ -314,6 +317,7 @@ def _persist_transaction(
         content_hash=content_hash,
         reverses_id=reverses_id,
         created_by=token.id if token else None,
+        split_account_id=split_account_id,
     )
     session.add(tx)
     session.flush()

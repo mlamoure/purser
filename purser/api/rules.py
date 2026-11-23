@@ -18,9 +18,11 @@ from sqlalchemy.orm import Session
 
 from purser import rules as rules_service
 from purser.admin.auth import ReadToken, WriteToken
+from purser.api.disclosure import Emits, disclose
 from purser.core import matching as core_matching
 from purser.core import rules as core_rules
 from purser.db import get_session
+from purser.ledger import SECURITIES_PATH
 from purser.models import Rule
 
 DbSession = Annotated[Session, Depends(get_session)]
@@ -93,10 +95,19 @@ class RulePredicate(BaseModel):
     window_days: WindowDays | None = Field(default=None, description=_WINDOW_DAYS_DOC)
 
 
+_SECURITIES_TRADE_DOC = (
+    "categorize rules only, in place of category_id: mark matching rows as a securities "
+    "trade (the system account equity.securities, never spending or income). The rule must "
+    "name account_ids, every one a brokerage account whose holdings come from the feed (422 "
+    "otherwise): Purser never decides on its own which rows are trades."
+)
+
+
 class RuleCreate(RulePredicate):
     type: Literal["categorize", "rename", "transfer_link"]
     priority: int = 100
     category_id: uuid.UUID | None = None
+    securities_trade: bool = Field(default=False, description=_SECURITIES_TRADE_DOC)
     payee_name: str | None = None
     pair_account_a: uuid.UUID | None = None
     pair_account_b: uuid.UUID | None = None
@@ -109,6 +120,11 @@ class RuleCreate(RulePredicate):
 class RuleUpdate(RulePredicate):
     priority: int | None = None
     category_id: uuid.UUID | None = None
+    securities_trade: bool | None = Field(
+        default=None,
+        description=_SECURITIES_TRADE_DOC + " true sets that target; to change it back, send a "
+        "category_id instead.",
+    )
     payee_name: str | None = None
     pair_account_a: uuid.UUID | None = None
     pair_account_b: uuid.UUID | None = None
@@ -138,6 +154,11 @@ class RuleOut(BaseModel):
             "the pair's legs must carry — that payee or any alias of it. Null = the whole pair."
         ),
     )
+    securities_trade: bool = Field(
+        default=False,
+        description="categorize rules that mark matching rows as a securities trade "
+        "(equity.securities) rather than a category.",
+    )
 
     @classmethod
     def from_model(cls, rule: Rule, paths: _Accounts) -> "RuleOut":
@@ -152,7 +173,17 @@ class RuleOut(BaseModel):
             note=rule.note,
             window_days=window_of(rule),
             payee_scope=payee_scope_of(rule, paths),
+            securities_trade=is_securities_rule(rule, paths),
         )
+
+
+def is_securities_rule(rule: Rule, paths: _Accounts) -> bool:
+    """A categorize rule whose target is "Securities trade" (decision 119)."""
+    return (
+        rule.type == rules_service.TYPE_CATEGORIZE
+        and rule.category_id is not None
+        and paths.get(rule.category_id) == SECURITIES_PATH
+    )
 
 
 def window_of(rule: Rule) -> int | None:
@@ -208,6 +239,8 @@ def _render_action(rule: Rule, paths: _Accounts) -> str:
         # like a manual transfer categorization (decision 46, clarification 2).
         if rule.category_id in paths.real:
             return f"-> [{path}]"
+        if path == SECURITIES_PATH:
+            return f"-> Securities trade ({path})"
         return f"-> {path}"
     if rule.type == rules_service.TYPE_RENAME:
         return f'-> payee "{rule.payee_name}"'
@@ -216,7 +249,7 @@ def _render_action(rule: Rule, paths: _Accounts) -> str:
     return f"link {a} <-> {b}"
 
 
-@router.get("")
+@router.get("", dependencies=[disclose(Emits(payee=True, rule_text=True))])
 def list_rules(
     session: DbSession,
     _: ReadToken,
@@ -236,10 +269,13 @@ def list_rules(
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_rule(body: RuleCreate, token: WriteToken, session: DbSession) -> RuleOut:
-
-    fields = body.model_dump(exclude_none=True, exclude={"activate"})
+    """Create a rule, a draft unless `activate`. `securities_trade` makes a
+    categorize rule mark its rows as a securities trade (decision 119)."""
+    fields = body.model_dump(exclude_none=True, exclude={"activate", "securities_trade"})
     activate = body.activate
     try:
+        if body.securities_trade:
+            fields["category_id"] = _securities_target(session, body.type, body.category_id)
         rule = rules_service.create(session, fields=fields, token=token, activate=activate)
     except rules_service.RuleError as exc:
         raise _handle(exc) from exc
@@ -251,14 +287,33 @@ def create_rule(body: RuleCreate, token: WriteToken, session: DbSession) -> Rule
 def update_rule(
     rule_id: uuid.UUID, body: RuleUpdate, token: WriteToken, session: DbSession
 ) -> RuleOut:
+    changes = body.model_dump(exclude_unset=True, exclude={"securities_trade"})
     try:
-        rule = rules_service.update(
-            session, rule_id=rule_id, changes=body.model_dump(exclude_unset=True), token=token
-        )
+        if body.securities_trade:
+            changes["category_id"] = _securities_target(session, None, body.category_id)
+        elif body.securities_trade is False and "category_id" not in changes:
+            raise rules_service.RuleError(
+                "to change a securities-trade rule back, send the category_id it should book to"
+            )
+        rule = rules_service.update(session, rule_id=rule_id, changes=changes, token=token)
     except rules_service.RuleError as exc:
         raise _handle(exc) from exc
     session.commit()
     return RuleOut.from_model(rule, _Accounts(session))
+
+
+def _securities_target(
+    session: Session, rule_type: str | None, category_id: uuid.UUID | None
+) -> uuid.UUID:
+    if category_id is not None:
+        raise rules_service.RuleError(
+            "securities_trade replaces category_id: send one or the other, not both"
+        )
+    if rule_type is not None and rule_type != rules_service.TYPE_CATEGORIZE:
+        raise rules_service.RuleError("securities_trade applies only to categorize rules")
+    from purser import ledger
+
+    return ledger.securities_account(session).id
 
 
 class StateChange(BaseModel):

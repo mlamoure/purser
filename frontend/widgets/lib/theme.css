@@ -1,7 +1,9 @@
 /* Shared widget theme (guardrails 8-9): CSS variables only, both color
  * schemes. Dark mode follows the OS via prefers-color-scheme by default;
  * an Apps host that announces its theme wins via [data-theme=...] set by
- * lib/host.ts. Palette transcribed from docs/mockups/. */
+ * lib/host.ts. Palette transcribed from docs/mockups/, with --text-muted
+ * darkened (light) and lightened (dark) to WCAG AA, 4.5:1 on every surface
+ * (#556); theme.test.ts checks every text color against the surfaces. */
 
 :root {
   --surface-2: #ffffff;
@@ -9,7 +11,7 @@
   --border: #d3d1c7;
   --text-primary: #2c2c2a;
   --text-secondary: #5f5e5a;
-  --text-muted: #888780;
+  --text-muted: #6c6b64;
   --bg-accent: #e6f1fb;
   --text-accent: #185fa5;
   --bg-danger: #fcebeb;
@@ -31,7 +33,7 @@
     --border: #444441;
     --text-primary: #f1efe8;
     --text-secondary: #b4b2a9;
-    --text-muted: #888780;
+    --text-muted: #96958e;
     --bg-accent: #0c447c;
     --text-accent: #b5d4f4;
     --bg-danger: #501313;
@@ -52,7 +54,7 @@
   --border: #d3d1c7;
   --text-primary: #2c2c2a;
   --text-secondary: #5f5e5a;
-  --text-muted: #888780;
+  --text-muted: #6c6b64;
   --bg-accent: #e6f1fb;
   --text-accent: #185fa5;
   --bg-danger: #fcebeb;
@@ -71,7 +73,7 @@
   --border: #444441;
   --text-primary: #f1efe8;
   --text-secondary: #b4b2a9;
-  --text-muted: #888780;
+  --text-muted: #96958e;
   --bg-accent: #0c447c;
   --text-accent: #b5d4f4;
   --bg-danger: #501313;
@@ -192,4 +194,18 @@ body {
   font-weight: 500;
   color: var(--text-primary);
   margin: 0;
+}
+
+/* Read by screen readers, not shown: the "estimated" an estimate's mark
+ * stands for (#556, kit.estimateNode). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }

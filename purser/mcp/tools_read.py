@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from purser import clock, ledger
 from purser.mcp._registry import _amount, _principal, _run, audited_tool
-from purser.mcp.privacy import NOTHING, Emits
+from purser.privacy import NOTHING, Emits
 
 
 def _balance_of(row: Any) -> Decimal:
@@ -58,17 +58,21 @@ def _review_summary(session: Session) -> dict[str, Any]:
     kind="read",
     entity="system",
     scope="read",
-    emits=Emits(payee=True, skip=("conventions", "aggregate_tools")),
+    emits=Emits(payee=True, skip=("conventions", "aggregate_tools", "reach")),
 )
 async def describe() -> dict[str, Any]:
-    """Orient in one round-trip: data model, conventions, scopes, category
+    """Orient in one round-trip: data model, conventions, scopes, how Purser
+    is reached (this_machine, home_network, reverse_proxy or unknown), category
     tree, and account list. Call this first in a fresh session."""
 
     def op(session: Session) -> dict[str, Any]:
+        from purser import network
         from purser import networth as networth_service
+        from purser.config import get_settings
         from purser.models import Account
 
         principal = _principal()
+        settings = get_settings()
         accounts = list(
             session.execute(
                 select(Account).where(Account.is_virtual.is_(False)).order_by(Account.path)
@@ -116,12 +120,13 @@ async def describe() -> dict[str, Any]:
                 ),
                 "references": "accounts/categories accept UUID or ltree path",
                 "disclosure": (
-                    "the user's privacy settings may withhold payees (you get "
-                    "py_ references), descriptions and single amounts; `withheld` "
-                    "names them. include=[...] only what the question needs; "
-                    "filter with payee references; present(transaction_ids) shows "
-                    "the user details without you repeating them. Aggregates are "
-                    "always exact"
+                    "your choice per call: when the question or action does not "
+                    "need them, pass withhold=[payee, description, amount] (any "
+                    "subset); payees then arrive as py_ references and `withheld` "
+                    "names what was left out. Nothing is withheld unless you ask. "
+                    "Filter and act with payee references; present(transaction_ids) "
+                    "shows the user details without you repeating them. Aggregates "
+                    "are always exact"
                 ),
                 "transfers": (
                     "one transaction with two real-account postings; "
@@ -131,6 +136,8 @@ async def describe() -> dict[str, Any]:
                 ),
             },
             "your_scopes": list(principal.scopes),
+            # One word (#632): whether other machines can reach this Purser.
+            "reach": network.reach_mode(settings.public_url, settings.bind_address),
             "accounts": [
                 {
                     "path": a.path,
@@ -297,7 +304,8 @@ async def feed_status() -> dict[str, Any]:
     user chose to ignore is not listed), stale Nd
     (the bank balance has not updated for N days), an act.* code (the bank
     failed to deliver it), ambiguous_id. Account numbers are never shown.
-    Use it for "did a new account show up?" or "which bank needs me?"."""
+    Use it for "did a new account show up?" or "which bank needs me?". A
+    not_connected account carries a ref: map_feed_accounts maps it."""
 
     def op(session: Session) -> dict[str, Any]:
         from purser.feed import inventory
@@ -390,9 +398,15 @@ async def search_transactions(
     category; a split loan payment (confirm_transfer with remainder_category)
     carries its interest/fee category as `category` and that posting's amount
     as `remainder`. Other multi-posting rows are not transfers. A split row
-    (one real leg, several category legs, e.g. an imported Quicken split)
-    carries `split` — its number of category legs — and no `category`; its
-    legs are in get_transaction. Split rows are read-only."""
+    carries `split` — its number of lines (categories and [account] lines)
+    — and no `category`, and is never a transfer; get_transaction lists its
+    lines, split_transaction edits them.
+
+    q: words, all found in payee, description or memo ("a phrase"; -word
+    excludes; payee:, desc:, memo: scope one; payee:py_... is that payee),
+    plus account:, category:, amount:>100 (magnitude; is:debit|credit for
+    direction), amount:10..20, date:2026-10 or date:2026-01..2026-03,
+    status:pending,posted, is:unreviewed."""
 
     def op(session: Session) -> dict[str, Any]:
         from purser import balances as balance_service
@@ -440,6 +454,9 @@ async def search_transactions(
             # for a transfer with no perspective — the outgoing (payer) leg.
             if perspective_id is not None:
                 leg = next((p for p in real if p.account_id == perspective_id), None)
+            elif t.split_account_id is not None:
+                # A split is seen through its own leg (decision 118).
+                leg = next((p for p in real if p.account_id == t.split_account_id), None)
             elif len(real) == 1:
                 leg = real[0]
             elif shape is not None:
@@ -457,7 +474,9 @@ async def search_transactions(
                     "date": t.date.isoformat(),
                     "amount": _amount(leg.amount) if leg is not None else None,
                     "payee": t.payee.name if t.payee else None,
-                    "category": virtual[0].account.path if len(virtual) == 1 else None,
+                    "category": virtual[0].account.path
+                    if len(virtual) == 1 and not splits
+                    else None,
                     "status": t.status,
                     # Keys present only on transfers / split loan payments,
                     # so flat rows keep the pinned compact shape.
@@ -489,16 +508,44 @@ async def search_transactions(
     entity="transaction",
     scope="read",
     emits=Emits(
-        payee=True, description=("description", "postings[].memo"), amount=("postings[].amount",)
+        payee=True,
+        description=("description", "postings[].memo", "split.lines[].memo"),
+        amount=("postings[].amount", "split.lines[].amount"),
     ),
 )
 async def get_transaction(transaction_id: str) -> dict[str, Any]:
-    """Full detail for one transaction: postings and provenance links."""
+    """Full detail for one transaction: postings and provenance links. A
+    split also carries `split`: its account and its lines ({category,
+    amount, memo?, backing_ids?} — the shape split_transaction takes, so an
+    edit can start from it; backing_ids are the bank rows merged into an
+    account line)."""
 
     def op(session: Session) -> dict[str, Any]:
         from purser import ledger as ledger_service
+        from purser import splits
 
         t = ledger_service.get_transaction(session, uuid.UUID(transaction_id))
+        split: dict[str, Any] = {}
+        if t.split_account_id is not None:
+            own = splits.own_leg(t)
+            split = {
+                "split": {
+                    "account": own.account.path if own is not None else None,
+                    "lines": [
+                        {
+                            "category": line["target"],
+                            "amount": _amount(line["amount"]),
+                            **({"memo": line["memo"]} if line["memo"] else {}),
+                            **(
+                                {"backing_ids": [str(i) for i in line["backing_ids"]]}
+                                if line["kind"] == "account"
+                                else {}
+                            ),
+                        }
+                        for line in splits.describe_lines(session, t)
+                    ],
+                }
+            }
         return {
             "id": str(t.id),
             "date": t.date.isoformat(),
@@ -521,6 +568,7 @@ async def get_transaction(transaction_id: str) -> dict[str, Any]:
                 "superseded_by": str(t.superseded_by) if t.superseded_by else None,
                 "reverses_id": str(t.reverses_id) if t.reverses_id else None,
             },
+            **split,
         }
 
     return await _run(op)
@@ -670,9 +718,6 @@ async def search_docs(query: str, limit: int = 3) -> dict[str, Any]:
     return {"results": results}
 
 
-PRESENT_MAX = 50
-
-
 @audited_tool(kind="read", entity="transaction", scope="read", emits=NOTHING)
 async def present(transaction_ids: list[str], note: str | None = None) -> dict[str, Any]:
     """Show the user transactions without passing their details through you.
@@ -683,30 +728,8 @@ async def present(transaction_ids: list[str], note: str | None = None) -> dict[s
     fewer) is shown above the rows. The link carries only ids and the note."""
 
     def op(session: Session) -> dict[str, Any]:
-        from urllib.parse import urlencode
+        from purser.selection import selection_link
 
-        from purser.config import get_settings
-        from purser.ledger import LedgerError
-        from purser.models import Transaction
-
-        if not transaction_ids:
-            raise LedgerError("present needs at least one transaction id")
-        if len(transaction_ids) > PRESENT_MAX:
-            raise LedgerError(f"present takes at most {PRESENT_MAX} transaction ids")
-        if note is not None and len(note) > 200:
-            raise LedgerError("note must be 200 characters or fewer")
-        try:
-            ids = list(dict.fromkeys(uuid.UUID(t) for t in transaction_ids))
-        except ValueError as exc:
-            raise LedgerError("transaction_ids must be transaction UUIDs") from exc
-        found = set(
-            session.execute(select(Transaction.id).where(Transaction.id.in_(ids))).scalars()
-        )
-        missing = [str(i) for i in ids if i not in found]
-        if missing:
-            raise LedgerError(f"unknown transaction id(s): {', '.join(missing)}")
-        query = [("id", str(i)) for i in ids] + ([("note", note)] if note else [])
-        base = get_settings().public_url.rstrip("/")
-        return {"url": f"{base}/selection?{urlencode(query)}", "count": len(ids)}
+        return selection_link(session, transaction_ids, note)
 
     return await _run(op)

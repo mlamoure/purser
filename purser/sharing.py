@@ -35,6 +35,29 @@ _LIST_KEYS = (
     "points",
     "series",
 )
+# Keys that carry a payee, a description or a single amount under a prefix
+# (expected_payee, incoming_description, remainder_amount; #613): the audit's
+# "identifiable" record must see them as the plain keys.
+_SUFFIX_KINDS = (
+    ("_payee", "payee"),
+    ("_payee_name", "payee"),
+    ("_description", "description"),
+    ("_memo", "description"),
+    ("_amount", "amount"),
+)
+_KIND_KEY = {"payee": "payee", "description": "description", "amount": "amount"}
+
+
+def _field_key(key: str) -> str:
+    """The plain field name a prefixed key stands for, else the key."""
+    if key in _FIELDS or key == "total_amount":
+        return key
+    for suffix, kind in _SUFFIX_KINDS:
+        if key.endswith(suffix):
+            return _KIND_KEY[kind]
+    return key
+
+
 _ACCOUNT_KEYS = {"account", "account_path", "account_id", "account_ref"}
 _DATE_KEYS = {"date", "day", "start", "end", "start_date", "end_date", "from_date", "to_date"}
 _FIELDS = {
@@ -177,6 +200,7 @@ def summarize(value: Any, *, requested: dict[str, Any] | None = None) -> dict[st
                 partial = True
             if obj == "[withheld]":
                 return
+            key = _field_key(key)
             if key in {"payee", "payee_name"} and isinstance(obj, str) and obj.startswith("py_"):
                 types.add("Merchant references")
             elif key in _FIELDS:

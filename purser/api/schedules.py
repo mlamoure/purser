@@ -15,6 +15,7 @@ from purser import occurrences
 from purser import schedules as service
 from purser import suggestions as suggestions_service
 from purser.admin.auth import ReadToken, WriteToken
+from purser.api.disclosure import Emits, disclose
 from purser.core import forecasting as core_forecasting
 from purser.db import get_session
 from purser.ledger import LedgerError, NotFoundError
@@ -110,12 +111,12 @@ class SuggestionRef(BaseModel):
     headline: str
 
 
-def _suggestion_ref(row: Suggestion) -> SuggestionRef:
+def _suggestion_ref(row: Suggestion, names: suggestions_service.AccountNames) -> SuggestionRef:
     return SuggestionRef(
         id=row.id,
         suggestion_id=row.id,
         source=row.source,
-        headline=suggestions_service.headline(row),
+        headline=suggestions_service.headline(row, names),
     )
 
 
@@ -335,11 +336,23 @@ def create_schedule(
         raise _handle(exc) from exc
     session.commit()
     if isinstance(schedule, Suggestion):
-        return _suggestion_ref(schedule)
+        return _suggestion_ref(schedule, suggestions_service.AccountNames(session))
     return ScheduleOut.from_model(schedule)
 
 
-@router.get("")
+@router.get(
+    "",
+    dependencies=[
+        disclose(
+            Emits(
+                payee=True,
+                narrative=True,
+                description=("[].name", "[].memo"),
+                amount=("[].amount",),
+            )
+        )
+    ],
+)
 def list_schedules(
     token: ReadToken,
     session: DbSession,
@@ -362,7 +375,41 @@ def _detail(session: Session, schedule: Schedule) -> ScheduleDetail:
     )
 
 
-@router.get("/{schedule_id}")
+@router.get(
+    "/{schedule_id}",
+    dependencies=[
+        disclose(
+            Emits(
+                payee=True,
+                narrative=True,
+                description=(
+                    "name",
+                    "memo",
+                    "instances[].certainty.amount.note",
+                    "instances[].certainty.date.note",
+                    "matched_instances[].certainty.amount.note",
+                    "matched_instances[].certainty.date.note",
+                ),
+                amount=(
+                    "amount",
+                    "instances[].amount",
+                    "matched_instances[].amount",
+                    "instances[].certainty.amount.value",
+                    "instances[].certainty.amount.evidence_value",
+                    "instances[].certainty.original.amount",
+                    "instances[].certainty.actual.amount",
+                    "instances[].certainty.actual.variance.amount",
+                    "matched_instances[].certainty.amount.value",
+                    "matched_instances[].certainty.amount.evidence_value",
+                    "matched_instances[].certainty.original.amount",
+                    "matched_instances[].certainty.actual.amount",
+                    "matched_instances[].certainty.actual.variance.amount",
+                ),
+                balance=("instances[].statement_balance", "matched_instances[].statement_balance"),
+            )
+        )
+    ],
+)
 def get_schedule(schedule_id: uuid.UUID, token: ReadToken, session: DbSession) -> ScheduleDetail:
     """The rule plus its live instances (oldest first; overdue flagged)."""
     try:
@@ -467,8 +514,9 @@ def detect(token: WriteToken, session: DbSession) -> DetectResult:
     touched = service.detect_schedules(session, actor_token_id=token.id)
     session.commit()
     created = sum(1 for r in touched if r.id not in before)
+    names = suggestions_service.AccountNames(session)
     return DetectResult(
-        suggestions=[_suggestion_ref(r) for r in touched],
+        suggestions=[_suggestion_ref(r, names) for r in touched],
         created=created,
         refreshed=len(touched) - created,
     )
@@ -541,7 +589,30 @@ def record_statement_balance(
     )
 
 
-@forecast_router.get("")
+@forecast_router.get(
+    "",
+    dependencies=[
+        disclose(
+            Emits(
+                payee=True,
+                narrative=True,
+                description=(
+                    "days[].events[].label",
+                    "days[].events[].certainty.amount.note",
+                    "days[].events[].certainty.date.note",
+                ),
+                amount=(
+                    "days[].events[].amount",
+                    "days[].events[].certainty.amount.value",
+                    "days[].events[].certainty.amount.evidence_value",
+                    "days[].events[].certainty.original.amount",
+                    "days[].events[].certainty.actual.amount",
+                    "days[].events[].certainty.actual.variance.amount",
+                ),
+            )
+        )
+    ],
+)
 def forecast(
     token: ReadToken,
     session: DbSession,
@@ -604,7 +675,25 @@ def forecast(
     )
 
 
-@router.get("/instances/{transaction_id}/certainty")
+@router.get(
+    "/instances/{transaction_id}/certainty",
+    dependencies=[
+        disclose(
+            Emits(
+                description=("amount.note", "date.note"),
+                amount=(
+                    "amount.value",
+                    "amount.evidence_value",
+                    "original.amount",
+                    "actual.amount",
+                    "actual.variance.amount",
+                    "amount.note",
+                    "date.note",
+                ),
+            )
+        )
+    ],
+)
 def get_occurrence_certainty(
     transaction_id: uuid.UUID, token: ReadToken, session: DbSession
 ) -> occurrences.CertaintyOut:
@@ -638,7 +727,25 @@ def update_occurrence_certainty(
     return occurrences.CertaintyOut(**result)
 
 
-@router.get("/{schedule_id}/occurrences/{occurrence_date}/certainty")
+@router.get(
+    "/{schedule_id}/occurrences/{occurrence_date}/certainty",
+    dependencies=[
+        disclose(
+            Emits(
+                description=("amount.note", "date.note"),
+                amount=(
+                    "amount.value",
+                    "amount.evidence_value",
+                    "original.amount",
+                    "actual.amount",
+                    "actual.variance.amount",
+                    "amount.note",
+                    "date.note",
+                ),
+            )
+        )
+    ],
+)
 def get_slot_certainty(
     schedule_id: uuid.UUID,
     occurrence_date: date_value_type,

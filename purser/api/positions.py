@@ -12,7 +12,7 @@ import uuid
 from datetime import date as date_type
 from datetime import datetime
 from decimal import Decimal
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from purser import appsettings, clock, ledger, networth
 from purser.admin.auth import AdminToken, ReadToken, WriteToken
+from purser.api.disclosure import NOTHING, Emits, disclose
 from purser.db import get_session
 from purser.holdings import cash as trade_cash
 from purser.holdings import prices as price_service
@@ -31,7 +32,7 @@ DbSession = Annotated[Session, Depends(get_session)]
 router = APIRouter(tags=["positions"])
 prices_router = APIRouter(prefix="/prices", tags=["prices"])
 
-EventKind = Literal["set_quantity", "buy", "sell", "vest", "transfer_out"]
+EventKind = Literal["set_quantity", "buy", "sell", "vest", "transfer_out", "split"]
 LotMethod = Literal["fifo", "lifo", "hifo"]
 Acquisition = Literal[
     "buy", "rsu_vest", "plan_purchase", "espp_purchase", "transfer_in", "drip", "gift", "unknown"
@@ -219,11 +220,41 @@ class PositionEventCreate(BaseModel):
     kind: EventKind = Field(
         description="`set_quantity` (the absolute share count on that date), `buy` or "
         "`sell` (a change by `quantity`), `vest` (the NET shares an award vest delivered; "
-        "`price` is the fair market value per share) or `transfer_out` (shares that left "
-        "with no price and no cash)."
+        "`price` is the fair market value per share), `transfer_out` (shares that left "
+        "with no price and no cash) or `split` (every share becomes `split_numerator` / "
+        "`split_denominator` shares at the start of `occurred_on`, the effective date)."
     )
     occurred_on: date_type = Field(description="Today or earlier; a future date is refused.")
-    quantity: Decimal = Field(ge=0, decimal_places=6, max_digits=20)
+    quantity: Decimal | None = Field(
+        default=None,
+        ge=0,
+        decimal_places=6,
+        max_digits=20,
+        description="Required for every kind but `split`, which takes a ratio instead.",
+    )
+    split_numerator: int | None = Field(
+        default=None,
+        ge=1,
+        le=1_000_000,
+        description="`split` only: new shares for every `split_denominator` old ones (2 "
+        "for a 2:1 forward split, 1 for a 1:10 reverse split).",
+    )
+    split_denominator: int | None = Field(
+        default=None,
+        ge=1,
+        le=1_000_000,
+        description="`split` only: the old shares that become `split_numerator` new ones.",
+    )
+    cash_in_lieu: Decimal | None = Field(
+        default=None,
+        gt=0,
+        decimal_places=2,
+        max_digits=18,
+        description="`split` only: the cash the broker paid for the fractional share the "
+        "split left. The fraction leaves in a `sell` recorded with the split (its proceeds "
+        "are this amount) and reversed with it; `settle_on`, `transaction_id`, `force_cash`, "
+        "`lot_method` and `lots` apply to that sale.",
+    )
     price: Decimal | None = Field(
         default=None,
         gt=0,
@@ -355,6 +386,9 @@ class PositionEventOut(BaseModel):
     transaction_id: uuid.UUID | None = None
     gross_quantity: Decimal | None = None  # vest only
     withheld_quantity: Decimal | None = None  # vest only
+    split_numerator: int | None = None  # split only
+    split_denominator: int | None = None  # split only
+    in_lieu_of: uuid.UUID | None = None  # a sell that is a split's cash in lieu
     created_at: datetime
 
     @classmethod
@@ -382,6 +416,9 @@ class PositionEventOut(BaseModel):
             transaction_id=e.transaction_id,
             gross_quantity=e.gross_quantity,
             withheld_quantity=e.withheld_quantity,
+            split_numerator=e.split_numerator,
+            split_denominator=e.split_denominator,
+            in_lieu_of=e.in_lieu_of,
             created_at=e.created_at,
         )
 
@@ -391,6 +428,8 @@ class PositionEventResult(BaseModel):
 
     event: PositionEventOut
     position: PositionOut
+    # A split's cash-in-lieu sale, recorded (or reversed) with it (#624).
+    cash_in_lieu: PositionEventOut | None = None
 
 
 class PositionReverseRequest(BaseModel):
@@ -402,14 +441,78 @@ def _stale_days() -> int:
 
 
 def _state(session: Session, position: Position) -> service.PositionState:
-    account = ledger.get_account(session, position.account_id)
-    states = service.position_states(
-        session, account, include_closed=True, stale_days=_stale_days()
-    )
-    return next(s for s in states if s.position.id == position.id)
+    return service.position_state(session, position, stale_days=_stale_days())
 
 
-@router.get("/accounts/{account_id}/positions")
+class HoldingsSummaryLineOut(BaseModel):
+    symbol: str
+    name: str | None
+    source: str  # feed | manual
+    position_id: uuid.UUID | None
+    quantity: Decimal | None
+    price: Decimal | None
+    price_as_of: date_type | None
+    price_source: str | None
+    market_value: Decimal | None  # null: no price, adds nothing
+    cost_basis: Decimal | None
+    unrealized_gain: Decimal | None  # null when the basis or the value is unknown
+    gain_pct: Decimal | None
+    weight_pct: Decimal | None  # share of `total`, cash included
+    in_transit: Decimal | None  # a trade's cash not yet on the account (decision 104)
+    stale_price: bool
+    no_price: bool
+    unpriceable: bool
+    value_out_of_range: bool
+
+
+class HoldingsSummaryOut(BaseModel):
+    """One brokerage account's newest holdings as a table (#595). Every
+    figure is computed server-side; ``cash`` plus ``market_value`` is
+    ``total``, the account's reported balance."""
+
+    account_id: uuid.UUID
+    as_of: date_type | None
+    source: str
+    closed: bool
+    cash: Decimal
+    cash_weight_pct: Decimal | None
+    market_value: Decimal
+    cost_basis: Decimal | None  # over the lines whose gain is known
+    unrealized_gain: Decimal | None
+    gain_pct: Decimal | None
+    total: Decimal
+    lines: list[HoldingsSummaryLineOut]
+
+
+@router.get("/accounts/{account_id}/holdings/summary", dependencies=[disclose(NOTHING)])
+def holdings_summary(
+    account_id: uuid.UUID, token: ReadToken, session: DbSession
+) -> HoldingsSummaryOut:
+    """The account's newest holdings set, from the feed or tracked by hand,
+    with each line's unrealized gain (amount and percent) and share of the
+    account, a cash line and totals. Lines are largest first. ``cost_basis``
+    and ``unrealized_gain`` total only the lines whose gain is known, so a
+    line without a basis never counts as all gain. Brokerage accounts only."""
+    from dataclasses import asdict
+
+    from purser.holdings import summary
+
+    try:
+        account = ledger.get_account(session, account_id)
+    except ledger.LedgerError as exc:
+        raise _handle(exc) from exc
+    if account.type != "brokerage":
+        raise HTTPException(
+            422,
+            f"{account.path} is a {account.type} account; holdings belong to brokerage accounts",
+        )
+    result = summary.summarize(session, account)
+    body = asdict(result)
+    body["lines"] = [HoldingsSummaryLineOut(**line) for line in body["lines"]]
+    return HoldingsSummaryOut(**body)
+
+
+@router.get("/accounts/{account_id}/positions", dependencies=[disclose(NOTHING)])
 def list_positions(
     account_id: uuid.UUID,
     token: ReadToken,
@@ -512,7 +615,21 @@ def update_position(
     return out
 
 
-@router.get("/positions/{position_id}/events")
+@router.get(
+    "/positions/{position_id}/events",
+    dependencies=[
+        disclose(
+            Emits(
+                description=("[].note", "[].source_note"),
+                # A trade's price and fees are single amounts: with its share
+                # count they give the cash row's amount away, and a split's
+                # cash-in-lieu sale is priced to give it exactly (#667).
+                # The shares stay: they are not money.
+                amount=("[].cost_basis", "[].price", "[].fees"),
+            )
+        )
+    ],
+)
 def list_position_events(
     position_id: uuid.UUID, token: ReadToken, session: DbSession
 ) -> list[PositionEventOut]:
@@ -537,7 +654,17 @@ def record_position_event(
     session: DbSession,
     background_tasks: BackgroundTasks,
 ) -> PositionEventResult:
-    """Record a `set_quantity`, `buy`, `sell`, `vest` or `transfer_out`.
+    """Record a `set_quantity`, `buy`, `sell`, `vest`, `transfer_out` or
+    `split`.
+
+    A `split` takes `split_numerator` and `split_denominator` (2 and 1 for a
+    2:1 forward split, 1 and 10 for a 1:10 reverse one): at the start of
+    `occurred_on` every share held the day before becomes that ratio of
+    shares (six places), each lot keeping its total basis, acquisition date
+    and term. With `cash_in_lieu`, the fractional share left leaves in a
+    `sell` whose proceeds are that amount (`cash_in_lieu` in the answer),
+    reversed with the split. Reversing the split restores the shares, the
+    lots and the cash exactly.
 
     On a position that tracks lots, a `sell` or `transfer_out` names the
     lots it draws on (`lot_method` or `lots`; 422 `allocation_required`
@@ -565,6 +692,16 @@ def record_position_event(
             method=body.lot_method,
             items=[a.item() for a in body.lots] if body.lots else None,
         )
+        if body.kind == "split":
+            return _record_split(session, position_id, body, allocation, token, background_tasks)
+        if any(
+            v is not None for v in (body.split_numerator, body.split_denominator, body.cash_in_lieu)
+        ):
+            raise ledger.LedgerError(
+                "split_numerator, split_denominator and cash_in_lieu apply to a split"
+            )
+        if body.quantity is None:
+            raise ledger.LedgerError(f"a {body.kind} needs a quantity")
         event = service.record_event(
             session,
             position_id=position_id,
@@ -601,6 +738,64 @@ def record_position_event(
     return out
 
 
+def _record_split(
+    session: Session,
+    position_id: uuid.UUID,
+    body: PositionEventCreate,
+    allocation: service.AllocationRequest | None,
+    token: Any,
+    background_tasks: BackgroundTasks,
+) -> PositionEventResult:
+    """The split branch of ``record_position_event`` (#624)."""
+    others = {
+        "quantity": body.quantity,
+        "price": body.price,
+        "fees": body.fees,
+        "cost_basis": body.cost_basis,
+        "proceeds_to": body.proceeds_to,
+        "funded_from": body.funded_from,
+        "lot": body.lot,
+        "unallocated": body.unallocated,
+        "gross_quantity": body.gross_quantity,
+        "withheld_quantity": body.withheld_quantity,
+    }
+    given = sorted(k for k, v in others.items() if v is not None and v is not False)
+    if given:
+        raise ledger.LedgerError(
+            f"a split takes split_numerator, split_denominator and an optional cash_in_lieu, "
+            f"not {', '.join(given)}"
+        )
+    if body.split_numerator is None or body.split_denominator is None:
+        raise ledger.LedgerError("a split needs split_numerator and split_denominator")
+    recorded = service.record_split(
+        session,
+        position_id=position_id,
+        occurred_on=body.occurred_on,
+        numerator=body.split_numerator,
+        denominator=body.split_denominator,
+        cash_in_lieu=body.cash_in_lieu,
+        note=body.note,
+        source_note=body.source_note,
+        replaces=body.replaces,
+        settle_on=body.settle_on,
+        transaction_id=body.transaction_id,
+        force_cash=bool(body.force_cash),
+        allocation=allocation,
+        token=token,
+    )
+    position = service.get_position(session, position_id)
+    out = PositionEventResult(
+        event=PositionEventOut.from_model(recorded.split),
+        position=PositionOut.from_state(_state(session, position)),
+        cash_in_lieu=(
+            PositionEventOut.from_model(recorded.in_lieu) if recorded.in_lieu is not None else None
+        ),
+    )
+    session.commit()
+    background_tasks.add_task(networth.consume_watermark)
+    return out
+
+
 @router.post("/position-events/{event_id}/reverse")
 def reverse_position_event(
     event_id: uuid.UUID,
@@ -613,15 +808,19 @@ def reverse_position_event(
     the remaining history would go below zero on some date. A trade's cash
     goes with it, through the reversal pair every posted correction uses:
     Purser's own cash row is corrected to zero, and a linked row gets its
-    category back. The body (a `note`) is optional."""
+    category back. Reversing a split reverses its cash-in-lieu sale too
+    (`cash_in_lieu` in the answer); that sale is never reversed alone. The
+    body (a `note`) is optional."""
     try:
         reversal = service.reverse_event(
             session, event_id=event_id, note=body.note if body else None, token=token
         )
         position = service.get_position(session, reversal.position_id)
+        in_lieu = service.in_lieu_reversal(session, reversal)
         out = PositionEventResult(
             event=PositionEventOut.from_model(reversal),
             position=PositionOut.from_state(_state(session, position)),
+            cash_in_lieu=PositionEventOut.from_model(in_lieu) if in_lieu is not None else None,
         )
     except ledger.LedgerError as exc:
         raise _handle(exc) from exc
@@ -717,7 +916,7 @@ class FetchOut(BaseModel):
     stale: list[StaleOut]
 
 
-@prices_router.get("")
+@prices_router.get("", dependencies=[disclose(NOTHING)])
 def list_prices(
     token: ReadToken,
     session: DbSession,
@@ -764,7 +963,7 @@ def record_price(
     )
 
 
-@prices_router.get("/status")
+@prices_router.get("/status", dependencies=[disclose(NOTHING)])
 def price_status(token: ReadToken, session: DbSession) -> PriceStatusOut:
     """The configured provider, the newest provider fetch, each open
     position's close in effect today, and the last fetch failure."""

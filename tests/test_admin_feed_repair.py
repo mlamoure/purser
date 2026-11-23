@@ -24,6 +24,7 @@ from purser.admin.feed_repair import RepairRefused
 from purser.db import get_sessionmaker
 from purser.feed import importer
 from purser.models import Account, RawFetch, Transaction, Valuation
+from tests.conftest import now, today
 
 from .test_feed import (
     FeedHarness,
@@ -115,9 +116,9 @@ class TestPurge:
             session.commit()
         assert len(_tx_rows(harness.client, "assets.checking")) == 3
 
-        from datetime import UTC, datetime, timedelta
+        from datetime import timedelta
 
-        since = (datetime.now(UTC) - timedelta(days=5)).date()
+        since = today() - timedelta(days=5)
         with get_sessionmaker()() as session:
             account = feed_repair.resolve_purge_account(session, "assets.checking")
             plan = feed_repair.purge_preflight(session, account, since)
@@ -208,7 +209,7 @@ class TestPurge:
     def _linked_sale(harness: FeedHarness, *, quantity: str = "10") -> dict[str, str]:
         """A brokerage account tracked by hand whose feed sent a SOLD row of
         500.00, and a sale that linked it as its cash."""
-        sold_on = (datetime.now(UTC) - timedelta(days=6)).date()
+        sold_on = today() - timedelta(days=6)
         while sold_on.weekday() >= 4:
             sold_on -= timedelta(days=1)
         sold_epoch = int(
@@ -563,7 +564,6 @@ class TestReplay:
 
         # Two archived fetches on different days, each imported live as
         # sync_connection does (archive, then import with the fetch window).
-        today = datetime.now(UTC)
         with get_sessionmaker()() as session:
             for days_ago, balance in ((20, "-50000.00"), (5, "-49500.00")):
                 canonical = json.dumps(
@@ -571,20 +571,20 @@ class TestReplay:
                 )
                 raw = RawFetch(
                     connection_id=uuid.UUID(cid),
-                    fetched_at=today - timedelta(days=days_ago),
+                    fetched_at=now() - timedelta(days=days_ago),
                     content_hash=hashlib.sha256(canonical.encode()).hexdigest(),
                     payload_enc=crypto.encrypt(canonical),
                 )
                 session.add(raw)
                 session.flush()
                 importer.import_fetch(
-                    session, raw, window_start=(today - timedelta(days=days_ago + 7)).date()
+                    session, raw, window_start=(now() - timedelta(days=days_ago + 7)).date()
                 )
             session.commit()
         live = _valuations(loan_id)
         assert live == [
-            ((today - timedelta(days=20)).date(), Decimal("-50000.0000"), "api"),
-            ((today - timedelta(days=5)).date(), Decimal("-49500.0000"), "api"),
+            ((now() - timedelta(days=20)).date(), Decimal("-50000.0000"), "api"),
+            ((now() - timedelta(days=5)).date(), Decimal("-49500.0000"), "api"),
         ]
 
         with get_sessionmaker()() as session:

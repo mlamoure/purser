@@ -2,7 +2,7 @@
 the bank recovers, and on demand through POST /connections/{id}/refetch."""
 
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -11,6 +11,7 @@ from sqlalchemy import Engine, text
 
 from purser.feed import simplefin
 from tests import test_feed
+from tests.conftest import now
 from tests.test_feed import ACCESS_URL, FeedHarness, _param_to_date, account_of
 from tests.test_feed_v2 import as_v2
 
@@ -22,7 +23,7 @@ PATH = "assets.checking"
 
 
 def _ago(days: int) -> datetime:
-    return datetime.now(UTC) - timedelta(days=days)
+    return now() - timedelta(days=days)
 
 
 def _row(days_ago: int, amount: str, desc: str) -> dict[str, Any]:

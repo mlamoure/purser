@@ -11,15 +11,14 @@ and stay postings-sums.
 """
 
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-# UTC, not local — see the note in tests/test_networth.py (issue #140).
-TODAY = datetime.now(UTC).date()
+from tests.conftest import today
 
 
 @pytest.fixture
@@ -75,12 +74,12 @@ class TestAccountSurfaces:
     ) -> None:
         """The Harbor-mortgage shape: balance-only feed, zero transactions."""
         mortgage = seeded["liabilities.mortgage"]
-        _valuation(client, mortgage, "-665824.83", TODAY - timedelta(days=20))
+        _valuation(client, mortgage, "-665824.83", today() - timedelta(days=20))
 
         single = client.get(f"/accounts/{mortgage}").json()
         assert Decimal(single["balance"]) == Decimal("-665824.83")
         assert single["balance_method"] == "valuation"
-        assert single["balance_as_of"] == (TODAY - timedelta(days=20)).isoformat()
+        assert single["balance_as_of"] == (today() - timedelta(days=20)).isoformat()
         assert Decimal(single["postings_balance"]) == Decimal("0")
 
         listed = {
@@ -100,12 +99,12 @@ class TestAccountSurfaces:
                 "account": "liabilities.carloan",
                 "category": "expenses.interest",
                 "amount": "421.57",
-                "date": (TODAY - timedelta(days=5)).isoformat(),
+                "date": (today() - timedelta(days=5)).isoformat(),
                 "status": "posted",
             },
         )
         assert resp.status_code == 201, resp.text
-        _valuation(client, carloan, "-12174.63", TODAY - timedelta(days=1))
+        _valuation(client, carloan, "-12174.63", today() - timedelta(days=1))
 
         single = client.get(f"/accounts/{carloan}").json()
         assert Decimal(single["balance"]) == Decimal("-12174.63")
@@ -116,8 +115,8 @@ class TestAccountSurfaces:
         self, seeded: dict[str, str], client: TestClient
     ) -> None:
         mortgage = seeded["liabilities.mortgage"]
-        _valuation(client, mortgage, "-670000.00", TODAY - timedelta(days=30))
-        _valuation(client, mortgage, "-665824.83", TODAY - timedelta(days=2))
+        _valuation(client, mortgage, "-670000.00", today() - timedelta(days=30))
+        _valuation(client, mortgage, "-665824.83", today() - timedelta(days=2))
 
         current = client.get(f"/accounts/{mortgage}/balance").json()
         assert Decimal(current["balance"]) == Decimal("-665824.83")
@@ -125,7 +124,7 @@ class TestAccountSurfaces:
 
         between = client.get(
             f"/accounts/{mortgage}/balance",
-            params={"as_of": (TODAY - timedelta(days=10)).isoformat()},
+            params={"as_of": (today() - timedelta(days=10)).isoformat()},
         ).json()
         assert Decimal(between["balance"]) == Decimal("-670000.00")
         assert between["method"] == "valuation"
@@ -133,7 +132,7 @@ class TestAccountSurfaces:
         # Before the first valuation: postings fallback (0 — no activity).
         before = client.get(
             f"/accounts/{mortgage}/balance",
-            params={"as_of": (TODAY - timedelta(days=40)).isoformat()},
+            params={"as_of": (today() - timedelta(days=40)).isoformat()},
         ).json()
         assert Decimal(before["balance"]) == Decimal("0")
         assert before["method"] == "postings"
@@ -164,20 +163,24 @@ class TestAccountSurfaces:
                 "account": "assets.brokerage",
                 "category": "expenses.interest",
                 "amount": "-1200.00",
-                "date": (TODAY - timedelta(days=5)).isoformat(),
+                "date": (today() - timedelta(days=5)).isoformat(),
                 "status": "posted",
             },
         )
         assert resp.status_code == 201, resp.text
         _holdings(
-            db_session, brokerage, TODAY - timedelta(days=1), ("VTI", "2625.00"), ("BND", "1580.00")
+            db_session,
+            brokerage,
+            today() - timedelta(days=1),
+            ("VTI", "2625.00"),
+            ("BND", "1580.00"),
         )
         expected = Decimal("-1200.00") + Decimal("4205.00")
 
         single = client.get(f"/accounts/{brokerage}").json()
         assert Decimal(single["balance"]) == expected
         assert single["balance_method"] == "postings+holdings"
-        assert single["balance_as_of"] == (TODAY - timedelta(days=1)).isoformat()
+        assert single["balance_as_of"] == (today() - timedelta(days=1)).isoformat()
         assert Decimal(single["postings_balance"]) == Decimal("-1200.00")
 
         listed = {
@@ -198,18 +201,35 @@ class TestAccountSurfaces:
         37's stored heads-only balance and net_worth_at's sum-over-all-rows
         legitimately diverge inside a date-edited correction window, and that
         divergence is not what this test is about."""
+        from sqlalchemy import select
+
         from purser import balances as balance_service
-        from purser import networth as networth_service
+        from purser.models import Posting, Transaction
 
         brokerage = seeded["assets.brokerage"]
-        _holdings(db_session, brokerage, TODAY - timedelta(days=1), ("VTI", "2625.00"))
+        _holdings(db_session, brokerage, today() - timedelta(days=1), ("VTI", "2625.00"))
 
         surface = Decimal(client.get(f"/accounts/{brokerage}/balance").json()["balance"])
-        surface_basis = balance_service.balance_asof(db_session, uuid.UUID(brokerage), TODAY)
+        surface_basis = balance_service.balance_asof(db_session, uuid.UUID(brokerage), today())
 
         engine = client.get("/networth").json()
         line = next(b for b in engine["breakdown"] if b["path"] == "assets.brokerage")
-        engine_basis = networth_service._postings_balance(db_session, uuid.UUID(brokerage), TODAY)
+        # The engine's own basis: its postings sum over all rows to the day.
+        engine_basis = sum(
+            (
+                Decimal(p.amount)
+                for p in db_session.execute(
+                    select(Posting)
+                    .join(Transaction, Transaction.id == Posting.transaction_id)
+                    .where(
+                        Posting.account_id == uuid.UUID(brokerage),
+                        Transaction.status.in_(["pending", "posted"]),
+                        Transaction.date <= today(),
+                    )
+                ).scalars()
+            ),
+            Decimal(0),
+        )
 
         assert surface - surface_basis == Decimal(line["value"]) - engine_basis
 
@@ -217,11 +237,11 @@ class TestAccountSurfaces:
         self, seeded: dict[str, str], client: TestClient, db_session: Session
     ) -> None:
         brokerage = seeded["assets.brokerage"]
-        _holdings(db_session, brokerage, TODAY - timedelta(days=1), ("VTI", "2625.00"))
+        _holdings(db_session, brokerage, today() - timedelta(days=1), ("VTI", "2625.00"))
 
         before = client.get(
             f"/accounts/{brokerage}/balance",
-            params={"as_of": (TODAY - timedelta(days=10)).isoformat()},
+            params={"as_of": (today() - timedelta(days=10)).isoformat()},
         ).json()
         assert Decimal(before["balance"]) == Decimal("0")
         assert before["method"] == "postings"
@@ -233,7 +253,7 @@ class TestAccountSurfaces:
         """Same cutoff rule as valuations and net_worth_at: closing zeroed the
         postings, and a lingering snapshot must not resurrect the account."""
         brokerage = seeded["assets.brokerage"]
-        _holdings(db_session, brokerage, TODAY - timedelta(days=2), ("VTI", "2625.00"))
+        _holdings(db_session, brokerage, today() - timedelta(days=2), ("VTI", "2625.00"))
         resp = client.post(f"/accounts/{brokerage}/close", json={})
         assert resp.status_code == 200, resp.text
 
@@ -266,12 +286,12 @@ class TestAccountSurfaces:
                 "account": "assets.brokerage",
                 "category": "expenses.interest",
                 "amount": "-500.00",
-                "date": (TODAY + timedelta(days=3)).isoformat(),
+                "date": (today() + timedelta(days=3)).isoformat(),
                 "status": "pending",
             },
         )
         assert resp.status_code == 201, resp.text
-        _holdings(db_session, brokerage, TODAY - timedelta(days=1), ("VTI", "2625.00"))
+        _holdings(db_session, brokerage, today() - timedelta(days=1), ("VTI", "2625.00"))
 
         headline = Decimal(client.get(f"/accounts/{brokerage}").json()["balance"])
         forecast = client.get("/forecast", params={"account": "assets.brokerage"}).json()
@@ -289,9 +309,9 @@ class TestAccountSurfaces:
         from purser import networth as networth_service
 
         mortgage, brokerage = seeded["liabilities.mortgage"], seeded["assets.brokerage"]
-        _valuation(client, mortgage, "-665824.83", TODAY - timedelta(days=20))
-        _holdings(db_session, brokerage, TODAY - timedelta(days=2), ("VTI", "2625.00"))
-        dates = [TODAY - timedelta(days=n) for n in (30, 10, 0)]
+        _valuation(client, mortgage, "-665824.83", today() - timedelta(days=20))
+        _holdings(db_session, brokerage, today() - timedelta(days=2), ("VTI", "2625.00"))
+        dates = [today() - timedelta(days=n) for n in (30, 10, 0)]
 
         loan = ledger_service.get_account(db_session, uuid.UUID(mortgage))
         loan_series, loan_method = networth_service.account_balance_series(
@@ -325,12 +345,12 @@ class TestAccountSurfaces:
         from purser import networth as networth_service
 
         mortgage = seeded["liabilities.mortgage"]
-        _valuation(client, mortgage, "-665824.83", TODAY - timedelta(days=20))
+        _valuation(client, mortgage, "-665824.83", today() - timedelta(days=20))
         assert client.post(f"/accounts/{mortgage}/close", json={}).status_code == 200
 
         db_session.expire_all()
         loan = ledger_service.get_account(db_session, uuid.UUID(mortgage))
-        before, after = TODAY - timedelta(days=10), TODAY
+        before, after = today() - timedelta(days=10), today()
         series, _method = networth_service.account_balance_series(
             db_session, loan, dates=[before, after]
         )
@@ -343,7 +363,7 @@ class TestAccountSurfaces:
         """A closed account's postings were zeroed at close; a lingering
         valuation must not resurrect it (same cutoff as net_worth_at)."""
         mortgage = seeded["liabilities.mortgage"]
-        _valuation(client, mortgage, "-665824.83", TODAY - timedelta(days=20))
+        _valuation(client, mortgage, "-665824.83", today() - timedelta(days=20))
         resp = client.post(f"/accounts/{mortgage}/close", json={})
         assert resp.status_code == 200, resp.text
 

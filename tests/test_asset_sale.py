@@ -1,17 +1,17 @@
 """Selling or disposing of a hand-valued asset; money put in vs gain (#569)."""
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
 from fastapi.testclient import TestClient
 
-TODAY = datetime.now(UTC).date()
+from tests.conftest import today
 
 
 def _day(days_ago: int) -> str:
-    return (TODAY - timedelta(days=days_ago)).isoformat()
+    return (today() - timedelta(days=days_ago)).isoformat()
 
 
 def _account(client: TestClient, type_: str, name: str) -> dict[str, Any]:

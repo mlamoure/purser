@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from purser.mcp._registry import _principal, _run, _token_row, audited_tool
-from purser.mcp.privacy import Emits
+from purser.privacy import Emits
 
 _LIST_CAP = 50
 _SAMPLE_CAP = 10
@@ -173,6 +173,7 @@ async def propose_rule(
     note: str | None = None,
     priority: int = 100,
     activate: bool = False,
+    securities_trade: bool = False,
 ) -> dict[str, Any]:
     """Create a deterministic rule. By default it lands as a DRAFT for the
     user to review and never executes until activated. Pass activate=true
@@ -186,7 +187,12 @@ async def propose_rule(
     account references) and may set window_days, 0 to 14 (default 3): how
     many days apart the pair's two legs may post and still link. Keep it as
     narrow as the bank's actual delay — a wider window reaches more history.
-    Preview first."""
+    securities_trade=true (categorize, in place of category) marks matching
+    rows as a securities trade — a buy or sell, never spending or income —
+    and needs `account`: a brokerage account whose holdings come from the
+    feed. Purser never decides by itself which rows are trades; brokers word
+    them differently ("YOU BOUGHT", "Buy", "Reinvestment"), so match on the
+    wording this broker uses. Preview first."""
 
     def op(session: Session) -> dict[str, Any]:
         from datetime import date as date_type
@@ -197,7 +203,11 @@ async def propose_rule(
 
         token = _token_row(session, _principal())
         fields: dict[str, Any] = {"type": type, "priority": priority}
-        if category:
+        if securities_trade:
+            if category:
+                return {"error": "securities_trade replaces category: send one or the other"}
+            fields["category_id"] = ledger_service.securities_account(session).id
+        elif category:
             fields["category_id"] = ledger_service.resolve_account(session, category.strip("[]")).id
         if payee_name:
             fields["payee_name"] = payee_name

@@ -1,13 +1,18 @@
 import { useQuery } from "@tanstack/react-query";
 import type { components } from "../api/schema";
 import { api, errorDetail } from "../lib/api";
-import { categoriesQuery } from "../lib/names";
+import { categoriesQuery, transferLabel, type MoneyDirection } from "../lib/names";
 import { pathLeafLabel } from "../lib/labels";
 
 type AccountOut = components["schemas"]["AccountOut"];
 
 const selectClass =
   "h-8 w-full min-w-44 rounded-md border border-border bg-card px-2 text-xs";
+
+/** The picker value for "Securities trade" (#591, decision 119). Not a
+ * category path (a colon is never part of one): the register sends
+ * `securities_trade: true` for it, never a category. */
+export const SECURITIES_TRADE_VALUE = ":securities_trade";
 
 export type CategoryGroup = { label: string; options: { path: string; name: string }[] };
 
@@ -49,19 +54,30 @@ export function groupCategories(categories: Pick<AccountOut, "path" | "name">[])
  * takes — a category path, or `[account path]` for a Quicken-style transfer
  * target, where choosing one converts the row into a transfer to that
  * account — and the options read as names (#541): "Groceries" under its
- * group, "Transfer to Savings". */
+ * group, "Transfer to Savings", or "Transfer from Savings" when the row is
+ * money in (`direction="credit"`, #589). */
 export default function CategorySelect({
   value,
   currentAccountPath,
+  direction = "debit",
   onChange,
   disabled,
   id,
+  securitiesTrade = false,
   "aria-label": ariaLabel = "Category",
 }: {
   value: string; // category path, or "[other.account.path]" for transfers
   currentAccountPath: string;
+  /** Money in ("credit") or out ("debit") on `currentAccountPath`: transfer
+   * options read "Transfer from X" or "Transfer to X" (#589). */
+  direction?: MoneyDirection;
   onChange: (next: string) => void;
   disabled?: boolean;
+  /** Offer "Securities trade" (SECURITIES_TRADE_VALUE): only on a register of
+   * a brokerage account whose holdings come from the feed, where a buy or
+   * sell row is cash the holdings already count. Never a category anywhere
+   * else. */
+  securitiesTrade?: boolean;
   id?: string;
   "aria-label"?: string;
 }) {
@@ -85,13 +101,18 @@ export default function CategorySelect({
     (a) => a.path !== currentAccountPath,
   );
   const known =
-    value === "" || categoryList.some((c) => c.path === value) ||
+    value === "" ||
+    (securitiesTrade && value === SECURITIES_TRADE_VALUE) ||
+    categoryList.some((c) => c.path === value) ||
     transferOptions.some((a) => `[${a.path}]` === value);
   // A value neither list offers (a closed account's transfer, a category
   // still loading) is kept selectable, named from its path, never shown raw.
-  const unknownLabel = /^\[(.*)\]$/.test(value)
-    ? `Transfer to ${pathLeafLabel(value.slice(1, -1))}`
-    : pathLeafLabel(value);
+  const unknownLabel =
+    value === SECURITIES_TRADE_VALUE
+      ? "Securities trade"
+      : /^\[(.*)\]$/.test(value)
+        ? transferLabel(pathLeafLabel(value.slice(1, -1)), direction)
+        : pathLeafLabel(value);
 
   return (
     <select
@@ -122,11 +143,16 @@ export default function CategorySelect({
           ))}
         </optgroup>
       ))}
+      {securitiesTrade && (
+        <optgroup label="Investments">
+          <option value={SECURITIES_TRADE_VALUE}>Securities trade</option>
+        </optgroup>
+      )}
       <optgroup label="Transfers">
         {accounts.error && <option disabled>Could not load accounts</option>}
         {transferOptions.map((a) => (
           <option key={a.id} value={`[${a.path}]`}>
-            {`Transfer to ${a.name}`}
+            {transferLabel(a.name, direction)}
           </option>
         ))}
       </optgroup>

@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.28
+# syntax=docker/dockerfile:1.29
 # One image, multiple roles: `purser serve` (default) / `purser worker` /
 # `purser migrate`. Node exists only in the frontend build stage — the
 # production image serves the static bundle with no Node runtime.

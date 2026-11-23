@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from purser import ledger, occurrences
 from purser.ledger import LedgerError
 from purser.mcp._registry import _principal, _run, _token_row, audited_tool
-from purser.mcp.privacy import Emits
+from purser.privacy import Emits
 
 CERTAINTY_EMITS = Emits(
     description=("amount.note", "date.note"),

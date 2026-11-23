@@ -13,7 +13,7 @@
 
 import type { RecurringItem, RecurringResult, SearchResult } from "../lib/contracts";
 import type { WidgetHost } from "../lib/host";
-import { clear, h, money, shortDate } from "../lib/kit";
+import { clear, h, money, moneySign, shortDate } from "../lib/kit";
 
 function metric(label: string, value: string, danger = false): HTMLElement {
   return h(
@@ -28,12 +28,12 @@ export function row(item: RecurringItem, host: WidgetHost, last: boolean): HTMLE
   const cells: (HTMLElement | null)[] = [
     h("span", { style: "flex:1;font-size:14px;font-weight:500;" }, item.payee),
   ];
-  if (item.last_change && Number(item.last_change.delta) > 0) {
+  if (item.last_change && moneySign(item.last_change.delta) > 0) {
     cells.push(
       h(
         "span",
         { class: "badge badge-danger" },
-        `+$${item.last_change.delta} in ${shortDate(item.last_change.date).split(" ")[0]}`,
+        `${money(item.last_change.delta, { sign: true, cents: true })} in ${shortDate(item.last_change.date).split(" ")[0]}`,
       ),
     );
   }
@@ -95,7 +95,7 @@ export function render(data: RecurringResult, host: WidgetHost): void {
     metric(
       "Price changes, 12 mo",
       changes.count ? `${changes.count} · ${money(changes.delta, { sign: true, cents: true })}` : "0",
-      changes.count > 0 && Number(changes.delta) > 0,
+      changes.count > 0 && moneySign(changes.delta) > 0,
     ),
   );
 

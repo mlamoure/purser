@@ -30,6 +30,7 @@ from sqlalchemy import Engine, select, text
 from sqlalchemy.orm import Session
 
 import purser.db
+from tests.conftest import now, today
 from tests.test_matching import _expected, _imported
 from tests.test_mcp import LiveServer, _mcp_call
 from tests.test_transfer_link_window import _activate, _merged_into, _rule
@@ -43,10 +44,9 @@ IN_TEXT = "THANK YOU FOR YOUR REMITTANCE"
 
 
 def _ago(days: int) -> date:
-    # Today is read per call, not once at import: the card window and
-    # lookback_days count from the server's today, so a run that crosses
-    # midnight would otherwise shift every boundary by a day.
-    return date.today() - timedelta(days=days)
+    # The card window and lookback_days count from the server's today, which
+    # is the test's pinned day.
+    return today() - timedelta(days=days)
 
 
 @pytest.fixture(scope="module")
@@ -247,8 +247,9 @@ class TestTheCard:
             OUT_TEXT,
             IN_TEXT,
         )
+        # Accounts by name in the headline (#552), by path in the draft.
         assert card["headline"] == (
-            f"Link 250.00 from {CHECKING} ({_ago(3).isoformat()}) to {CARD}"
+            f"Link 250.00 from Everyday ({_ago(3).isoformat()}) to Rewards"
             f" ({_ago(2).isoformat()}) as one transfer"
         )
         assert card["evidence_summary"]["count"] == 1
@@ -484,7 +485,9 @@ class TestTheCard:
         self, seeded: dict[str, str], client: TestClient, migrated_engine: Engine
     ) -> None:
         """#386 review, item 10: the draft names its accounts by path, so a
-        move re-points it at once, as it does a schedule draft's."""
+        move re-points it at once, as it does a schedule draft's. The headline
+        names them (#552), read when the card is served, so a rename shows at
+        once too."""
         _pair(client, migrated_engine, "250.00", 3, 2)
         _pass()
 
@@ -496,7 +499,11 @@ class TestTheCard:
             "assets.everyday",
             CARD,
         )
-        assert card["headline"].startswith("Link 250.00 from assets.everyday (")
+        assert card["headline"].startswith("Link 250.00 from Everyday (")
+
+        renamed = client.patch(f"/accounts/{seeded[CHECKING]}", json={"name": "Daily Spending"})
+        assert renamed.status_code == 200, renamed.text
+        assert _only_card(client)["headline"].startswith("Link 250.00 from Daily Spending (")
 
     def test_the_auto_linker_withdraws_the_card(
         self, seeded: dict[str, str], client: TestClient, migrated_engine: Engine
@@ -1402,7 +1409,7 @@ def _ts(days_ago: int) -> int:
 
 
 def _age(row: dict[str, Any]) -> int:
-    return (date.today() - datetime.fromtimestamp(int(row["posted"]), tz=UTC).date()).days
+    return (today() - datetime.fromtimestamp(int(row["posted"]), tz=UTC).date()).days
 
 
 def _sf_row(
@@ -1452,7 +1459,7 @@ def _feed_import(
                 "name": path,
                 "currency": "USD",
                 "balance": "0.00",
-                "balance-date": int(datetime.now(UTC).timestamp()),
+                "balance-date": int(now().timestamp()),
                 "transactions": sf_rows,
                 "holdings": [],
             }
@@ -2316,6 +2323,8 @@ class TestInboxTotals:
             "transfer_link": 0,
             "match": 0,
             "transfer_pair": 4,  # the snoozed card waits for its date
+            "split": 0,
+            "trade_rule": 0,
         }
         assert [page.status_code for page in pages] == [200, 200, 200]
         listed = [row["id"] for page in pages for row in page.json()]
@@ -2793,7 +2802,7 @@ class TestOverMcp:
         assert sorted(item["id"] for page in pages for item in page["items"]) == sorted(
             c["id"] for c in cards.values()
         )
-        assert cards[accept_out]["headline"].startswith("Link 250.00 from assets.checking")
+        assert cards[accept_out]["headline"].startswith("Link 250.00 from Everyday (")
         accepted, rejected = _mcp_call(
             live_server.url,
             token,
@@ -2839,24 +2848,19 @@ class TestOverMcp:
             in_text="CANARY INBOUND LINE",
         )
         _pass()
-        resp = client.put("/config", json={"privacy_purchase": True, "privacy_amount": True})
-        assert resp.status_code == 200, resp.text
         operator = client.post("/tokens", json={"name": "operator", "scopes": ["read", "write"]})
         token = operator.json()["token"]
-        try:
-            withheld, included = _mcp_call(
-                live_server.url,
-                token,
-                [
-                    ("list_suggestions", {"kind": "transfer_pair"}),
-                    (
-                        "list_suggestions",
-                        {"kind": "transfer_pair", "include": ["payee", "description", "amount"]},
-                    ),
-                ],
-            )
-        finally:
-            client.put("/config", json={"privacy_purchase": False, "privacy_amount": False})
+        withheld, included = _mcp_call(
+            live_server.url,
+            token,
+            [
+                (
+                    "list_suggestions",
+                    {"kind": "transfer_pair", "withhold": ["payee", "description", "amount"]},
+                ),
+                ("list_suggestions", {"kind": "transfer_pair"}),
+            ],
+        )
 
         dumped = str(withheld)
         for secret in ("CANARY OUTBOUND LINE", "CANARY INBOUND LINE", "263.47"):

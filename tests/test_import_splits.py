@@ -4,9 +4,10 @@ DESIGN §3.3/§7.2).
 A split transaction is one real leg plus two or more category legs. A QIF
 row's ``S``/``E``/``$`` lines become its category legs; each transfer line
 ``S[X]`` is carved out as an ordinary transfer leg that pairs with X's mirror
-row (decomposition, model B), so the money moves once. Split rows are
-read-only: edits, the categorize pass, a categorize rule's apply-history and
-the transfer pool leave them alone. The fixture is synthetic: a paycheck split
+row (decomposition, model B), so the money moves once. A flat edit, the
+categorize pass, a categorize rule's apply-history and the transfer pool
+leave split rows alone; the split path edits them (decision 118,
+tests/test_splits.py). The fixture is synthetic: a paycheck split
 with a transfer line to savings, a two-line grocery split and a split whose
 lines leave part of the amount unexplained.
 """
@@ -93,7 +94,9 @@ class TestSplitPrimitive:
         ]
         legs = [core.Leg(s.account_id, s.amount, s.account_id != account) for s in specs]
         assert core.transfer_shape(legs) is None  # not a transfer
-        assert core.split_line_count(legs) == 2
+        assert core.split_line_count(legs, account) == 2
+        # The marker decides (decision 118): without it the row is no split.
+        assert core.split_line_count(legs, None) == 0
 
     @pytest.mark.parametrize(
         ("amount", "shares", "message"),
@@ -119,7 +122,7 @@ class TestSplitPrimitive:
         plain = [core.Leg(a, D("-5"), False), core.Leg(b, D("5"), False)]
         loan = [core.Leg(a, D("-5"), False), core.Leg(b, D("4"), False), core.Leg(c, D("1"), True)]
         for legs in (flat, plain, loan):
-            assert core.split_line_count(legs) == 0
+            assert core.split_line_count(legs, None) == 0
 
     @settings(max_examples=200, deadline=None)
     @given(
@@ -386,11 +389,13 @@ def _split_row(client: TestClient, *, cleared: bool) -> str:
 
 
 class TestSplitRowsAreReadOnly:
-    def test_edit_is_refused(self, seeded: None, client: TestClient) -> None:
+    def test_flat_edit_is_refused(self, seeded: None, client: TestClient) -> None:
+        # A split's lines change through the split path only (decision 118).
         tx_id = _split_row(client, cleared=True)
         resp = client.patch(f"/transactions/{tx_id}", json={"category": "expenses.groceries"})
         assert resp.status_code == 422
-        assert "split rows are read-only" in resp.json()["detail"]
+        assert "this row is a split" in resp.json()["detail"]
+        assert "split_transaction" in resp.json()["detail"]
 
     @pytest.mark.parametrize("cleared", [True, False])
     def test_categorize_and_apply_history_skip_split_rows(

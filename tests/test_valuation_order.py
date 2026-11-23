@@ -22,9 +22,7 @@ from hypothesis import strategies as st
 from sqlalchemy.orm import Session
 
 import purser.config
-from tests.conftest import TEST_ENCRYPTION_KEY
-
-TODAY = datetime.now(UTC).date()
+from tests.conftest import TEST_ENCRYPTION_KEY, today
 
 
 def _loan(client: TestClient) -> str:
@@ -43,7 +41,7 @@ def _loan(client: TestClient) -> str:
 def _value(client: TestClient, account_id: str, value: str) -> None:
     resp = client.post(
         f"/accounts/{account_id}/valuations",
-        json={"as_of": TODAY.isoformat(), "value": value},
+        json={"as_of": today().isoformat(), "value": value},
     )
     assert resp.status_code == 201, resp.text
 
@@ -55,17 +53,17 @@ def _surfaces(client: TestClient, db: Session, account_id: str) -> list[Decimal]
 
     db.expire_all()
     account = ledger_service.get_account(db, uuid.UUID(account_id))
-    series, _ = networth_service.account_balance_series(db, account, dates=[TODAY])
+    series, _ = networth_service.account_balance_series(db, account, dates=[today()])
     (entry,) = [
         b
-        for b in client.get("/networth", params={"as_of": TODAY.isoformat()}).json()["breakdown"]
+        for b in client.get("/networth", params={"as_of": today().isoformat()}).json()["breakdown"]
         if b["account_id"] == account_id
     ]
     return [
         Decimal(client.get(f"/accounts/{account_id}").json()["balance"]),
         Decimal(client.get(f"/accounts/{account_id}/balance").json()["balance"]),
         Decimal(entry["value"]),
-        series[TODAY],
+        series[today()],
         Decimal(client.get(f"/accounts/{account_id}/valuations").json()[0]["value"]),
     ]
 
@@ -112,11 +110,13 @@ def test_rows_written_in_one_transaction_keep_their_order(db_session: Session) -
         networth_service.record_valuation(
             db_session,
             account_ref=str(account.id),
-            as_of=TODAY,
+            as_of=today(),
             value=Decimal(figure),
             actor_token_id=None,
         )
-    assert networth_service._latest_valuation(db_session, account.id, TODAY) == Decimal("-100.00")
+    worth = networth_service.net_worth_at(db_session, today())
+    line = next(b for b in worth["breakdown"] if b["account_id"] == account.id)
+    assert (line["value"], line["method"]) == (Decimal("-100.00"), "valuation")
     db_session.rollback()
 
 
@@ -151,7 +151,7 @@ def test_migration_backfills_from_the_audit_row_else_the_date(
 ) -> None:
     cfg, engine = scratch_db
     audited_at = datetime(2026, 3, 4, 15, 30, tzinfo=UTC)
-    day = TODAY - timedelta(days=3)
+    day = today() - timedelta(days=3)
     with engine.begin() as conn:
         account = conn.execute(
             sa.text(

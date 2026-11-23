@@ -6,17 +6,18 @@
  * statement balance) and the create/edit form (payee + memo, #534). The page
  * dogfoods the same REST surface agents use. */
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, errorDetail } from "../lib/api";
 import { overrideBody } from "../lib/utils";
-import { compareMoney, formatMoney, negateMoney } from "../lib/money";
+import { compareMoney, formatEstimate, formatMoney, negateMoney } from "../lib/money";
 import { formatDate } from "../lib/dates";
 import { amountBasisLabel } from "../lib/labels";
 import { useCategoryNames, type PathName } from "../lib/names";
 import { plotCoordinate } from "../lib/plot";
 import type { components } from "../api/schema";
+import { EstimatedAmount } from "../components/EstimatedAmount";
 import { OccurrenceCertainty, OccurrenceEvidence } from "../components/OccurrenceCertainty";
 import { Badge, Button, Card, CardTitle, ErrorText, Input, Table, Td, Th } from "../components/ui";
 import { QueryState } from "../components/QueryState";
@@ -296,6 +297,9 @@ export function ForecastChart({
   currency?: string | null;
 }) {
   const money = (value: string | null | undefined) => formatMoney(value, { currency });
+  // An estimated event's amount reads "≈ −$95.00" (#556).
+  const eventAmount = (e: { amount: string; certainty?: { amount_estimated: boolean } | null }) =>
+    e.certainty?.amount_estimated ? formatEstimate(e.amount, { currency }) : money(e.amount);
   const [days, setDays] = useState<30 | 90 | 365>(30);
   const forecast = useQuery({
     queryKey: ["forecast", accountPath, days],
@@ -404,7 +408,7 @@ export function ForecastChart({
                 strokeWidth={1.5}
               >
                 <title>
-                  {`${e.label} ${money(e.amount)} · ${formatDate(e.date)}${e.projected ? " · projected" : ""}${e.overdue ? " · overdue" : ""}` +
+                  {`${e.label} ${eventAmount(e)} · ${formatDate(e.date)}${e.projected ? " · projected" : ""}${e.overdue ? " · overdue" : ""}` +
                     (e.basis ? ` · ${amountBasisLabel(e.basis)}` : "") +
                     (e.range ? ` · ${money(e.range.low)} to ${money(e.range.high)}` : "")}
                 </title>
@@ -421,7 +425,14 @@ export function ForecastChart({
             <summary>Upcoming occurrences and estimate details</summary>
             <div className="max-h-80 space-y-2 overflow-auto">
               {data.days.flatMap(day => day.events.map((event, index) => <div key={`${day.date}-${index}`}>
-                <span>{formatDate(day.date)} · {event.label} · {money(event.amount)}</span>
+                <span>
+                  {formatDate(day.date)} · {event.label} ·{" "}
+                  {event.certainty?.amount_estimated ? (
+                    <EstimatedAmount value={event.amount} currency={currency} />
+                  ) : (
+                    money(event.amount)
+                  )}
+                </span>
                 <span className="text-xs text-muted-foreground"> · Amount calculation: {event.basis ? amountBasisLabel(event.basis) : "not recorded"}</span>
                 <OccurrenceCertainty value={event.certainty} />
                 {event.certainty?.slot && <OccurrenceEvidence slot={event.certainty.slot} onSaved={() => { void forecast.refetch(); }} />}
@@ -820,15 +831,27 @@ function rowLabels({ schedule: s, mirror, other }: Row) {
       : `Transfer to ${otherName}`
     : (s.payee ?? s.name);
   const amount = mirror ? negateAmount(s.amount) : s.amount;
-  const amountText =
-    s.amount_type === "estimated"
-      ? s.estimate_basis === "counterparty_balance"
-        ? "pays balance"
-        : amount != null
-          ? `~${formatMoney(amount, { currency: s.currency })}`
-          : "from history"
-      : formatMoney(amount, { currency: s.currency });
-  return { isTransfer, who, amountText };
+  const estimated = s.amount_type === "estimated";
+  // An estimate reads "≈ −$95.00", heard as "estimated −$95.00" (#556).
+  const amountText: ReactNode = estimated ? (
+    s.estimate_basis === "counterparty_balance" ? (
+      "pays balance"
+    ) : amount != null ? (
+      <EstimatedAmount value={amount} currency={s.currency} />
+    ) : (
+      "from history"
+    )
+  ) : (
+    formatMoney(amount, { currency: s.currency })
+  );
+  // Muted, with where the estimate comes from on hover: table and phone list.
+  const amountClass = `whitespace-nowrap font-mono${estimated ? " text-muted-foreground" : ""}`;
+  const amountTitle = estimated
+    ? s.estimate_basis
+      ? `Estimated from the ${amountBasisLabel(s.estimate_basis)}`
+      : "Estimated from history"
+    : undefined;
+  return { isTransfer, who, amountText, amountClass, amountTitle };
 }
 
 function RowActions({ s, onEdit, onAction }: { s: ScheduleOut } & Pick<RowProps, "onEdit" | "onAction">) {
@@ -873,7 +896,7 @@ function StatusBadge({ status }: { status: string }) {
 /** Phone layout: one stacked item per scheduled transaction. */
 function ScheduleItem({ row, cardPayment, expanded, onToggle, onEdit, onAction }: RowProps) {
   const s = row.schedule;
-  const { who, amountText } = rowLabels(row);
+  const { who, amountText, amountClass, amountTitle } = rowLabels(row);
   return (
     <li className="py-3 text-sm">
       <div className="flex items-baseline justify-between gap-3">
@@ -884,7 +907,9 @@ function ScheduleItem({ row, cardPayment, expanded, onToggle, onEdit, onAction }
         >
           {who}
         </button>
-        <span className="whitespace-nowrap font-mono">{amountText}</span>
+        <span className={amountClass} title={amountTitle}>
+          {amountText}
+        </span>
       </div>
       <p className="mt-1 text-muted-foreground">
         {[s.memo, cadenceLabel(s.rrule), s.next_due ? `next ${formatDate(s.next_due)}` : null].filter(Boolean).join(" · ")}
@@ -904,7 +929,7 @@ function ScheduleItem({ row, cardPayment, expanded, onToggle, onEdit, onAction }
 
 function ScheduleRow({ row, categoryName, cardPayment, expanded, onToggle, onEdit, onAction }: RowProps) {
   const s = row.schedule;
-  const { isTransfer, who, amountText } = rowLabels(row);
+  const { isTransfer, who, amountText, amountClass, amountTitle } = rowLabels(row);
   return (
     <>
       <tr>
@@ -925,10 +950,7 @@ function ScheduleRow({ row, categoryName, cardPayment, expanded, onToggle, onEdi
           {isTransfer ? "Transfer" : categoryName(s.category_path)}
         </Td>
         <Td>{cadenceLabel(s.rrule)}</Td>
-        <Td
-          className={`whitespace-nowrap text-right font-mono${s.amount_type === "estimated" ? " text-muted-foreground" : ""}`}
-          title={s.amount_type === "estimated" ? s.estimate_basis ? `Estimated from the ${amountBasisLabel(s.estimate_basis)}` : "Estimated from history" : undefined}
-        >
+        <Td className={`${amountClass} text-right`} title={amountTitle}>
           {amountText}
         </Td>
         <Td className="whitespace-nowrap">{formatDate(s.next_due)}</Td>

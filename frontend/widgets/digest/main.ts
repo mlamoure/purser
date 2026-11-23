@@ -3,7 +3,7 @@
  * host (get_transaction / model context); no other interactivity. */
 
 import { initWidget, type WidgetHost } from "../lib/host";
-import { clear, h, icon, money, shortDate } from "../lib/kit";
+import { clear, h, icon, money, moneySign, shortDate } from "../lib/kit";
 import "../lib/theme.css";
 
 interface WhatsNewResult {
@@ -80,7 +80,7 @@ function render(data: WhatsNewResult, host: WidgetHost): void {
       .join(", ");
     lines.push(
       line("receipt", "var(--text-secondary)", [
-        `${tx.count} new transaction${tx.count === 1 ? "" : "s"} · $${tx.total} `,
+        `${tx.count} new transaction${tx.count === 1 ? "" : "s"} · ${money(tx.total)} `,
         names
           ? h("span", { style: "color:var(--text-muted);font-size:13px;" }, `(${names})`)
           : "",
@@ -88,7 +88,7 @@ function render(data: WhatsNewResult, host: WidgetHost): void {
     );
   }
   for (const match of data.matches) {
-    const clean = Number(match.variance) === 0;
+    const clean = moneySign(match.variance) === 0;
     lines.push(
       line(clean ? "check" : "alert", `var(--text-${clean ? "success" : "warning"})`, [
         `${match.name} matched · ${money(match.amount)}${clean ? ", variance $0" : `, variance ${money(match.variance, { sign: true, cents: true })}`}`,
@@ -98,7 +98,7 @@ function render(data: WhatsNewResult, host: WidgetHost): void {
   for (const change of data.price_changes) {
     lines.push(
       line("arrow-up", "var(--text-danger)", [
-        `${change.payee} price change · ${Number(change.delta) >= 0 ? "+" : ""}${money(change.delta, { cents: true })}/mo`,
+        `${change.payee} price change · ${money(change.delta, { sign: true, cents: true })}/mo`,
       ]),
     );
   }
@@ -113,7 +113,7 @@ function render(data: WhatsNewResult, host: WidgetHost): void {
   if (data.upcoming.count) {
     lines.push(
       line("clock", "var(--text-secondary)", [
-        `This week: ${data.upcoming.count} bill${data.upcoming.count === 1 ? "" : "s"} expected · $${data.upcoming.total}`,
+        `This week: ${data.upcoming.count} bill${data.upcoming.count === 1 ? "" : "s"} expected · ${money(data.upcoming.total)}`,
       ]),
     );
   }

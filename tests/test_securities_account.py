@@ -5,7 +5,7 @@ refuse it. One pin per surface; synthetic data only.
 """
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 
 import pytest
@@ -18,12 +18,11 @@ from purser.core import ledger as core
 from purser.holdings import service
 from purser.ledger import LedgerError
 from purser.models import Account
-
-TODAY = datetime.now(UTC).date()
+from tests.conftest import today
 
 
 def _weekday_before(days: int):
-    day = TODAY - timedelta(days=days)
+    day = today() - timedelta(days=days)
     while day.weekday() >= 4:
         day -= timedelta(days=1)
     return day
@@ -41,7 +40,7 @@ def trade(admin_client: TestClient) -> dict[str, str]:
         json={
             "symbol": "ACME",
             "quantity": "10",
-            "as_of": (TODAY - timedelta(days=60)).isoformat(),
+            "as_of": (today() - timedelta(days=60)).isoformat(),
         },
     ).json()["id"]
     resp = admin_client.post(
@@ -108,7 +107,7 @@ class TestNothingChosenBooksToIt:
                 "account": "assets.plan",
                 "category": "equity.securities",
                 "amount": "-1.00",
-                "date": TODAY.isoformat(),
+                "date": today().isoformat(),
                 "status": "posted",
             },
         )
@@ -123,7 +122,7 @@ class TestNothingChosenBooksToIt:
                 "account": "assets.plan",
                 "category": "expenses.groceries",
                 "amount": "-3.00",
-                "date": TODAY.isoformat(),
+                "date": today().isoformat(),
                 "status": "posted",
             },
         ).json()
@@ -157,7 +156,7 @@ class TestNothingChosenBooksToIt:
                     core.SplitLine(category_id=securities.id, amount=Decimal("-4.00")),
                     core.SplitLine(category_id=groceries.id, amount=Decimal("-6.00")),
                 ],
-                date=TODAY,
+                date=today(),
                 requested_status=core.Status.POSTED,
                 origin=core.Origin.HUMAN,
                 token=None,
@@ -177,7 +176,7 @@ class TestNothingChosenBooksToIt:
                 "account": "assets.chk",
                 "category": "expenses.groceries",
                 "amount": "-5.00",
-                "date": TODAY.isoformat(),
+                "date": today().isoformat(),
                 "status": "posted",
             },
         )
@@ -274,7 +273,7 @@ class TestTheEquitySubtreeIsTheSystems:
                 "account": "assets.chk",
                 "category": "expenses.groceries",
                 "amount": "-5.00",
-                "date": TODAY.isoformat(),
+                "date": today().isoformat(),
                 "status": "posted",
             },
         )
@@ -330,7 +329,7 @@ class TestMachineryLeavesTradeCashAlone:
             account_ref="assets.plan",
             category_ref=str(uncategorized.id),
             amount=Decimal("-7.00"),
-            date=TODAY,
+            date=today(),
             payee_name="Synthetic Store",
             requested_status=core.Status.PENDING,
             origin=core.Origin.IMPORT,
@@ -434,7 +433,7 @@ class TestMachineryLeavesTradeCashAlone:
             account_ref=str(account.id),
             symbol="TEST",
             quantity=Decimal("10"),
-            as_of=TODAY - timedelta(days=60),
+            as_of=today() - timedelta(days=60),
             token=None,
         ).position
         day = _weekday_before(8)
@@ -473,7 +472,7 @@ class TestMachineryLeavesTradeCashAlone:
         db_session.refresh(sold)
         assert sold.status == "posted" and sold.superseded_by is None
         balances.recompute_running(db_session)
-        assert balances.balance_asof(db_session, account.id, TODAY) == Decimal("250.0000")
+        assert balances.balance_asof(db_session, account.id, today()) == Decimal("250.0000")
 
     def test_a_conversion_never_merges_with_trade_cash(
         self, trade: dict[str, str], db_session: Session
@@ -535,14 +534,14 @@ class TestMachineryLeavesTradeCashAlone:
             db_session,
             account_ref=str(account.id),
             symbol="TEST",
-            opened_on=TODAY - timedelta(days=200),
+            opened_on=today() - timedelta(days=200),
             token=None,
         )
         service.record_event(
             db_session,
             position_id=position.id,
             kind="set_quantity",
-            occurred_on=TODAY - timedelta(days=200),
+            occurred_on=today() - timedelta(days=200),
             quantity=Decimal("100"),
             token=None,
         )

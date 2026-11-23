@@ -103,6 +103,18 @@ The batch's guidance says the same, so a later page fetched with
 `include_guidance=false` carries only the marker. See
 [Manual holdings](../../how-to/manual-holdings/).
 
+A row flagged `securities_trade` **without** `locked` was marked a securities
+trade by you, an agent or a rule: mark it reviewed if it is a buy or sell, or
+give it the right category. A row flagged `balance_adjustment` is Purser's
+post-sync true-up of a brokerage account's cash; mark it reviewed, or
+recategorize it if you know what the gap was. See
+[Mark brokerage buys and sells](../../how-to/brokerage-trades/).
+
+A row flagged `starting_balance` is what an account held before its first
+transaction, taken from the bank's reported balance. Mark it reviewed; Purser
+lowers it by itself when older history is imported, and it cannot be edited.
+See [Start an account from the bank's balance](../../how-to/starting-balance/).
+
 ## Letting Purser review it for you
 
 If you have configured an AI provider, you can have the review pass run

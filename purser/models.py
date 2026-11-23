@@ -137,6 +137,11 @@ class AuditLog(Base):
     outcome: Mapped[str | None]
     data_types: Mapped[list[str] | None] = mapped_column(ARRAY(TEXT))
     account_ids: Mapped[list[uuid.UUID] | None] = mapped_column(ARRAY(UUIDType))
+    # Integration call rows (#613): the fields the call asked to withhold, and
+    # the payee/description/amount fields its answer returned with real values.
+    # Plain so the audit view can filter on them; see privacy.audit_record.
+    privacy_requested: Mapped[list[str] | None] = mapped_column(ARRAY(TEXT))
+    identifiable: Mapped[list[str] | None] = mapped_column(ARRAY(TEXT))
 
 
 class AuditReceipt(Base):
@@ -369,6 +374,11 @@ class Transaction(Base):
     reverses_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("transactions.id"))
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("api_tokens.id"))
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+    # A split transaction's marker (#590, decision 118): its OWN account, the
+    # real leg that keeps the bank's amount. Set on every split (QIF-imported
+    # or user-made, migration 0057 backfilled the former) and on a split's
+    # reversal; a split is never a transfer, whatever its postings look like.
+    split_account_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("accounts.id"))
 
     postings: Mapped[list["Posting"]] = relationship(back_populates="transaction")
     payee: Mapped[Payee | None] = relationship()
@@ -453,7 +463,7 @@ class PositionEvent(Base):
     )
     position_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("positions.id"))
     occurred_on: Mapped[date]
-    kind: Mapped[str]  # set_quantity | buy | sell | vest | transfer_out
+    kind: Mapped[str]  # set_quantity | buy | sell | vest | transfer_out | split
     quantity: Mapped[Decimal] = mapped_column(Numeric(20, 6))
     price: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
     fees: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
@@ -479,6 +489,12 @@ class PositionEvent(Base):
     # fair market value per share. NULL on every other kind (CHECK).
     gross_quantity: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
     withheld_quantity: Mapped[Decimal | None] = mapped_column(Numeric(20, 6))
+    # A split (#624, decision 127): every share becomes numerator/denominator
+    # shares at the start of ``occurred_on``; quantity 0, nothing else.
+    split_numerator: Mapped[int | None]
+    split_denominator: Mapped[int | None]
+    # A sell that is a split's cash in lieu of a fractional share names it.
+    in_lieu_of: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("position_events.id"))
 
 
 class HoldingsCapture(Base):
@@ -797,6 +813,12 @@ class Account(Base):
     # the post-sync drift check, comparing that balance with its postings.
     # Only on brokerage + holdings_source='manual' (CHECK, migration 0043).
     feed_balance_is_cash: Mapped[bool] = mapped_column(server_default=text("false"))
+    # After each sync, post a visible system adjustment against
+    # equity.securities so a feed-holdings brokerage account's postings plus
+    # holdings equal the balance its broker reported in the same fetch (#591,
+    # decision 119). On for feed-holdings brokerage accounts by default
+    # (create_account, migration 0058), and only there (CHECK).
+    balance_true_up: Mapped[bool] = mapped_column(server_default=text("false"))
     min_balance: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
     # Lifecycle timestamps (real accounts only; CHECK + trigger enforce the
     # invariants — DESIGN §3.4). hidden_at hides an account from the default
@@ -872,6 +894,59 @@ class AssetValueChange(Base):
     account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id"))
     reference: Mapped[str | None]
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
+class BrokerageTrueUp(Base):
+    """One balance true-up of a feed-holdings brokerage account (#591,
+    decision 119): the system adjustment ``transaction_id`` (account vs
+    equity.securities) made from fetch ``raw_fetch_id``, which reported
+    ``reported`` with holdings worth ``holdings_value``. UNIQUE per (account,
+    fetch): one fetch never adjusts an account twice. The register labels the
+    row from this table."""
+
+    __tablename__ = "brokerage_true_ups"
+    __table_args__ = (UniqueConstraint("account_id", "raw_fetch_id"),)
+
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("transactions.id", ondelete="CASCADE"), primary_key=True
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("accounts.id", ondelete="CASCADE"))
+    raw_fetch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("raw_fetches.id"))
+    balance_date: Mapped[date]
+    reported: Mapped[Decimal] = mapped_column(Numeric(20, 4))
+    holdings_value: Mapped[Decimal] = mapped_column(Numeric(20, 4))
+    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
+class AccountStartingBalance(Base):
+    """An account's starting balance from the bank (#585, decision 123): the
+    system entry ``transaction_id`` (account vs equity.opening_balances; None
+    while the amount is zero and nothing was ever posted) and what it is
+    derived from. ``reported`` is the bank's figure in fetch ``raw_fetch_id``;
+    ``posted_before``/``pending_before`` are the account's two ledger sums at
+    that moment; ``horizon`` is the earliest row the account then held. The
+    entry is ``reported`` less the sum on ``basis`` less every row that has
+    since arrived dated before the horizon (``amount``, ledger sign)."""
+
+    __tablename__ = "account_starting_balances"
+
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True
+    )
+    transaction_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("transactions.id", ondelete="SET NULL")
+    )
+    raw_fetch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("raw_fetches.id"))
+    balance_date: Mapped[date | None]
+    reported: Mapped[Decimal] = mapped_column(Numeric(20, 4))
+    posted_before: Mapped[Decimal] = mapped_column(Numeric(20, 4))
+    pending_before: Mapped[Decimal] = mapped_column(Numeric(20, 4))
+    basis: Mapped[str]  # posted_only | pending_inclusive
+    horizon: Mapped[date]
+    amount: Mapped[Decimal] = mapped_column(Numeric(20, 4))
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("api_tokens.id"))
+    created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
 
 
 class AppSetting(Base):

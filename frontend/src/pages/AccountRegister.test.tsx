@@ -1,10 +1,10 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { Route, Routes } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 import type { components } from "../api/schema";
 import { apiMock, fail, mockApi, ok } from "../test/api";
 import { meQuery } from "../lib/me";
-import { accountOut, transferCandidate } from "../test/fixtures";
+import { accountOut, transferCandidate, balanceHistoryOut, holdingsSummaryOut } from "../test/fixtures";
 import { renderWithProviders } from "../test/render";
 import AccountRegister, { RegisterRow } from "./AccountRegister";
 
@@ -30,8 +30,11 @@ const instanceRow = (over: Partial<TransactionOut> = {}): TransactionOut => ({
   schedule_pinned: false,
   split_lines: 0,
   securities_trade: false,
+  securities_trade_locked: false,
+  balance_adjustment: false,
   value_change: false,
   money_put_in: false,
+  starting_balance: false,
   created_at: "2026-10-05T12:00:00Z",
   ...over,
 });
@@ -104,22 +107,25 @@ describe("RegisterRow accessible names (#538)", () => {
   });
 });
 
-describe("RegisterRow split rows (#274)", () => {
-  it("shows a read-only Split (n) that lists the category legs", async () => {
+describe("RegisterRow split rows (#274, #590)", () => {
+  const names = () =>
     mockApi({
       "GET /categories": ok([
         accountOut({ id: "c-1", name: "Groceries", path: "expenses.groceries", type: "category_expense", is_virtual: true }),
+        accountOut({ id: "c-2", name: "Household", path: "expenses.household", type: "category_expense", is_virtual: true }),
       ]),
-      "GET /accounts": ok([]),
-      "GET /transactions/{tx_id}": ok({
-        postings: [
-          { id: "p-1", account_id: "a-1", account_path: "assets.checking", amount: "-120.0000", currency: "USD", memo: null },
-          { id: "p-2", account_id: "c-1", account_path: "expenses.groceries", amount: "80.0000", currency: "USD", memo: null },
-          { id: "p-3", account_id: "c-2", account_path: "expenses.household", amount: "40.0000", currency: "USD", memo: "soap" },
-        ],
-      }),
+      "GET /accounts": ok([accountOut({ id: "a-2", name: "Reserve", path: "assets.savings" })]),
     });
-    const split = instanceRow({
+  const renderRow = (t: TransactionOut, accountPath = "assets.checking") =>
+    renderWithProviders(
+      <table>
+        <tbody>
+          <RegisterRow t={t} accountPath={accountPath} candidates={[]} proposed={[]} />
+        </tbody>
+      </table>,
+    );
+  const splitRow = (over: Partial<TransactionOut> = {}) =>
+    instanceRow({
       id: "tx-split",
       status: "posted",
       origin: "import",
@@ -128,27 +134,67 @@ describe("RegisterRow split rows (#274)", () => {
       transfer_account_path: null,
       is_transfer: false,
       split_lines: 2,
+      split_account_path: "assets.checking",
+      ...over,
     });
-    const { user } = renderWithProviders(
-      <table>
-        <tbody>
-          <RegisterRow t={split} accountPath="assets.checking" candidates={[]} proposed={[]} />
-        </tbody>
-      </table>,
-    );
 
-    // No category picker: split rows are read-only.
+  it("Split (n) opens the editor with the split's lines", async () => {
+    names();
+    mockApi({
+      "GET /transactions/{tx_id}": ok({
+        id: "tx-split",
+        amount: "-120.0000",
+        split: {
+          account_path: "assets.checking",
+          lines: [
+            { target: "expenses.groceries", kind: "category", amount: "-80.0000", memo: null, backing_ids: [] },
+            { target: "expenses.household", kind: "category", amount: "-40.0000", memo: "soap", backing_ids: [] },
+          ],
+        },
+      }),
+    });
+    const { user } = renderRow(splitRow());
+    // No category picker on the row itself.
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Split (2)" }));
-
-    // Legs read by name (#541); a path no list knows reads as its last label.
-    expect(await screen.findByText("Groceries")).toBeInTheDocument();
-    expect(screen.getByText("Household")).toBeInTheDocument();
-    expect(screen.queryByText("expenses.groceries")).not.toBeInTheDocument();
-    expect(screen.queryByText("Checking")).not.toBeInTheDocument();
+    expect(await screen.findByDisplayValue("soap")).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Line 1 amount" })).toHaveValue("-80.00");
+    expect(screen.getByRole("button", { name: "Remove split" })).toBeInTheDocument();
     expect(apiMock.GET).toHaveBeenCalledWith("/transactions/{tx_id}", {
       params: { path: { tx_id: "tx-split" } },
     });
+  });
+
+  it("reads 'Split from' in the register of an account a line books to", () => {
+    names();
+    renderRow(splitRow({ amount: "600.0000", split_lines: 3 }), "assets.savings");
+    expect(screen.getByRole("button", { name: "Split from Checking" })).toBeInTheDocument();
+  });
+
+  it("offers Split… on a posted flat row and opens the editor from its category", async () => {
+    names();
+    const flat = splitRow({
+      id: "tx-flat",
+      split_lines: 0,
+      split_account_path: null,
+      category_path: "expenses.groceries",
+    });
+    const { user } = renderRow(flat);
+    await user.click(screen.getByRole("button", { name: "Split…" }));
+    expect(screen.getByRole("textbox", { name: "Line 1 amount" })).toHaveValue("-120.00");
+    expect(screen.getByRole("combobox", { name: "Line 1 category or account" })).toHaveValue(
+      "expenses.groceries",
+    );
+    expect(screen.queryByRole("button", { name: "Split…" })).not.toBeInTheDocument();
+  });
+
+  it("hides Split… on rows the server would refuse", () => {
+    names();
+    renderRow(splitRow({ id: "a", split_lines: 0, status: "pending", origin: "import" }));
+    renderRow(splitRow({ id: "b", split_lines: 0, is_transfer: true }));
+    renderRow(splitRow({ id: "c", split_lines: 0, status: "expected" }));
+    renderRow(splitRow({ id: "d", split_lines: 0, securities_trade: true }));
+    expect(screen.queryByRole("button", { name: "Split…" })).not.toBeInTheDocument();
   });
 });
 
@@ -156,6 +202,8 @@ describe("AccountRegister search (#141)", () => {
   it("sends one search for a burst of keystrokes, after typing pauses", async () => {
     mockApi({
       "GET /accounts/{account_id}": ok(accountOut({ id: "acct-1" })),
+      "GET /accounts/{account_id}/balance/history": ok(balanceHistoryOut()),
+      "GET /accounts/{account_id}/holdings/summary": ok(holdingsSummaryOut()),
       "GET /transactions": ok({ items: [], total: 0, limit: 50, offset: 0 }),
       "GET /matching/transfer-candidates": ok([]),
       "GET /matching/proposed": ok([]),
@@ -171,7 +219,7 @@ describe("AccountRegister search (#141)", () => {
     await waitFor(() => expect(searches()).toHaveLength(1)); // the initial load
     expect(searches()[0][1]?.params?.query).not.toHaveProperty("q");
 
-    await user.type(screen.getByPlaceholderText("Search description…"), "starbucks");
+    await user.type(screen.getByPlaceholderText("Search payee, description, memo…"), "starbucks");
 
     await waitFor(() => expect(searches()).toHaveLength(2));
     expect(searches()[1][1]?.params?.query).toMatchObject({ account: "acct-1", q: "starbucks" });
@@ -180,10 +228,47 @@ describe("AccountRegister search (#141)", () => {
   });
 });
 
+describe("AccountRegister balance chart (#594)", () => {
+  it("opens a day picked on the chart in the register", async () => {
+    mockApi({
+      "GET /accounts/{account_id}": ok(accountOut({ id: "acct-1" })),
+      "GET /accounts/{account_id}/balance/history": ok(balanceHistoryOut()),
+      "GET /accounts/{account_id}/holdings/summary": ok(holdingsSummaryOut()),
+      "GET /transactions": ok({ items: [], total: 0, limit: 50, offset: 0 }),
+      "GET /matching/transfer-candidates": ok([]),
+      "GET /matching/proposed": ok([]),
+    });
+    renderWithProviders(
+      <Routes>
+        <Route path="/accounts/:accountId" element={<AccountRegister />} />
+      </Routes>,
+      { route: "/accounts/acct-1" },
+    );
+
+    const chart = await screen.findByRole("img", { name: /^Balance past year/ });
+    fireEvent.keyDown(chart, { key: "ArrowLeft" });
+    fireEvent.keyDown(chart, { key: "Enter" });
+
+    expect(screen.getByLabelText("Start date")).toHaveValue("2026-11-02");
+    expect(screen.getByLabelText("End date")).toHaveValue("2026-11-02");
+    await waitFor(() =>
+      expect(
+        apiMock.GET.mock.calls.some(
+          ([path, init]) =>
+            path === "/transactions" &&
+            (init as { params: { query: Record<string, unknown> } }).params.query.start === "2026-11-02",
+        ),
+      ).toBe(true),
+    );
+  });
+});
+
 describe("AccountRegister manual holdings (#390)", () => {
   const registerRoutes = (account: ReturnType<typeof accountOut>) =>
     mockApi({
       "GET /accounts/{account_id}": ok(account),
+      "GET /accounts/{account_id}/balance/history": ok(balanceHistoryOut()),
+      "GET /accounts/{account_id}/holdings/summary": ok(holdingsSummaryOut()),
       "GET /transactions": ok({ items: [], total: 0, limit: 50, offset: 0 }),
       "GET /matching/transfer-candidates": ok([]),
       "GET /matching/proposed": ok([]),
@@ -211,7 +296,7 @@ describe("AccountRegister manual holdings (#390)", () => {
     const tab = await screen.findByRole("tab", { name: "Positions" });
     await user.click(tab);
     expect(await screen.findByText(/No positions yet/)).toBeInTheDocument();
-    expect(screen.queryByPlaceholderText("Search description…")).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText("Search payee, description, memo…")).not.toBeInTheDocument();
   });
 
   it("names the rename button and the browser tab after the account", async () => {
@@ -224,7 +309,7 @@ describe("AccountRegister manual holdings (#390)", () => {
   it("has no Positions tab on a feed-sourced account", async () => {
     registerRoutes(accountOut({ id: "acct-b", type: "brokerage", path: "assets.broker" }));
     render(false);
-    expect(await screen.findByPlaceholderText("Search description…")).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText("Search payee, description, memo…")).toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "Positions" })).not.toBeInTheDocument();
   });
 
@@ -246,7 +331,7 @@ describe("AccountRegister manual holdings (#390)", () => {
   it("hides the switch from a non-admin session", async () => {
     registerRoutes(accountOut({ id: "acct-b", type: "brokerage", path: "assets.broker" }));
     render(false);
-    expect(await screen.findByPlaceholderText("Search description…")).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText("Search payee, description, memo…")).toBeInTheDocument();
     expect(screen.queryByLabelText("Holdings source")).not.toBeInTheDocument();
   });
 });
@@ -255,6 +340,8 @@ describe("AccountRegister minimum balance (#466)", () => {
   const registerRoutes = (account: ReturnType<typeof accountOut>, patch = ok(account)) =>
     mockApi({
       "GET /accounts/{account_id}": ok(account),
+      "GET /accounts/{account_id}/balance/history": ok(balanceHistoryOut()),
+      "GET /accounts/{account_id}/holdings/summary": ok(holdingsSummaryOut()),
       "GET /transactions": ok({ items: [], total: 0, limit: 50, offset: 0 }),
       "GET /matching/transfer-candidates": ok([]),
       "GET /matching/proposed": ok([]),
@@ -316,7 +403,7 @@ describe("AccountRegister minimum balance (#466)", () => {
   it("offers no floor on an account type it does not apply to", async () => {
     registerRoutes(accountOut({ type: "loan", path: "liabilities.mortgage" }));
     render();
-    expect(await screen.findByPlaceholderText("Search description…")).toBeInTheDocument();
+    expect(await screen.findByPlaceholderText("Search payee, description, memo…")).toBeInTheDocument();
     expect(screen.queryByText("No floor")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /floor/ })).not.toBeInTheDocument();
   });
@@ -407,6 +494,7 @@ describe("AccountRegister securities trades (#390 phase 1b)", () => {
       transfer_account_path: null,
       is_transfer: false,
       securities_trade: true,
+      securities_trade_locked: true,
     });
     renderWithProviders(
       <table>
@@ -523,6 +611,8 @@ describe("AccountRegister securities trades (#390 phase 1b)", () => {
     });
     mockApi({
       "GET /accounts/{account_id}": ok(account),
+      "GET /accounts/{account_id}/balance/history": ok(balanceHistoryOut()),
+      "GET /accounts/{account_id}/holdings/summary": ok(holdingsSummaryOut()),
       "GET /transactions": ok({ items: [], total: 0, limit: 50, offset: 0 }),
       "GET /matching/transfer-candidates": ok([]),
       "GET /matching/proposed": ok([]),
@@ -553,6 +643,8 @@ describe("Account register guided review", () => {
       "GET /categories": ok([]),
       "GET /accounts": ok([]),
       "GET /accounts/{account_id}": ok(accountOut()),
+      "GET /accounts/{account_id}/balance/history": ok(balanceHistoryOut()),
+      "GET /accounts/{account_id}/holdings/summary": ok(holdingsSummaryOut()),
       "GET /transactions": ok({ items: [
         instanceRow({ id: "posted", status: "posted", origin: "import", needs_review: true, schedule_id: null, payee: "Example shop" }),
         instanceRow({ id: "pending", status: "pending", origin: "import", needs_review: true, schedule_id: null, payee: "Pending shop" }),
@@ -605,6 +697,8 @@ describe("Account register: correcting a posted row (#541)", () => {
       "GET /categories": ok(CATEGORIES),
       "GET /accounts": ok([]),
       "GET /accounts/{account_id}": ok(accountOut()),
+      "GET /accounts/{account_id}/balance/history": ok(balanceHistoryOut()),
+      "GET /accounts/{account_id}/holdings/summary": ok(holdingsSummaryOut()),
       "GET /transactions": () => ok({ items: rows, total: rows.length, limit: 50, offset: 0 }),
       "GET /matching/transfer-candidates": ok([]),
       "GET /matching/proposed": ok([]),
@@ -654,6 +748,8 @@ describe("Account register: correcting a posted row (#541)", () => {
       "GET /categories": ok(CATEGORIES),
       "GET /accounts": ok([]),
       "GET /accounts/{account_id}": ok(accountOut()),
+      "GET /accounts/{account_id}/balance/history": ok(balanceHistoryOut()),
+      "GET /accounts/{account_id}/holdings/summary": ok(holdingsSummaryOut()),
       "GET /transactions": () => ok({ items: rows, total: rows.length, limit: 50, offset: 0 }),
       "GET /matching/transfer-candidates": ok([]),
       "GET /matching/proposed": ok([]),
@@ -681,6 +777,8 @@ describe("Account register: correcting a posted row (#541)", () => {
       "GET /categories": ok(CATEGORIES),
       "GET /accounts": ok([]),
       "GET /accounts/{account_id}": ok(accountOut()),
+      "GET /accounts/{account_id}/balance/history": ok(balanceHistoryOut()),
+      "GET /accounts/{account_id}/holdings/summary": ok(holdingsSummaryOut()),
       "GET /transactions": () => ok({ items: rows, total: rows.length, limit: 50, offset: 0 }),
       "GET /matching/transfer-candidates": ok([]),
       "GET /matching/proposed": ok([]),
@@ -702,5 +800,119 @@ describe("Account register: correcting a posted row (#541)", () => {
     await user.click(await screen.findByRole("button", { name: "Undo: back to Groceries" }));
     expect(await screen.findByText("transaction is already corrected")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Undo: back to Groceries" })).toBeInTheDocument();
+  });
+});
+
+describe("Account register: securities trades on a brokerage account (#591)", () => {
+  const CATEGORIES = [
+    accountOut({ id: "c-1", name: "Groceries", path: "expenses.groceries", type: "category_expense", is_virtual: true }),
+  ];
+  const broker = accountOut({ id: "acct-b", type: "brokerage", path: "assets.broker", name: "Broker" });
+  const buyRow = (over: Partial<TransactionOut> = {}) =>
+    instanceRow({
+      id: "tx-buy",
+      status: "posted",
+      origin: "import",
+      schedule_id: null,
+      payee: "Example Buy",
+      description: "Bought shares of an example fund",
+      amount: "-250.0000",
+      account_path: "assets.broker",
+      category_path: "expenses.uncategorized",
+      transfer_account_path: null,
+      is_transfer: false,
+      ...over,
+    });
+
+  function renderRegister(rows: TransactionOut[], account = broker) {
+    let current = rows;
+    mockApi({
+      "GET /categories": ok(CATEGORIES),
+      "GET /accounts": ok([]),
+      "GET /accounts/{account_id}": ok(account),
+      "GET /accounts/{account_id}/balance/history": ok(balanceHistoryOut()),
+      "GET /accounts/{account_id}/holdings/summary": ok(holdingsSummaryOut()),
+      "GET /transactions": () => ok({ items: current, total: current.length, limit: 50, offset: 0 }),
+      "GET /matching/transfer-candidates": ok([]),
+      "GET /matching/proposed": ok([]),
+      "PATCH /transactions/{tx_id}": () => {
+        // A pending row is marked in place: same id.
+        current = [
+          buyRow({ status: "pending", category_path: "equity.securities", securities_trade: true }),
+        ];
+        return ok({ ...current[0], suggestion_id: "sg-1" });
+      },
+      "PATCH /accounts/{account_id}": ok({ ...account, balance_true_up: false }),
+    });
+    return renderWithProviders(
+      <Routes>
+        <Route path="/accounts/:accountId" element={<AccountRegister />} />
+      </Routes>,
+      { route: `/accounts/${account.id}` },
+    );
+  }
+
+  it("offers Securities trade on a feed-holdings brokerage register and sends securities_trade", async () => {
+    const { user } = renderRegister([buyRow({ status: "pending" })]);
+    const picker = await screen.findByRole("combobox", { name: "Category for Example Buy" });
+    const option = await within(picker).findByRole("option", { name: "Securities trade" });
+    await user.selectOptions(picker, option);
+    expect(apiMock.PATCH).toHaveBeenCalledWith("/transactions/{tx_id}", {
+      params: { path: { tx_id: "tx-buy" } },
+      body: { securities_trade: true },
+    });
+    expect(await screen.findByText(/A rule for rows like this one is waiting/)).toBeInTheDocument();
+    // The marked row reads "Securities trade" and can be changed back.
+    expect(
+      await screen.findByRole("combobox", { name: "Category for Example Buy" }),
+    ).toHaveValue(":securities_trade");
+  });
+
+  it("never offers it on a checking register", async () => {
+    renderRegister([buyRow({ account_path: "assets.checking" })], accountOut({ id: "a-1" }));
+    const picker = await screen.findByRole("combobox", { name: "Category for Example Buy" });
+    await within(picker).findByRole("option", { name: "Groceries" });
+    expect(within(picker).queryByRole("option", { name: "Securities trade" })).not.toBeInTheDocument();
+  });
+
+  it("labels a recorded trade's cash and a balance adjustment, with no picker", async () => {
+    renderRegister([
+      buyRow({ id: "tx-cash", payee: "Trade", securities_trade: true, securities_trade_locked: true }),
+      buyRow({ id: "tx-adj", payee: "Balance adjustment", securities_trade: true, balance_adjustment: true }),
+    ]);
+    expect(await screen.findByText("Balance adjustment (invested cash)")).toBeInTheDocument();
+    expect(screen.getByText("Securities trade")).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Category for Trade" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: "Category for Balance adjustment" })).not.toBeInTheDocument();
+  });
+
+  it("labels the starting balance from the bank, with no picker", async () => {
+    renderRegister(
+      [buyRow({ id: "tx-start", payee: "Starting balance", account_path: "assets.checking", starting_balance: true })],
+      accountOut({ id: "a-1" }),
+    );
+    expect(await screen.findByText("Starting balance", { selector: "span" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("combobox", { name: "Category for Starting balance" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("switches the balance true-up off from the account settings", async () => {
+    const { user } = renderRegister([], { ...broker, balance_true_up: true });
+    const toggle = await screen.findByLabelText("Keep cash in step with the broker's balance");
+    expect(toggle).toBeChecked();
+    await user.click(toggle);
+    await waitFor(() =>
+      expect(apiMock.PATCH).toHaveBeenCalledWith("/accounts/{account_id}", {
+        params: { path: { account_id: "acct-b" } },
+        body: { balance_true_up: false },
+      }),
+    );
+  });
+
+  it("shows no true-up switch on a hand-tracked brokerage account", async () => {
+    renderRegister([], { ...broker, holdings_source: "manual" });
+    await screen.findByText("No transactions match.");
+    expect(screen.queryByLabelText("Keep cash in step with the broker's balance")).not.toBeInTheDocument();
   });
 });

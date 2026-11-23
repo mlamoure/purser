@@ -4,10 +4,10 @@
 import json
 from datetime import timedelta
 
+from tests.conftest import today
 from tests.test_mcp import _mcp_call
 from tests.test_mcp_lots import (  # noqa: F401 - fixtures used by name
-    AS_OF,
-    TODAY,
+    _as_of,
     live_server,
     tokens,
 )
@@ -16,7 +16,7 @@ from tests.test_mcp_lots import (  # noqa: F401 - fixtures used by name
 def test_review_long_vest_schedule_is_paged(live_server, tokens):
     args = {
         "account": "assets.plan",
-        "as_of": AS_OF.isoformat(),
+        "as_of": _as_of().isoformat(),
         "captured_at": "2026-11-01T16:00:00+00:00",
         "completeness": "complete",
         "awards": [
@@ -27,7 +27,7 @@ def test_review_long_vest_schedule_is_paged(live_server, tokens):
                 "granted_quantity": "400",
                 "schedule": [
                     {
-                        "vest_date": (TODAY + timedelta(days=90 * (i + 1))).isoformat(),
+                        "vest_date": (today() + timedelta(days=90 * (i + 1))).isoformat(),
                         "quantity": "10",
                     }
                     for i in range(40)
@@ -51,7 +51,7 @@ def test_review_long_vest_schedule_is_paged(live_server, tokens):
 def _awards_args(n_vests: int, grants: int = 1) -> dict:
     return {
         "account": "assets.plan",
-        "as_of": AS_OF.isoformat(),
+        "as_of": _as_of().isoformat(),
         "captured_at": "2026-11-01T16:00:00+00:00",
         "completeness": "complete",
         "awards": [
@@ -63,7 +63,7 @@ def _awards_args(n_vests: int, grants: int = 1) -> dict:
                 "plan": "A deliberately long synthetic plan label " * 4,
                 "schedule": [
                     {
-                        "vest_date": (TODAY + timedelta(days=30 * (i + 1))).isoformat(),
+                        "vest_date": (today() + timedelta(days=30 * (i + 1))).isoformat(),
                         "quantity": "10",
                     }
                     for i in range(n_vests)

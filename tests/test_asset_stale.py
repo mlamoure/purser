@@ -1,15 +1,14 @@
 """Stale-value reminder for hand-valued assets (#568)."""
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from purser import assets, digest
-
-TODAY = datetime.now(UTC).date()
+from tests.conftest import today
 
 
 def _asset(client: TestClient, **extra: Any) -> dict[str, Any]:
@@ -29,7 +28,7 @@ def _asset(client: TestClient, **extra: Any) -> dict[str, Any]:
 def _change(client: TestClient, account: str, days_ago: int, amount: str = "1000.00") -> None:
     resp = client.post(
         f"/accounts/{account}/value-changes",
-        json={"as_of": (TODAY - timedelta(days=days_ago)).isoformat(), "amount": amount},
+        json={"as_of": (today() - timedelta(days=days_ago)).isoformat(), "amount": amount},
     )
     assert resp.status_code == 201, resp.text
 
@@ -46,7 +45,7 @@ class TestStale:
         _change(admin_client, house["id"], days_ago=50)
         detail = admin_client.get(f"/accounts/{house['id']}").json()["asset"]
         assert detail["revalue_after_days"] == 35
-        assert detail["last_valued"] == (TODAY - timedelta(days=50)).isoformat()
+        assert detail["last_valued"] == (today() - timedelta(days=50)).isoformat()
         assert detail["stale"] is True
 
         assert assets.emit_stale(db_session) == 1
@@ -62,7 +61,7 @@ class TestStale:
         db_session.expire_all()
         assert admin_client.get(f"/accounts/{house['id']}").json()["asset"]["stale"] is False
         assert digest.whats_new(db_session)["stale_assets"] == []
-        assert assets.emit_stale(db_session, today=TODAY + timedelta(days=40)) == 1
+        assert assets.emit_stale(db_session, today=today() + timedelta(days=40)) == 1
 
     def test_a_target_that_posts_nothing_still_refreshes(self, admin_client: TestClient) -> None:
         """The monthly estimate that did not move records a value and posts
@@ -71,11 +70,11 @@ class TestStale:
         _change(admin_client, house["id"], days_ago=60, amount="500000.00")
         resp = admin_client.post(
             f"/accounts/{house['id']}/reconcile",
-            json={"as_of": TODAY.isoformat(), "statement_balance": "500000.00"},
+            json={"as_of": today().isoformat(), "statement_balance": "500000.00"},
         )
         assert resp.status_code == 200 and resp.json()["adjustment_tx_id"] is None
         asset = admin_client.get(f"/accounts/{house['id']}").json()["asset"]
-        assert asset["last_valued"] == TODAY.isoformat()
+        assert asset["last_valued"] == today().isoformat()
         assert asset["stale"] is False
 
     def test_a_reversed_change_does_not_count(self, admin_client: TestClient) -> None:
@@ -86,7 +85,7 @@ class TestStale:
         newest = max(rows, key=lambda r: r["date"])
         admin_client.post(f"/value-changes/{newest['id']}/reverse")
         asset = admin_client.get(f"/accounts/{house['id']}").json()["asset"]
-        assert asset["last_valued"] == (TODAY - timedelta(days=30)).isoformat()
+        assert asset["last_valued"] == (today() - timedelta(days=30)).isoformat()
         assert asset["stale"] is True
 
     def test_never_valued_with_a_reminder_is_stale_and_without_one_never(

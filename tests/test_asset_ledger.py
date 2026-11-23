@@ -6,7 +6,7 @@ whose difference posts the same way.
 """
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -17,10 +17,9 @@ from hypothesis import strategies as st
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from tests.conftest import now, today
 from tests.test_mcp import LiveServer, _mcp_call
 from tests.test_mcp import live_server as live_server
-
-TODAY = datetime.now(UTC).date()
 
 
 def _account(client: TestClient, type_: str = "property", name: str = "House") -> str:
@@ -33,7 +32,7 @@ def _account(client: TestClient, type_: str = "property", name: str = "House") -
 def _change(client: TestClient, account: str, amount: str, days_ago: int = 0, **extra: Any) -> Any:
     return client.post(
         f"/accounts/{account}/value-changes",
-        json={"as_of": (TODAY - timedelta(days=days_ago)).isoformat(), "amount": amount, **extra},
+        json={"as_of": (today() - timedelta(days=days_ago)).isoformat(), "amount": amount, **extra},
     )
 
 
@@ -41,7 +40,7 @@ def _target(client: TestClient, account: str, value: str, days_ago: int = 0, **e
     return client.post(
         f"/accounts/{account}/reconcile",
         json={
-            "as_of": (TODAY - timedelta(days=days_ago)).isoformat(),
+            "as_of": (today() - timedelta(days=days_ago)).isoformat(),
             "statement_balance": value,
             **extra,
         },
@@ -51,14 +50,14 @@ def _target(client: TestClient, account: str, value: str, days_ago: int = 0, **e
 def _balance(client: TestClient, account: str, days_ago: int | None = None) -> Decimal:
     if days_ago is None:
         return Decimal(client.get(f"/accounts/{account}").json()["balance"])
-    on = (TODAY - timedelta(days=days_ago)).isoformat()
+    on = (today() - timedelta(days=days_ago)).isoformat()
     return Decimal(
         client.get(f"/accounts/{account}/balance", params={"as_of": on}).json()["balance"]
     )
 
 
 def _net_worth(client: TestClient, days_ago: int = 0) -> Decimal:
-    on = (TODAY - timedelta(days=days_ago)).isoformat()
+    on = (today() - timedelta(days=days_ago)).isoformat()
     return Decimal(client.get("/networth", params={"as_of": on}).json()["net_worth"])
 
 
@@ -179,7 +178,7 @@ class TestValueChanges:
                 "account": checking,
                 "category": "expenses.dining",
                 "amount": "-5.00",
-                "date": TODAY.isoformat(),
+                "date": today().isoformat(),
                 "status": "posted",
             },
         ).json()["id"]
@@ -199,7 +198,7 @@ class TestValueChanges:
                 "account": checking,
                 "category": "equity.revaluation",
                 "amount": "-5.00",
-                "date": TODAY.isoformat(),
+                "date": today().isoformat(),
             },
         )
         assert resp.status_code == 422
@@ -368,7 +367,7 @@ class TestValuationsAreForLoans:
         house = _account(admin_client)
         resp = admin_client.post(
             f"/accounts/{house}/valuations",
-            json={"as_of": TODAY.isoformat(), "value": "1.00"},
+            json={"as_of": today().isoformat(), "value": "1.00"},
         )
         assert resp.status_code == 422
         detail = resp.json()["detail"]
@@ -391,7 +390,7 @@ class TestMcp:
                     "record_value_change",
                     {
                         "account": path,
-                        "as_of": TODAY.isoformat(),
+                        "as_of": today().isoformat(),
                         "amount": "8000.00",
                         "reference": "mcp-1",
                     },
@@ -400,7 +399,7 @@ class TestMcp:
                     "record_value_change",
                     {
                         "account": path,
-                        "as_of": TODAY.isoformat(),
+                        "as_of": today().isoformat(),
                         "amount": "8000.00",
                         "reference": "mcp-1",
                     },
@@ -418,7 +417,7 @@ class TestMcp:
                     "reconcile_account",
                     {
                         "account": path,
-                        "as_of": TODAY.isoformat(),
+                        "as_of": today().isoformat(),
                         "statement_balance": "9000.00",
                         "note": "Appraisal",
                     },
@@ -433,7 +432,7 @@ class TestMcp:
         (refused,) = _mcp_call(
             live_server.url,
             token,
-            [("record_valuation", {"account": path, "as_of": TODAY.isoformat(), "value": "1"})],
+            [("record_valuation", {"account": path, "as_of": today().isoformat(), "value": "1"})],
         )
         assert "record_value_change" in refused["error"]
 
@@ -449,7 +448,7 @@ class TestFeedMappedAsset:
 
         house_id = _account(admin_client)
         account = ledger.get_account(db_session, uuid.UUID(house_id))
-        fetch = SimpleNamespace(fetched_at=datetime.now(UTC))
+        fetch = SimpleNamespace(fetched_at=now())
         importer._record_balance_valuation(db_session, fetch, {"balance": "410000.00"}, account)  # type: ignore[arg-type]
         db_session.commit()
         assert _balance(admin_client, house_id) == Decimal("410000.00")

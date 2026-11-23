@@ -13,6 +13,7 @@ from sqlalchemy import Engine, text
 from purser import crypto
 from purser.core import ledger as core
 from purser.core import matching as core_matching
+from tests.conftest import today
 
 TODAY = date(2026, 7, 15)
 
@@ -531,7 +532,7 @@ class TestUnmatchedReporting:
     def test_expected_but_missing_shows_aging(
         self, seeded: dict[str, str], client: TestClient
     ) -> None:
-        past = date.today() - timedelta(days=4)
+        past = today() - timedelta(days=4)
         _expected(client, "-60.00", past, payee="Trash Service")
         report = client.get("/matching/unmatched", params={"direction": "expected"}).json()
         (row,) = report
@@ -548,7 +549,7 @@ class TestUnmatchedReporting:
             migrated_engine,
             "assets.checking",
             "-42.00",
-            date.today() - timedelta(days=2),
+            today() - timedelta(days=2),
             payee="Mystery Shop",
         )
         report = client.get("/matching/unmatched", params={"direction": "posted"}).json()

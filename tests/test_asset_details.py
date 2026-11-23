@@ -1,7 +1,7 @@
 """Asset kinds, the loan link, equity and money put in (#567)."""
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -9,10 +9,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from tests.conftest import today
 from tests.test_mcp import LiveServer, _mcp_call
 from tests.test_mcp import live_server as live_server
-
-TODAY = datetime.now(UTC).date()
 
 
 def _create(client: TestClient, type_: str, name: str, **extra: Any) -> dict[str, Any]:
@@ -81,7 +80,8 @@ class TestAssetDetails:
         bad = admin_client.patch(f"/accounts/{car['id']}", json={"asset_kind": "spaceship"})
         assert bad.status_code == 422
         future = admin_client.patch(
-            f"/accounts/{car['id']}", json={"acquired_on": (TODAY + timedelta(days=5)).isoformat()}
+            f"/accounts/{car['id']}",
+            json={"acquired_on": (today() + timedelta(days=5)).isoformat()},
         )
         assert future.status_code == 422
 
@@ -92,11 +92,11 @@ class TestEquity:
         loan = _create(admin_client, "loan", "Mortgage")
         admin_client.post(
             f"/accounts/{house['id']}/value-changes",
-            json={"as_of": TODAY.isoformat(), "amount": "500000.00", "kind": "capital"},
+            json={"as_of": today().isoformat(), "amount": "500000.00", "kind": "capital"},
         )
         admin_client.post(
             f"/accounts/{loan['id']}/valuations",
-            json={"as_of": TODAY.isoformat(), "value": "-320000.00"},
+            json={"as_of": today().isoformat(), "value": "-320000.00"},
         )
         linked = admin_client.patch(f"/accounts/{loan['id']}", json={"secured_by_id": house["id"]})
         assert linked.status_code == 200, linked.text
@@ -133,7 +133,7 @@ class TestMoneyPutIn:
         resp = admin_client.post(
             f"/accounts/{house['id']}/value-changes",
             json={
-                "as_of": (TODAY - timedelta(days=400)).isoformat(),
+                "as_of": (today() - timedelta(days=400)).isoformat(),
                 "amount": "450000.00",
                 "kind": "capital",
                 "note": "Purchase price",
@@ -155,7 +155,7 @@ class TestMoneyPutIn:
         house = _create(admin_client, "property", "House")
         resp = admin_client.post(
             f"/accounts/{house['id']}/value-changes",
-            json={"as_of": TODAY.isoformat(), "amount": "1.00", "kind": "gift"},
+            json={"as_of": today().isoformat(), "amount": "1.00", "kind": "gift"},
         )
         assert resp.status_code == 422
 
@@ -168,7 +168,7 @@ class TestMcp:
         loan = _create(admin_client, "loan", "Mortgage")
         admin_client.post(
             f"/accounts/{loan['id']}/valuations",
-            json={"as_of": TODAY.isoformat(), "value": "-100.00"},
+            json={"as_of": today().isoformat(), "value": "-100.00"},
         )
         token = admin_client.post(
             "/tokens", json={"name": "agent", "scopes": ["read", "write"]}
@@ -183,7 +183,7 @@ class TestMcp:
                     "record_value_change",
                     {
                         "account": house["path"],
-                        "as_of": TODAY.isoformat(),
+                        "as_of": today().isoformat(),
                         "amount": "1000.00",
                         "kind": "capital",
                     },

@@ -39,7 +39,7 @@ _SKIP_PREFIXES = (
 )
 
 # POST endpoints that are semantically reads (no ledger effect).
-_READ_POSTS = frozenset({"/import/qif/preview", "/import/csv/preview"})
+_READ_POSTS = frozenset({"/import/qif/preview", "/import/csv/preview", "/transactions/present"})
 
 _BODY_CAP = 256 * 1024  # responses are token-budgeted; anything bigger, skip rows count
 
@@ -60,6 +60,28 @@ def _row_count(body: bytes) -> int | None:
         if len(arrays) == 1:
             return len(arrays[0])
     return None
+
+
+def _privacy_record(
+    state: MutableMapping[str, Any], summary: dict[str, Any], body: bytes, outcome: str
+) -> dict[str, Any]:
+    """The call row's privacy record (#613), the same shape MCP writes: what
+    the request asked to withhold, what the response withheld, and which
+    identifiable fields it returned."""
+    from purser import privacy, sharing
+
+    disclosure = state.get("disclosure")
+    requested = set(disclosure.requested) if disclosure is not None else set()
+    observed: set[str] = set()
+    if outcome in ("shared", "empty"):
+        observed = set(summary.get("sensitive_fields", []))
+        if disclosure is not None and body:
+            observed |= privacy.present_declared_fields(sharing.payload(body)[0], disclosure.emits)
+    return privacy.audit_record(
+        requested=requested,
+        withheld=set(summary.get("withheld", [])) | set(state.get("disclosure_withheld", [])),
+        observed=observed,
+    )
 
 
 class AuditMiddleware:
@@ -101,7 +123,8 @@ class AuditMiddleware:
             )
             path_params = scope.get("path_params") or {}
             ids = [v for v in path_params.values() if _as_uuid(v) is not None]
-            query = dict(parse_qsl(scope.get("query_string", b"").decode("latin-1")))
+            raw_query = state.get("audit_query_string") or scope.get("query_string", b"")
+            query = dict(parse_qsl(raw_query.decode("latin-1")))
             body = b"".join(chunks)
             summary = sharing.summarize(body, requested={**query, **path_params})
             if oversized:
@@ -130,9 +153,15 @@ class AuditMiddleware:
                 "ms": int((time.monotonic() - started) * 1000),
                 "identity": state.get("audit_identity"),
                 "sharing": summary,
+                "privacy": _privacy_record(state, summary, body, outcome),
             }
             if query:
                 detail["query"] = audit.clip_values(query)
+            # What a route adds about the call itself (the host an AI check
+            # reached, #667); it never replaces the keys above.
+            extra = state.get("audit_detail")
+            if isinstance(extra, dict):
+                detail.update({k: v for k, v in extra.items() if k not in detail})
             if oversized:
                 detail["error"] = (
                     "Response exceeded capture limit; integration response withheld."

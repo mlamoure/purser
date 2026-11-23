@@ -12,6 +12,13 @@ Purser can track such an account's holdings by hand. You (or your agent)
 record what the account holds, Purser prices it every day, and the value
 reaches the account's balance and net worth exactly like a feed snapshot would.
 
+An account whose holdings come from the feed needs none of this: its buy and
+sell rows are marked as securities trades instead, and its cash is kept in step
+with the broker's balance after each sync (see
+[Mark brokerage buys and sells](../../how-to/brokerage-trades/)). On a hand-tracked
+account, record the trade and link its bank row; marking a row there is
+refused.
+
 ## Switch the account to manual holdings
 
 An account's holdings come from one source at a time: the feed (the default) or
@@ -95,6 +102,7 @@ A position's history is a list of events:
 | `set_quantity` | The account holds exactly this many shares on that date. |
 | `buy` | It gained this many shares; with a `price`, the cost basis grows by quantity × price + fees. With `funded_from: "cash"` its cost also leaves the account's cash (below). |
 | `sell` | It lost this many shares; the basis drops at average cost. Its proceeds land on the account's cash unless `proceeds_to` is `"none"` (below). |
+| `split` | A stock split: every share becomes `split_numerator` / `split_denominator` shares on its effective date, with the same total basis ([below](#record-a-stock-split)). |
 
 ```bash
 curl -X POST https://purser.example.com/positions/<position id>/events \
@@ -138,6 +146,71 @@ events can no longer be reversed. To correct it:
 The reopen is refused (409) while another position in the same symbol is open
 on the account, or when a later position in the symbol exists: its history
 follows this one's, so correct that one instead.
+
+## Record a stock split
+
+When a stock splits, record a `split` event with its ratio, as new shares for
+old, dated on the effective date: the first day the shares trade split. A
+2-for-1 forward split is `2` for `1`; a 1-for-10 reverse split is `1` for `10`.
+
+```bash
+curl -X POST https://purser.example.com/positions/<position id>/events \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"kind": "split", "occurred_on": "2026-06-10", "split_numerator": 2, "split_denominator": 1}'
+```
+
+In the admin interface, use **Record split** on the position's row in the
+Positions tab. An agent calls
+`record_split(account, symbol, ratio="2:1", effective_date="2026-06-10")`.
+
+- **Shares.** Every share held the day before becomes that many shares, at
+  the start of the effective date: 40 shares in a 2-for-1 split become 80.
+  The result is rounded to six decimal places. Other events dated that day
+  are in post-split shares.
+- **Basis.** The total cost basis stays the same, so the basis per share is
+  divided by the ratio. If you track tax lots, every lot keeps its own total
+  basis, acquisition date and holding period. The lots of a position whose
+  shares are all in lots still hold exactly what the position holds. A lot's
+  `quantity` and `basis_per_share` stay as acquired, and its remaining
+  shares are shown in today's shares.
+- **Value.** Closes from the provider are stored as published, not
+  adjusted for later splits. A close dated before the split, such as the
+  previous trading day's close before the effective date's close arrives,
+  is divided by the ratio. So the position's value does not jump or dip on
+  the effective date.
+
+### Cash in lieu of a fractional share
+
+A reverse split often leaves a fraction of a share, and many brokers pay
+cash for it. Give that amount as `cash_in_lieu`, in cents. Purser then
+records the fraction as a sale whose proceeds are exactly that cash, together
+with the split: 25 shares in a 1-for-10 split become 2.5 shares, and the
+0.5 share is sold for the cash.
+
+```json
+{"kind": "split", "occurred_on": "2026-06-10", "split_numerator": 1, "split_denominator": 10,
+ "cash_in_lieu": "18.40", "lot_method": "fifo"}
+```
+
+The cash works like any sale's ([below](#sales-and-purchases-move-cash)). It
+lands on the account's cash against `equity.securities`. If the account
+already shows that cash, the call is refused, and you can link the broker's
+row with `transaction_id` or override with `force_cash`. `settle_on` posts
+the cash later. A position that tracks lots names the lots the fraction
+comes from (`lot_method` or `lots`), and the realized gain is the cash less
+that fraction's share of the basis. A split that leaves a whole number of
+shares has no fraction, so `cash_in_lieu` is refused.
+
+### Undo a wrong split
+
+Reverse the split (`POST /position-events/<split id>/reverse`, or
+`reverse_position_event(event_id)` from an agent). The shares, the lots'
+shares and basis, and any cash in lieu come back exactly as they were before
+the split. The cash-in-lieu sale is reversed with its split and never on its
+own. Then record the right split. A split is refused on a position that held
+nothing the day before, and only one split per position can take effect on
+one day.
 
 ## Sales and purchases move cash
 
@@ -408,13 +481,21 @@ the feed fills, so everything that reads holdings picks them up unchanged:
   called: a position added meanwhile with a symbol before the cursor is not
   listed, and the daily price job can move later pages to a newer set;
 - `whats_new` reports symbols whose price turned stale (`stale_prices`) and
-  feed positions no price values yet (`unpriced_holdings`).
+  feed positions no price values yet (`unpriced_holdings`);
+- the account page in the admin interface shows a **Holdings** table for
+  every brokerage account, hand-tracked or fed by the bank: each holding's
+  value, unrealized gain and share of the account, a cash row and the total
+  (the account's balance), with stale, unpriced and in-transit lines marked.
+  It reads `GET /accounts/{id}/holdings/summary`, which computes every figure
+  on the server. Its cost basis and gain total only the holdings whose gain
+  is known, so a holding with no basis never counts as all gain.
 
 See [Balances](../../explanation/balances/) for how the postings and holdings
 figures combine, and [Events and webhooks](../../reference/events-webhooks/) for
 `position.updated`, `price.stale`, `price.fetch_failed` and
-`holding.unpriced`. Agents record share counts with `record_position` and sales
-with `record_sale`, and undo a wrong one with `reverse_position_event`
+`holding.unpriced`. Agents record share counts with `record_position`, sales
+with `record_sale` and splits with `record_split`, and undo a wrong one with
+`reverse_position_event`
 (reopening a closed position first with `reopen_position`); buys and closing a
 position are REST (or the admin UI's Positions tab, for share counts and
 closing).

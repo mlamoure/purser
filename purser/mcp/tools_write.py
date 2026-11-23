@@ -14,8 +14,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from purser.mcp._registry import _amount, _principal, _run, _token_row, audited_tool
-from purser.mcp.privacy import NOTHING, Emits
 from purser.models import Schedule, Suggestion
+from purser.privacy import NOTHING, Emits
 
 
 @audited_tool(kind="write", entity="transaction", scope="write", emits=NOTHING)
@@ -60,6 +60,7 @@ async def update_transaction(
     payee: str | None = None,
     description: str | None = None,
     account: str | None = None,
+    securities_trade: bool | None = None,
 ) -> dict[str, Any]:
     """Edit a transaction. pending/expected edit in place; posted becomes an
     atomic reversal+replacement pair.
@@ -75,23 +76,206 @@ async def update_transaction(
     and the error says how to correct it. On a schedule instance an amount,
     date or category edit pins it (the rule stops re-estimating it; undo
     with reset_instance); a description or payee edit is a label and does
-    not."""
+    not.
+
+    securities_trade=true (in place of category) marks a row on a brokerage
+    account whose holdings come from the feed as a securities trade — a buy
+    or sell ("YOU BOUGHT", "Buy", "Reinvestment"…), never spending or
+    income; the shares are already in the feed's holdings. Purser never
+    guesses which rows are trades. The result's suggestion_id is the rule
+    the mark proposes in the inbox (rows like this one, on this account).
+    To change a marked row back, send the category it should have. Refused
+    on other accounts, transfers, splits, expected rows, and the cash of a
+    trade recorded with record_sale (reverse that trade instead)."""
 
     def op(session: Session) -> dict[str, Any]:
         from purser import ledger as ledger_service
+        from purser import suggestions as suggestions_service
 
         principal = _principal()
+        token = _token_row(session, principal)
         tx = ledger_service.update_transaction(
             session,
             tx_id=uuid.UUID(transaction_id),
-            token=_token_row(session, principal),
+            token=token,
             amount=Decimal(amount) if amount else None,
             category_ref=category,
             payee_name=payee,
             description=description,
             account_ref=account,
+            securities_trade=securities_trade,
         )
-        return {"id": str(tx.id), "status": tx.status}
+        out: dict[str, Any] = {"id": str(tx.id), "status": tx.status}
+        if securities_trade:
+            proposed = suggestions_service.propose_trade_rule(session, tx=tx, token=token)
+            out["securities_trade"] = True
+            out["suggestion_id"] = str(proposed.id) if proposed is not None else None
+        return out
+
+    return await _run(op)
+
+
+_SPLIT_EMITS = Emits(
+    description=("lines[].memo",),
+    amount=("amount", "lines[].amount", "lines[].candidates[].amount"),
+)
+
+
+def _split_lines_arg(lines: list[dict[str, Any]]) -> list[Any]:
+    from purser import splits
+    from purser.ledger import LedgerError
+
+    # The count first, before parsing anything (splits.check_limits bounds
+    # the rest once the lines are parsed).
+    if len(lines) > splits.MAX_LINES:
+        raise LedgerError(f"a split takes at most {splits.MAX_LINES} lines, not {len(lines)}")
+    out = []
+    for i, line in enumerate(lines):
+        if not isinstance(line, dict) or "category" not in line or "amount" not in line:
+            raise LedgerError(f"line {i + 1}: give category and amount")
+        unknown = set(line) - {"category", "amount", "memo", "backing_ids"}
+        if unknown:
+            raise LedgerError(f"line {i + 1}: unknown keys {', '.join(sorted(unknown))}")
+        raw_backing = line.get("backing_ids") or []
+        if not isinstance(raw_backing, list) or len(raw_backing) > splits.MAX_BACKING_ROWS:
+            raise LedgerError(
+                f"line {i + 1}: backing_ids is a list of at most {splits.MAX_BACKING_ROWS} ids"
+            )
+        if line.get("memo") is not None and not isinstance(line["memo"], str):
+            raise LedgerError(f"line {i + 1}: memo is text")
+        try:
+            amount = Decimal(str(line["amount"]))
+            backing = tuple(uuid.UUID(str(b)) for b in raw_backing)
+        except (InvalidOperation, ValueError) as exc:
+            raise LedgerError(f"line {i + 1}: {exc}") from exc
+        if not amount.is_finite():
+            raise LedgerError(f"line {i + 1}: amount must be a finite number")
+        out.append(
+            splits.LineInput(
+                target=str(line["category"]),
+                amount=amount,
+                memo=line.get("memo"),
+                backing_ids=backing,
+            )
+        )
+    return out
+
+
+def _split_out(session: Session, result: dict[str, Any], tx_id: str) -> dict[str, Any]:
+    """The compact result: each line's target, amount and backing; for an
+    unbacked [Account] line up to three exact-amount bank rows near the row
+    that could back it (pass their ids as backing_ids)."""
+    from purser import splits
+
+    lines = []
+    for line in result.get("lines", []):
+        item: dict[str, Any] = {"category": line["target"], "amount": _amount(line["amount"])}
+        if line.get("memo"):
+            item["memo"] = line["memo"]
+        if line["kind"] == "account":
+            item["backing_ids"] = line.get("backing_ids", [])
+            if not item["backing_ids"]:
+                found = splits.backing_candidates(
+                    session,
+                    tx_id=uuid.UUID(tx_id),
+                    account_ref=line["target"][1:-1],
+                    amount=-line["amount"],
+                    limit=3,
+                )
+                exact = [
+                    {"id": c["id"], "date": c["date"].isoformat(), "amount": _amount(c["amount"])}
+                    for c in found["candidates"]
+                    if c["exact"] and not c["backing"]
+                ][:3]
+                if exact:
+                    item["candidates"] = exact
+        lines.append(item)
+    out: dict[str, Any] = {
+        "transaction_id": result["transaction_id"],
+        "account": result["account"],
+        "amount": _amount(result["amount"]),
+    }
+    for key in ("dry_run", "replaces_id", "status", "category"):
+        if result.get(key) is not None:
+            out[key] = result[key]
+    if lines:
+        out["lines"] = lines
+    for key in ("backing_added", "backing_restored", "restored_ids"):
+        if result.get(key):
+            out[key] = result[key]
+    return out
+
+
+@audited_tool(kind="write", entity="transaction", scope="write", emits=_SPLIT_EMITS)
+async def split_transaction(
+    transaction_id: str, lines: list[dict[str, Any]], dry_run: bool = False
+) -> dict[str, Any]:
+    """Split a transaction across categories and accounts, Quicken style, or
+    replace the lines of a split (write scope). Each line is
+    {category, amount, memo?, backing_ids?}: category is a category path
+    (expenses.taxes.federal) or an account in brackets ([assets.retirement_401k])
+    for money that went to another account; amount is the line's share of
+    the row's amount in the row's sign (negative = money out) and the lines
+    must add up to the row's amount exactly — two to 50 lines, none zero,
+    never the row's own account; a memo is at most 500 characters. A
+    paycheck deposit of 2500.00: gross income.salary 4000.00, taxes
+    -900.00, [401k] -600.00 (the 401k account then shows +600.00). An
+    account line's backing_ids name that account's own bank rows (summing
+    exactly to the line's leg, i.e. its amount negated; at most 50 across
+    the lines): they are merged into the split so the money is not counted
+    twice; unbacked, the leg is Purser's own. The result lists, for each
+    unbacked account line, exact-amount candidates to back it. The row
+    keeps the bank's amount; a posted row becomes a reversal + replacement
+    (transaction_id in the result is the new row), a pending one you
+    entered changes in place, and the bank's pending row is refused until
+    it posts. dry_run=true validates and writes nothing. A split is never a
+    transfer; unsplit_transaction removes it and restores every backing
+    row."""
+
+    def op(session: Session) -> dict[str, Any]:
+        from purser import splits
+
+        principal = _principal()
+        result = splits.split_transaction(
+            session,
+            tx_id=uuid.UUID(transaction_id),
+            lines=_split_lines_arg(lines),
+            token=_token_row(session, principal),
+            dry_run=dry_run,
+        )
+        out = _split_out(session, result, result["transaction_id"])
+        if dry_run:
+            session.rollback()
+        return out
+
+    return await _run(op)
+
+
+@audited_tool(kind="write", entity="transaction", scope="write", emits=Emits(amount=("amount",)))
+async def unsplit_transaction(
+    transaction_id: str, category: str | None = None, dry_run: bool = False
+) -> dict[str, Any]:
+    """Remove a split (write scope): the row goes back to a single category —
+    category, else the uncategorized placeholder — and every bank row that
+    backed an account line comes back exactly as it was (restored_ids). A
+    posted split becomes a reversal + replacement (transaction_id is the new
+    row). dry_run=true writes nothing."""
+
+    def op(session: Session) -> dict[str, Any]:
+        from purser import splits
+
+        principal = _principal()
+        result = splits.unsplit_transaction(
+            session,
+            tx_id=uuid.UUID(transaction_id),
+            token=_token_row(session, principal),
+            category_ref=category,
+            dry_run=dry_run,
+        )
+        out = _split_out(session, result, result["transaction_id"])
+        if dry_run:
+            session.rollback()
+        return out
 
     return await _run(op)
 
@@ -532,6 +716,7 @@ async def update_account(
     asset_kind: str | None = None,
     secured_by: str | None = None,
     revalue_after_days: int | None = None,
+    balance_true_up: bool | None = None,
 ) -> dict[str, Any]:
     """Rename, re-describe or hide a real account, or set its floor (write
     scope); only the fields sent change. asset_kind sets what a hand-valued
@@ -541,6 +726,12 @@ async def update_account(
     it), so the asset reports its equity. revalue_after_days, on an asset,
     is how many days its value may go without an update before Purser calls
     it stale (asset.stale, whats_new.stale_assets); 0 turns that off.
+    balance_true_up, on a brokerage account whose holdings come from the
+    feed, switches the balance true-up (on by default): after each sync
+    Purser posts a labelled "Balance adjustment" against Securities trade so
+    the account's cash plus holdings equal the balance the broker reported
+    in the same fetch (it covers a buy row the broker never sent). false
+    stops future adjustments; past ones stay.
     name is the display name only: the account's path, which tools, rules
     and outside integrations use to find it, never changes, so a rename breaks
     nothing that refers to the account. The name is also
@@ -564,11 +755,20 @@ async def update_account(
         from purser import ledger as ledger_service
 
         principal = _principal()
-        sent = (name, description, hidden, min_balance, asset_kind, secured_by, revalue_after_days)
+        sent = (
+            name,
+            description,
+            hidden,
+            min_balance,
+            asset_kind,
+            secured_by,
+            revalue_after_days,
+            balance_true_up,
+        )
         if all(v is None for v in sent):
             raise ValueError(
                 "nothing to change: pass name, description, hidden, min_balance, asset_kind, "
-                "secured_by or revalue_after_days"
+                "secured_by, revalue_after_days or balance_true_up"
             )
         if name is not None and not name.strip():
             raise ValueError("name must not be empty")
@@ -593,6 +793,7 @@ async def update_account(
             hidden=hidden,
             min_balance=floor,
             min_balance_set=min_balance is not None,
+            balance_true_up=balance_true_up,
             actor_token_id=principal.token_id,
         )
         from purser import assets as assets_service
@@ -604,6 +805,8 @@ async def update_account(
             "hidden": updated.hidden_at is not None,
             "min_balance": _amount(updated.min_balance),
         }
+        if updated.type == "brokerage":
+            out["balance_true_up"] = updated.balance_true_up
         if asset_kind is not None or revalue_after_days is not None:
             row = assets_service.update_details(
                 session,
@@ -715,6 +918,62 @@ async def reconcile_account(
     return await _run(op)
 
 
+@audited_tool(kind="write", entity="account", scope="write", emits=NOTHING)
+async def set_starting_balance(
+    account: str,
+    remove: bool = False,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Start a bank-fed checking, savings, cash or credit-card account from
+    the balance its bank reported in the latest sync (write scope). Use it
+    when account_balance shows bank_snapshot.comparison.difference far from
+    zero on an account that has no starting balance yet: a bank feed brings
+    about three months of transactions and nothing from before them.
+    You pass only the account. Purser takes the bank's figure, date, sign and
+    basis, and posts ONE entry for the difference against the system account
+    equity.opening_balances (neither income nor spending), dated the day
+    before the account's earliest transaction; it lands in the review set.
+    Afterwards the comparison's difference is zero. Purser keeps the entry in
+    step by itself: when older history is imported it gives way by exactly
+    those rows, so do not correct it. Mapping a new account in the UI does
+    this by default, so most accounts already have one.
+    Safe to repeat: status is set (this call), unchanged (it already had
+    one), removed or none. Amounts are ledger sign (a card is negative when
+    owed). It is refused, with the reason, when the bank's balance cannot be
+    used (no balance, stale, another currency, not this account type) or when
+    the account is reconciled to a statement and differs from the bank:
+    reconcile a later statement with reconcile_account then.
+    remove=true takes the starting balance out again. dry_run=true answers
+    the same without writing."""
+
+    def op(session: Session) -> dict[str, Any]:
+        from purser import ledger as ledger_service
+        from purser import starting_balance as service
+
+        principal = _principal()
+        account_id = ledger_service.resolve_account(session, account).id
+        call = service.remove if remove else service.set_from_bank
+        outcome = call(
+            session, account_id=account_id, actor_token_id=principal.token_id, dry_run=dry_run
+        )
+        return {
+            "account_id": str(outcome.account.id),
+            "account": outcome.account.path,
+            "status": outcome.status,
+            "amount": _amount(outcome.amount),
+            "entry_date": outcome.entry_date.isoformat() if outcome.entry_date else None,
+            "basis": outcome.basis,
+            "bank_balance": _amount(outcome.reported) if outcome.reported is not None else None,
+            "bank_balance_date": (
+                outcome.balance_date.isoformat() if outcome.balance_date else None
+            ),
+            "transaction_id": str(outcome.transaction_id) if outcome.transaction_id else None,
+            "dry_run": outcome.dry_run,
+        }
+
+    return await _run(op)
+
+
 @audited_tool(kind="write", entity="valuation", scope="write", emits=NOTHING)
 async def record_valuation(
     account: str,
@@ -764,6 +1023,63 @@ async def record_valuation(
             "value": _amount(core.quantize(valuation.value)),
             "source": valuation.source,
         }
+
+    return await _run(op)
+
+
+@audited_tool(kind="write", entity="connection", scope="write", emits=NOTHING)
+async def map_feed_accounts(
+    accounts: list[dict[str, Any]] | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Map the bank accounts SimpleFIN delivers onto ledger accounts (write
+    scope). A delivered account is not in Purser, and nothing from it is
+    imported, until it is mapped; feed_status lists the ones waiting as
+    not_connected.
+    Call it with no arguments first: it answers the plan and writes nothing.
+    Each line is one waiting account with Purser's proposal: name, type, path
+    and whether to start from the bank's balance. SimpleFIN states no account
+    type, so type_basis says what the type rests on: name (the bank's own
+    words), holdings (the name says nothing and the feed lists holdings),
+    balance (a debt, with or without credit left) or default (nothing says;
+    offered as checking). A line with confident=false needs the person's
+    answer; its note says so when the bank names a cash product but also
+    lists holdings in it (ask whether it is an investment account, which is
+    type brokerage). A line with action=ignore is
+    the same account arriving through a second login at the same bank
+    (duplicate_of names the first); action=blocked cannot be mapped yet.
+    Show the person the plan and get their yes before applying it: AN
+    ACCOUNT'S TYPE CANNOT BE CHANGED AFTER MAPPING, and undoing a mapping
+    needs the delete-account command on the host.
+    Then call it with accounts=[{"ref": ...}, ...], one line per account to
+    act on. A line with only ref takes the proposal. Override any of name,
+    type (checking, savings, credit_card, cash, brokerage, loan, property),
+    path, starting_balance; give account (a path or id) to map onto an
+    existing open account instead of a new one (refused, naming its feed,
+    when that account already takes a feed: replacing one, replace_feed=true,
+    needs an admin token, so ask the person to do it in Purser);
+    action="ignore" leaves the account out of Purser. The whole batch is
+    checked first and lands whole or not at all; dry_run=true answers the
+    same without writing. Mapping imports what was already fetched, and
+    starting_balance (the default for a new checking, savings, cash or
+    credit-card account) makes the account match the bank at once. The
+    bank's account ids and balances are never shown."""
+
+    def op(session: Session) -> dict[str, Any]:
+        from purser.admin import security
+        from purser.feed import proposals
+
+        principal = _principal()
+        if accounts is None:
+            return {"plan": [p.as_dict() for p in proposals.plan(session)]}
+        results = proposals.apply(
+            session,
+            items=accounts,
+            actor_token_id=principal.token_id,
+            dry_run=dry_run,
+            may_replace=security.is_admin(list(principal.scopes)),
+        )
+        return {"results": results, "dry_run": dry_run}
 
     return await _run(op)
 

@@ -14,16 +14,22 @@ import {
   CHART,
   addDays,
   clear,
+  compareMoney,
   dayDiff,
+  estimate,
+  estimateNode,
   h,
   icon,
   linePath,
   money,
+  moneySign,
+  negateMoney,
   num,
   pathLabel,
   s,
   shortDate,
   stepPath,
+  sumMoney,
 } from "../lib/kit";
 import "../lib/theme.css";
 
@@ -42,7 +48,7 @@ const DEMO: ForecastResult = {
   low: { date: "2026-07-19", balance: "-142.00" },
   events: [
     { date: "2026-07-14", name: "Mortgage", amount: "-2400.00", balance_after: "1048.00", transaction_id: null },
-    { date: "2026-07-19", name: "Car insurance", amount: "-1190.00", balance_after: "-142.00", transaction_id: null },
+    { date: "2026-07-19", name: "Car insurance", amount: "-1190.00", balance_after: "-142.00", transaction_id: null, certainty: { status: "estimated", amount_estimated: true } },
     { date: "2026-07-20", name: "Payroll", amount: "3100.00", balance_after: "2958.00", transaction_id: null },
     { date: "2026-08-01", name: "Rent", amount: "-1800.00", balance_after: "1158.00", transaction_id: null },
     { date: "2026-08-03", name: "Payroll", amount: "3100.00", balance_after: "4258.00", transaction_id: null },
@@ -76,9 +82,15 @@ function bandOf(daily: ForecastDailySeries, asOf: string): [number, number, numb
 function bandDriver(data: ForecastResult): ForecastEvent | undefined {
   const until = data.low.range?.low_date;
   if (!until) return undefined;
+  const cost = (e: ForecastEvent) => sumMoney([e.amount, negateMoney(e.range!.low)]);
   return data.events
     .filter((e) => e.range && e.date <= until)
-    .sort((a, b) => num(b.amount) - num(b.range!.low) - (num(a.amount) - num(a.range!.low)))[0];
+    .sort((a, b) => compareMoney(cost(b), cost(a)))[0];
+}
+
+/** An event's amount, signed; an estimated one reads "≈ −$1,190" (#556). */
+function eventAmount(event: ForecastEvent): string {
+  return event.certainty?.amount_estimated ? estimate(event.amount, { sign: true }) : money(event.amount, { sign: true });
 }
 
 function eventTitle(event: ForecastEvent): string {
@@ -87,14 +99,14 @@ function eventTitle(event: ForecastEvent): string {
   const range = event.range
     ? ` · could be ${money(event.range.low, { sign: true })} to ${money(event.range.high, { sign: true })}`
     : "";
-  return `${event.name} ${money(event.amount, { sign: true })} · ${shortDate(event.date)}${flag}${basis}${range}`;
+  return `${event.name} ${eventAmount(event)} · ${shortDate(event.date)}${flag}${basis}${range}`;
 }
 
 function causalStory(data: ForecastResult): string {
   const base = `Projected low of ${money(data.low.balance)} on ${shortDate(data.low.date)}`;
   const atLow = [...data.events].reverse().find((e) => e.balance_after === data.low.balance);
   if (!atLow) return base;
-  const rescue = data.events.find((e) => num(e.amount) > 0 && dayDiff(atLow.date, e.date) > 0);
+  const rescue = data.events.find((e) => moneySign(e.amount) > 0 && dayDiff(atLow.date, e.date) > 0);
   if (rescue) {
     const gap = dayDiff(atLow.date, rescue.date);
     const when = gap === 1 ? "one day" : `${gap} days`;
@@ -108,8 +120,9 @@ function render(data: ForecastResult, host: WidgetHost): void {
   if (!root) return;
   clear(root);
 
-  const floor = data.min_balance === null ? 0 : num(data.min_balance);
-  const shortfall = num(data.low.balance) < floor;
+  const floorAmount = data.min_balance ?? "0";
+  const floor = num(floorAmount); // the reference line's position only
+  const shortfall = compareMoney(data.low.balance, floorAmount) < 0;
 
   /* header ---------------------------------------------------------------- */
   const pills = HORIZONS.map((days) =>
@@ -163,7 +176,7 @@ function render(data: ForecastResult, host: WidgetHost): void {
       xDomain: [0, data.horizon_days],
       xTicks,
       xLabel: (day) => shortDate(addDays(data.as_of, day)),
-      reference: { value: floor, label: `min balance ${money(String(floor))}`, color: CHART.floor },
+      reference: { value: floor, label: `min balance ${money(floorAmount)}`, color: CHART.floor },
       step: true,
       band,
       ariaLabel: `Balance forecast for ${pathLabel(data.account)}`,
@@ -173,16 +186,16 @@ function render(data: ForecastResult, host: WidgetHost): void {
   };
 
   /* event dots + the three story labels (low, biggest out, biggest in) */
-  const biggestOut = [...data.events].filter((e) => num(e.amount) < 0).sort((a, b) => num(a.amount) - num(b.amount))[0];
-  const biggestIn = [...data.events].filter((e) => num(e.amount) > 0).sort((a, b) => num(b.amount) - num(a.amount))[0];
+  const biggestOut = [...data.events].filter((e) => moneySign(e.amount) < 0).sort((a, b) => compareMoney(a.amount, b.amount))[0];
+  const biggestIn = [...data.events].filter((e) => moneySign(e.amount) > 0).sort((a, b) => compareMoney(b.amount, a.amount))[0];
   const drawEvents = (svg: SVGElement, scales: ChartScales): void => {
     const xScale = scales.x;
     const yScale = scales.y;
     for (const event of data.events) {
       const x = xScale(dayDiff(data.as_of, event.date));
       const y = yScale(num(event.balance_after));
-      const isLow = event.balance_after === data.low.balance && num(data.low.balance) < floor;
-      const color = isLow ? CHART.danger : num(event.amount) > 0 ? CHART.positive : CHART.line;
+      const isLow = event.balance_after === data.low.balance && shortfall;
+      const color = isLow ? CHART.danger : moneySign(event.amount) > 0 ? CHART.positive : CHART.line;
       /* A projected event is a rule occurrence with no row yet (#235): a
        * hollow dot says "expected by the rule", a filled one "an instance". */
       const dot = s("circle", {
@@ -203,11 +216,11 @@ function render(data: ForecastResult, host: WidgetHost): void {
         );
       } else if (event === biggestOut) {
         svg.append(
-          s("text", { x, y: y - 11, "text-anchor": "middle", "font-size": 11, fill: "var(--text-secondary)" }, `${event.name.toLowerCase()} ${money(event.amount, { sign: true })}`),
+          s("text", { x, y: y - 11, "text-anchor": "middle", "font-size": 11, fill: "var(--text-secondary)" }, `${event.name.toLowerCase()} ${eventAmount(event)}`),
         );
       } else if (event === biggestIn) {
         svg.append(
-          s("text", { x: Math.min(x + 12, W - 80), y: y - 8, "font-size": 11, fill: "var(--text-secondary)" }, `${event.name.toLowerCase()} ${money(event.amount, { sign: true })}`),
+          s("text", { x: Math.min(x + 12, W - 80), y: y - 8, "font-size": 11, fill: "var(--text-secondary)" }, `${event.name.toLowerCase()} ${eventAmount(event)}`),
         );
       }
     }
@@ -238,12 +251,12 @@ function render(data: ForecastResult, host: WidgetHost): void {
         icon("alert", "currentColor", 18),
         h("span", {}, causalStory(data)),
       )
-    : data.low.range && num(data.low.range.low) < floor
+    : data.low.range && compareMoney(data.low.range.low, floorAmount) < 0
     ? h(
         "div",
         { class: "banner banner-warning" },
         icon("alert", "currentColor", 16),
-        h("span", {}, bandStory(data, floor)),
+        h("span", {}, bandStory(data, floorAmount)),
       )
     : h(
         "div",
@@ -252,7 +265,7 @@ function render(data: ForecastResult, host: WidgetHost): void {
         h(
           "span",
           {},
-          `Lowest point ${money(data.low.balance)} on ${shortDate(data.low.date)} — stays above the ${money(String(floor))} floor.`,
+          `Lowest point ${money(data.low.balance)} on ${shortDate(data.low.date)} — stays above the ${money(floorAmount)} floor.`,
         ),
       );
 
@@ -331,12 +344,12 @@ function render(data: ForecastResult, host: WidgetHost): void {
   });
 }
 
-function bandStory(data: ForecastResult, floor: number): string {
+function bandStory(data: ForecastResult, floor: string): string {
   const range = data.low.range!;
   const driver = bandDriver(data);
-  const cause = driver ? ` if ${driver.name.toLowerCase()} comes in ${num(driver.amount) < 0 ? "high" : "low"}` : "";
+  const cause = driver ? ` if ${driver.name.toLowerCase()} comes in ${moneySign(driver.amount) < 0 ? "high" : "low"}` : "";
   return (
-    `Lowest point ${money(data.low.balance)} on ${shortDate(data.low.date)} stays above the ${money(String(floor))} floor, ` +
+    `Lowest point ${money(data.low.balance)} on ${shortDate(data.low.date)} stays above the ${money(floor)} floor, ` +
     `but could dip to ${money(range.low)} on ${shortDate(range.low_date)}${cause}.`
   );
 }
@@ -363,7 +376,11 @@ async function showEvent(event: ForecastEvent, x: number, host: WidgetHost): Pro
     },
     h("p", { style: "margin:0 0 4px;font-weight:500;" }, detail.payee ?? event.name),
     h("p", { style: "margin:0;color:var(--text-secondary);" }, `${shortDate(detail.date)} · ${detail.status}`),
-    h("p", { style: "margin:4px 0 0;color:var(--text-secondary);" }, money(event.amount, { sign: true })),
+    h(
+      "p",
+      { style: "margin:4px 0 0;color:var(--text-secondary);" },
+      event.certainty?.amount_estimated ? estimateNode(event.amount, { sign: true }) : money(event.amount, { sign: true }),
+    ),
   );
   document.body.append(pop);
   window.setTimeout(() => document.addEventListener("click", () => pop.remove(), { once: true }), 0);

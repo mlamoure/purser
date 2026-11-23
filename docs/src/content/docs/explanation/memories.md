@@ -60,9 +60,9 @@ counts when a limit truncates the result.
 ## Privacy
 
 Note text is encrypted at rest. Reading notes requires `read` scope; creating
-or updating them requires `write`. MCP disclosure defaults also apply to
-notes: with purchase privacy enabled, known payee names in the text are
-replaced with references unless requested. See
+or updating them requires `write`. A call that withholds payees
+(`withhold: ["payee"]`) gets known payee names in the note text replaced with
+references. See
 [Privacy and agents](../../explanation/privacy-and-agents/).
 
 ## Archiving

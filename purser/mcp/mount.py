@@ -38,22 +38,35 @@ def _authenticate(raw: str) -> Principal | None:
 
 
 def _host_origin_allowlist() -> tuple[list[str], list[str]]:
-    """Allow the instance's public host (plus local dev hosts) through
-    FastMCP's Host/Origin request guard (DNS-rebinding protection) — otherwise
-    every request via a reverse proxy is rejected with 421 Misdirected Request."""
+    """The names FastMCP's Host/Origin guard (DNS-rebinding protection)
+    admits: PURSER_PUBLIC_URL's host (what a reverse proxy forwards), the
+    exact names in PURSER_ALLOWED_HOSTS (#633) and the loopback names.
+
+    FastMCP owns the guard (it switches the MCP SDK's own
+    ``TransportSecuritySettings`` check off), so this only feeds it lists.
+    Entries are written the SDK's way: a bare name plus ``name:*`` for any
+    port, or ``name:port`` when the setting pins one. FastMCP compares host
+    names, ports aside, and also admits its built-in loopback names. Nothing
+    here is a host pattern: ``parse_allowed_hosts`` refuses wildcards."""
     from urllib.parse import urlparse
 
+    from purser import network
     from purser.config import get_settings
 
-    # host:* is the wildcard-port pattern (test servers bind ephemeral ports;
+    settings = get_settings()
+    # host:* is the wildcard-port form (test servers bind ephemeral ports;
     # the reverse proxy forwards the bare public host).
     hosts = {"localhost", "localhost:*", "127.0.0.1", "127.0.0.1:*"}
     origins = {"http://localhost", "http://127.0.0.1"}
-    public = urlparse(get_settings().public_url)
+    public = urlparse(settings.public_url)
     if public.hostname:
         hosts.add(public.hostname)
         hosts.add(f"{public.hostname}:*")
         origins.add(f"{public.scheme}://{public.netloc}")
+    for entry in settings.allowed_hosts:
+        host, port = network.parse_entry(entry)
+        hosts.update({entry} if port else {host, f"{host}:*"})
+    origins.update(network.allowed_origins(settings.public_url, settings.allowed_hosts))
     return sorted(hosts), sorted(origins)
 
 
@@ -93,6 +106,75 @@ class McpAuthWrapper:
             return
         reset = current_principal.set(principal)
         try:
-            await self.app(scope, receive, send)
+            await self.app(scope, receive, _explain_misdirected(headers, send))
         finally:
             current_principal.reset(reset)
+
+
+def _explain_misdirected(headers: dict[bytes, bytes], send: Send) -> Send:
+    """Replace the Host guard's bare ``421 Misdirected Request`` with the
+    reason and the remedy (#581, #633). An agent meets this the first time it
+    connects by a name Purser was not told about (a home server reached by
+    another of its names), and the bare status says neither what is wrong nor
+    which address works. Only an authenticated caller gets this far, so the
+    instance's own addresses are not told to strangers."""
+    replaced = False
+
+    async def wrapped(message: MutableMapping[str, Any]) -> None:
+        nonlocal replaced
+        if message["type"] == "http.response.start" and message["status"] == 421:
+            replaced = True
+            from purser.config import get_settings
+
+            settings = get_settings()
+            body = json.dumps(
+                {
+                    "error": "misdirected request",
+                    "detail": _misdirected_detail(
+                        settings.public_url.rstrip("/"),
+                        settings.allowed_hosts,
+                        headers.get(b"host", b"").decode(errors="replace"),
+                    ),
+                }
+            ).encode()
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 421,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(body)).encode()),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": body})
+            return
+        if replaced:
+            return  # the guard's own body
+        await send(message)
+
+    return wrapped
+
+
+def _misdirected_detail(public: str, allowed: tuple[str, ...], named: str) -> str:
+    """What the 421 says: the names this Purser answers, the address to use,
+    and how to make it answer the name this request used as well."""
+    from purser import network
+
+    answers = f"{public}, to localhost"
+    if allowed:
+        answers += f" or to {', '.join(allowed)} ({network.SETTING})"
+    try:
+        host, _ = network.parse_entry(network.host_of(named))
+    except ValueError:
+        host = ""
+    allow = (
+        f"To accept {host!r} too, add it to {network.SETTING} (exact names, comma-separated)"
+        if host
+        else f"To accept another name, add it to {network.SETTING} (exact names, comma-separated)"
+    )
+    return (
+        f"This Purser answers MCP requests addressed to {answers}, and this one was "
+        f"addressed to {named!r}. Connect to {public}/mcp. {allow} and restart Purser; "
+        "PURSER_PUBLIC_URL sets the address Purser gives out."
+    )

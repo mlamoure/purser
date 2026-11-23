@@ -3,8 +3,12 @@ title: Put Purser behind a reverse proxy
 description: Serve Purser over HTTPS with Caddy, nginx or Traefik, keep port 8000 private, trust only the proxy's forwarded headers, and keep MCP streaming and imports working.
 ---
 
-Purser serves plain HTTP on port 8000. For anything beyond the machine it runs
-on, put an HTTPS reverse proxy in front of it. This page gives working
+Purser serves plain HTTP on port 8000. That is how it is used on the machine it
+runs on and, if you choose, from other machines on your home network (see
+[Another machine on your home network](../docker-compose/#another-machine-on-your-home-network)).
+For anything beyond your home network, or if you want encryption inside it,
+put your own HTTPS reverse proxy in front. Purser does not test or support
+internet-facing setups; what follows is what a proxy needs. This page gives working
 examples for Caddy, nginx and Traefik with the
 [Docker Compose](../docker-compose/) setup, then explains each setting they
 depend on.
@@ -210,10 +214,14 @@ changing it. It decides:
   for example `https://purser.example.com/auth/oidc/callback`. Register exactly
   that with the provider; see [Single sign-on with OIDC](../oidc/).
 - **The MCP endpoint's allowed host.** `/mcp` accepts requests only for the
-  public host and local addresses such as `localhost`, and answers any other
-  `Host` with
+  public host, the names in `PURSER_ALLOWED_HOSTS` and local addresses such
+  as `localhost`, and answers any other `Host` with
   `421 Misdirected Request`. A mismatch between the address an agent uses and
-  `PURSER_PUBLIC_URL` shows up as 421 errors in the agent.
+  `PURSER_PUBLIC_URL` shows up as 421 errors in the agent. When agents also
+  use a second name (the proxy's internal name, or the Docker host's address
+  from inside the home network), list it exactly in `PURSER_ALLOWED_HOSTS`
+  rather than changing `PURSER_PUBLIC_URL`, which must stay the address people
+  use.
 - **Links.** Links that tools return for you to open in the web UI start with
   this address.
 
@@ -246,6 +254,7 @@ an `Origin` that is not Purser's own address. See
 [Requests from other sites](../../explanation/security/#requests-from-other-sites).
 A proxy that rewrites or replaces `Origin` therefore breaks saving in the web
 UI. Forward the original `Host` too: it is what the MCP allowlist checks.
+Names in `PURSER_ALLOWED_HOSTS` count as Purser's own address for both checks.
 
 ### Request body size
 
@@ -283,6 +292,6 @@ agent to `https://purser.example.com/mcp` (see
 ## Related
 
 - [Run with Docker Compose](../docker-compose/): the compose files, `.env` and the override file.
-- [Configuration](../../reference/configuration/): `PURSER_PUBLIC_URL`, `PURSER_MAX_REQUEST_BYTES` and sign-in throttling.
+- [Configuration](../../reference/configuration/): `PURSER_PUBLIC_URL`, `PURSER_ALLOWED_HOSTS`, `PURSER_MAX_REQUEST_BYTES` and sign-in throttling.
 - [Deploy on Kubernetes with Helm](../kubernetes-helm/): the same settings with an ingress.
 - [Security model](../../explanation/security/): sessions, cross-site writes and throttling.

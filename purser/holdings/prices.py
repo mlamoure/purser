@@ -22,7 +22,7 @@ ticker) is asked for once, while a gap between answered ranges still is.
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -130,12 +130,26 @@ def record_price(
             "feed_accounts_revalued": len(feed_accounts),
         },
     )
+    # The closes every account reads, loaded once from the day before the
+    # price (#404): each projection computes only its rows from price_date.
+    books = projection.price_books(
+        session,
+        projection.symbols_of(session, [a.id for a in accounts]),
+        upper=today,
+        start=price_date,
+    )
+    changed = [price_date] if feed_accounts else []
     for account in accounts:
-        projection.project_account(session, account, from_date=price_date, today=today)
-    if feed_accounts:
-        # After the account locks (projection.lock_accounts), like every
-        # holdings writer: the watermark comes last.
-        balances.mark_dirty(session, price_date, networth_only=True)
+        result = projection.project_account(
+            session, account, from_date=price_date, today=today, books=books, mark_dirty=False
+        )
+        if result.changed_from is not None:
+            changed.append(result.changed_from)
+    if changed:
+        # Once, after every projection and the account locks
+        # (projection.lock_accounts), like every holdings writer: the
+        # watermark comes last and is held from here to the commit only.
+        balances.mark_dirty(session, min(changed), networth_only=True)
     return PriceRecorded(
         symbol=normalized,
         price_date=price_date,
@@ -207,12 +221,17 @@ def watched_books(session: Session, *, today: date) -> dict[str, core.PriceBook 
     stored close in a feed account's newest set (decision 92: stored closes
     only, as the overlay reads them; a lapsed weekly price must not carry an
     old close silently). Both show in ``price.stale``, ``/prices/status``
-    and ``whats_new`` the same way."""
+    and ``whats_new`` the same way.
+
+    Each book answers for ``today`` only (``book.on(today)``): the newest
+    closes at or before it, never the symbol's whole history (#404)."""
     manual = set(open_symbols(session, today=today))
     overlaid = overlay.overlaid_symbols(session, today=today) - manual
     books: dict[str, core.PriceBook | None] = dict.fromkeys(manual | overlaid)
-    books.update(projection.price_books(session, manual, upper=today))
-    books.update(overlay.stored_books(session, overlaid, upper=today))
+    books.update(projection.latest_books(session, manual, today=today))
+    books.update(
+        overlay.stored_books(session, overlaid, upper=today, start=today + timedelta(days=1))
+    )
     return books
 
 
@@ -460,25 +479,54 @@ def emit_unpriced(session: Session, unpriced: list[overlay.Unpriced]) -> int:
     return emitted
 
 
-def _fetch_symbol(
+@dataclass(frozen=True)
+class _Answer:
+    """What the provider answered for one window: its closes, or the failure
+    (whatever the call raised, as a ``PriceFetchError``)."""
+
+    start: date
+    end: date
+    closes: list[tuple[date, Decimal]] | None
+    failure: PriceFetchError | None
+
+
+def _ask(provider: PriceProvider, symbol: str, windows: list[core.Range]) -> list[_Answer]:
+    """Ask ``provider`` for each of ``symbol``'s windows, newest first, with
+    no database transaction open (#404). Whatever a call raises fails that
+    window only (decision 89); only the exception's class is kept, since a
+    message could carry request data."""
+    answers: list[_Answer] = []
+    for start, end in windows:
+        try:
+            answers.append(_Answer(start, end, provider.closes(symbol, start, end), None))
+        except Exception as exc:  # isolation is per window (decision 89)
+            failure = (
+                exc
+                if isinstance(exc, PriceFetchError)
+                else PriceFetchError(symbol, None, type(exc).__name__)
+            )
+            answers.append(_Answer(start, end, None, failure))
+    return answers
+
+
+def _store_symbol(
     session: Session,
-    provider: PriceProvider,
+    provider: str,
     symbol: str,
-    windows: list[core.Range],
+    answers: list[_Answer],
     *,
     today: date,
     failed: list[dict[str, Any]],
 ) -> list[date]:
-    """Ask ``provider`` for each of ``symbol``'s windows, newest first, and
-    store what it answers. Returns the dates of the closes inserted.
+    """Store what the provider answered for ``symbol``'s windows, in the
+    caller's transaction. Returns the dates of the closes inserted.
 
-    Each window is asked, stored and recorded on its own, inside its own
-    try: one the provider refuses, or whose store fails, is reported and
-    asked again on the next run, and never costs the symbol its other
-    windows or the run its other symbols. Every distinct failure is reported
-    once in ``failed`` (and as a ``price.fetch_failed`` event once a day),
-    and the closes dropped as absurd are reported too, summed over the
-    windows, whatever else failed."""
+    Each window is stored and recorded on its own, in its own savepoint: one
+    the provider refused, or whose store fails, is reported and asked again
+    on the next run, and never costs the symbol its other windows. Every
+    distinct failure is reported once in ``failed`` (and as a
+    ``price.fetch_failed`` event once a day), and the closes dropped as absurd
+    are reported too, summed over the windows, whatever else failed."""
     inserted_dates: list[date] = []
     dropped = 0
     reported: set[tuple[int | None, str]] = set()
@@ -488,45 +536,38 @@ def _fetch_symbol(
             return
         reported.add((failure.status, failure.reason))
         failed.append(_failure(failure))
-        _fetch_failed(session, provider.name, failure, today, kind=kind)
+        _fetch_failed(session, provider, failure, today, kind=kind)
 
-    for start, end in windows:
-        try:
-            closes = provider.closes(symbol, start, end)
-        except Exception as exc:  # isolation is per window (decision 89)
-            # Whatever the call raises fails this window only. Only the
-            # class is kept: a message could carry request data.
-            failure = (
-                exc
-                if isinstance(exc, PriceFetchError)
-                else PriceFetchError(symbol, None, type(exc).__name__)
-            )
-            report(failure)
-            if failure.status == 404 and core.settled(end, today):
+    for answer in answers:
+        start, end = answer.start, answer.end
+        if answer.failure is not None:
+            report(answer.failure)
+            if answer.failure.status == 404 and core.settled(end, today):
                 # The ticker is unknown there, for good for these dates.
                 try:
                     with session.begin_nested():
-                        _record_answered(session, symbol, provider.name, start, end)
+                        _record_answered(session, symbol, provider, start, end)
                 except SQLAlchemyError:
                     log.exception("price.store_failed", symbol=symbol)
                     report(PriceFetchError(symbol, None, "store failed"))
             continue
+        closes = answer.closes or []
         try:
             with session.begin_nested():
-                inserted = _insert_closes(session, symbol, provider.name, closes)
+                inserted = _insert_closes(session, symbol, provider, closes)
                 # A "nothing" is final only for dates old enough to be
                 # published; dates up to the newest close returned are final
                 # too (the provider has published past them).
                 newest = max((day for day, _close in closes), default=None)
                 through = core.answered_through(start, end, newest, today)
                 if through is not None:
-                    _record_answered(session, symbol, provider.name, start, through)
+                    _record_answered(session, symbol, provider, start, through)
         except SQLAlchemyError:
             log.exception("price.store_failed", symbol=symbol)
             report(PriceFetchError(symbol, None, "store failed"))
             continue
         inserted_dates.extend(inserted)
-        dropped += getattr(closes, "dropped", 0)
+        dropped += getattr(answer.closes, "dropped", 0)
     if dropped:
         # The rest of each window is stored; the absurd rows are reported
         # once per symbol per day, beside any other failure of the symbol.
@@ -535,6 +576,47 @@ def _fetch_symbol(
             kind="dropped",
         )
     return inserted_dates
+
+
+def _commit_symbol(
+    session: Session,
+    provider: str,
+    symbol: str,
+    answers: list[_Answer],
+    *,
+    today: date,
+    failed: list[dict[str, Any]],
+    actor_token_id: uuid.UUID | None,
+) -> list[date]:
+    """One symbol's short write transaction (#404): its closes, the
+    ``price.closes`` audit row recording them (committed together, #405), its
+    failures, and — last, just before the commit, so the watermark is held
+    for one statement and never across a provider call — net worth marked
+    dirty from its earliest new close where a feed row valued from stored
+    closes holds it (decision 92, ``overlay.first_revalued``)."""
+    inserted = _store_symbol(session, provider, symbol, answers, today=today, failed=failed)
+    if inserted:
+        audit.record(
+            session,
+            actor_token_id=actor_token_id,
+            action="price.closes",
+            entity_type="price",
+            after={
+                "provider": provider,
+                "symbols": {
+                    symbol: {
+                        "inserted": len(inserted),
+                        "first": min(inserted).isoformat(),
+                        "last": max(inserted).isoformat(),
+                    }
+                },
+            },
+        )
+        dirty_from = overlay.first_revalued(session, {symbol: min(inserted)})
+        if dirty_from is not None:
+            balances.mark_dirty(session, dirty_from, networth_only=True)
+    session.commit()
+    return inserted
 
 
 @dataclass
@@ -552,6 +634,37 @@ class FetchResult:
     open_periods: list[str] = field(default_factory=list)
 
 
+def _report_rolled_back(
+    maker: Any,
+    provider: str,
+    symbol: str,
+    answers: list[_Answer],
+    *,
+    today: date,
+    failed: list[dict[str, Any]],
+) -> None:
+    """Report a symbol whose write transaction rolled back as a whole: its
+    provider failures and "store failed", in a transaction of their own
+    (the rolled-back one took its ``price.fetch_failed`` events with it).
+    Never raises: the run goes on to the next symbol."""
+    failures = [a.failure for a in answers if a.failure is not None]
+    failures.append(PriceFetchError(symbol, None, "store failed"))
+    seen: set[tuple[int | None, str]] = set()
+    unique = []
+    for failure in failures:
+        if (failure.status, failure.reason) not in seen:
+            seen.add((failure.status, failure.reason))
+            unique.append(failure)
+    failed.extend(_failure(f) for f in unique)
+    try:
+        with maker() as session:
+            for failure in unique:
+                _fetch_failed(session, provider, failure, today)
+            session.commit()
+    except Exception:
+        log.exception("price.report_failed", symbol=symbol)
+
+
 def run_fetch(
     *,
     today: date | None = None,
@@ -560,9 +673,15 @@ def run_fetch(
 ) -> FetchResult:
     """The daily price job's body, also run by an admin's fetch-now.
 
-    1. Fetch each open symbol's new closes from the provider, one symbol at a
-       time: a failing ticker records ``price.fetch_failed`` and never blocks
-       the others.
+    1. Read what each symbol needs (``fetch_needs``, the answered ranges) and
+       end that transaction. Then, one symbol at a time, ask the provider
+       through one shared HTTP client with no transaction open, and store
+       the answers in that symbol's own short transaction
+       (``_commit_symbol``, #404): no connection sits idle in a transaction
+       across the provider calls, and the watermark is never held across
+       one. A failing ticker records ``price.fetch_failed`` and never blocks
+       the others; a symbol whose store fails as a whole is rolled back and
+       reported, and the run goes on.
     2. Re-project every manual account, each in its own transaction. Only
        rows that differ are rewritten, so this also picks up feed-implied
        prices and heals any account a missed trigger left behind.
@@ -574,9 +693,9 @@ def run_fetch(
     The run is audited as one ``price.fetch`` row (``connection.sync``'s
     shape): what was fetched, what failed, what turned stale. The closes
     themselves are audited in the transaction that stores them
-    (``price.closes``, #405): the summary comes after the per-account
-    projections, so a run that dies before it still leaves every stored
-    close audited.
+    (``price.closes``, one row per symbol, #405): the summary comes after
+    the per-account projections, so a run that dies before it still leaves
+    every stored close audited.
     """
     from purser.db import get_sessionmaker
 
@@ -585,61 +704,52 @@ def run_fetch(
     result = FetchResult(provider=settings.price_provider)
     maker = get_sessionmaker()
 
-    with maker() as session:
-        needs = fetch_needs(session, today=today)
-        result.symbols = len(needs)
-        provider, reason = configured_provider(client=client)
-        result.skipped = reason
-        # The earliest provider close stored, per symbol: net worth heals from
-        # it where a feed row with no stored value holds the symbol (decision
-        # 92), found in one statement after the fetch (overlay.first_revalued).
-        earliest: dict[str, date] = {}
-        stored: dict[str, list[date]] = {}
+    shared = client if client is not None else httpx.Client(timeout=TiingoProvider.TIMEOUT)
+    try:
+        with maker() as session:
+            needs = fetch_needs(session, today=today)
+            result.symbols = len(needs)
+            provider, reason = configured_provider(client=shared)
+            result.skipped = reason
+            windows: dict[str, list[core.Range]] = {}
+            if provider is not None:
+                answered = _answered(session, provider.name, sorted(needs))
+                windows = {
+                    symbol: core.fetch_windows(needs[symbol], answered.get(symbol, []))
+                    for symbol in sorted(needs)
+                }
+            session.rollback()  # read only: end the transaction before any provider call
+
         if provider is not None:
-            symbols = sorted(needs)
-            answered = _answered(session, provider.name, symbols)
-            for symbol in symbols:
-                inserted = _fetch_symbol(
-                    session,
-                    provider,
-                    symbol,
-                    core.fetch_windows(needs[symbol], answered.get(symbol, [])),
-                    today=today,
-                    failed=result.failed,
-                )
+            for symbol, symbol_windows in windows.items():
+                answers = _ask(provider, symbol, symbol_windows)
+                if not answers:
+                    continue
+                failed_before = len(result.failed)
+                try:
+                    with maker() as session:
+                        inserted = _commit_symbol(
+                            session,
+                            provider.name,
+                            symbol,
+                            answers,
+                            today=today,
+                            failed=result.failed,
+                            actor_token_id=actor_token_id,
+                        )
+                except Exception:
+                    # The whole symbol rolled back: nothing of it is stored,
+                    # and it is asked again on the next run.
+                    log.exception("price.store_failed", symbol=symbol)
+                    del result.failed[failed_before:]
+                    _report_rolled_back(
+                        maker, provider.name, symbol, answers, today=today, failed=result.failed
+                    )
+                    continue
                 result.fetched += len(inserted)
-                if inserted:
-                    earliest[symbol] = min(inserted)
-                    stored[symbol] = inserted
-        if stored:
-            # The closes and the row recording them commit together (#405):
-            # the run's price.fetch summary is written last, after the
-            # per-account projections, and a worker dying before it must
-            # not leave a stored close without an audit row.
-            assert provider is not None
-            audit.record(
-                session,
-                actor_token_id=actor_token_id,
-                action="price.closes",
-                entity_type="price",
-                after={
-                    "provider": provider.name,
-                    "symbols": {
-                        symbol: {
-                            "inserted": len(days),
-                            "first": min(days).isoformat(),
-                            "last": max(days).isoformat(),
-                        }
-                        for symbol, days in sorted(stored.items())
-                    },
-                },
-            )
-        overlay_dirty_from = overlay.first_revalued(session, earliest)
-        if overlay_dirty_from is not None:
-            # Last, just before the commit: the watermark is never held across
-            # the provider calls above.
-            balances.mark_dirty(session, overlay_dirty_from, networth_only=True)
-        session.commit()
+    finally:
+        if client is None:
+            shared.close()
 
     with maker() as session:
         account_ids = projection.manual_accounts_with_positions(session)

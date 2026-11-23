@@ -6,7 +6,7 @@
 
 import type { SpendingBaselineResult, SpendingClassicResult, SpendingResult } from "../lib/contracts";
 import { initWidget, type WidgetHost } from "../lib/host";
-import { CHART, clear, h, icon, money, num } from "../lib/kit";
+import { CHART, clear, compareMoney, h, icon, money, moneySign, negateMoney, num, sumMoney } from "../lib/kit";
 import "../lib/theme.css";
 
 const DEMO: SpendingBaselineResult = {
@@ -45,13 +45,18 @@ function stepMonth(period: string, delta: number): string {
   return `${Math.floor(total / 12)}-${String((total % 12) + 1).padStart(2, "0")}`;
 }
 
+/** An amount without its sign, as a decimal string. */
+function magnitude(dec: string): string {
+  return moneySign(dec) < 0 ? negateMoney(dec) : dec;
+}
+
 function renderBaseline(data: SpendingBaselineResult, host: WidgetHost): void {
   const root = document.getElementById("root");
   if (!root) return;
   clear(root);
 
-  const delta = num(data.grand_total) - num(data.baseline_total);
-  const over = delta >= 0;
+  const delta = sumMoney([data.grand_total, negateMoney(data.baseline_total)]);
+  const over = moneySign(delta) >= 0;
   const maxAmount = Math.max(...data.rows.map((r) => Math.max(num(r.amount), num(r.baseline))), 1);
 
   const drill = data.group_by === "payee";
@@ -74,7 +79,7 @@ function renderBaseline(data: SpendingBaselineResult, host: WidgetHost): void {
         h(
           "span",
           { style: `font-size:13px;font-weight:400;color:var(--text-${over ? "danger" : "success"});` },
-          `${over ? "+" : "−"}${money(String(Math.abs(delta)))} vs ${data.baseline.replace(/_/g, " ").replace("avg", "").trim() || "baseline"} avg`,
+          `${money(delta, { sign: true })} vs ${data.baseline.replace(/_/g, " ").replace("avg", "").trim() || "baseline"} avg`,
         ),
       ),
     ),
@@ -103,7 +108,7 @@ function renderBaseline(data: SpendingBaselineResult, host: WidgetHost): void {
   const rows = data.rows.map((row) => {
     const width = (num(row.amount) / maxAmount) * 100;
     const tick = (num(row.baseline) / maxAmount) * 100;
-    const rowDelta = num(row.delta);
+    const rowSign = moneySign(row.delta);
     return h(
       "div",
       { style: "margin-bottom:14px;" },
@@ -118,8 +123,8 @@ function renderBaseline(data: SpendingBaselineResult, host: WidgetHost): void {
           " ",
           h(
             "span",
-            { style: `color:var(--text-${rowDelta > 0 ? "danger" : "success"});` },
-            rowDelta === 0 ? "" : `${rowDelta > 0 ? "+" : "−"}${money(String(Math.abs(rowDelta)))}`,
+            { style: `color:var(--text-${rowSign > 0 ? "danger" : "success"});` },
+            rowSign === 0 ? "" : money(row.delta, { sign: true }),
           ),
         ),
       ),
@@ -147,7 +152,7 @@ function renderBaseline(data: SpendingBaselineResult, host: WidgetHost): void {
 
   const moverRow = [...data.rows]
     .filter((r) => r.top_payee_mover)
-    .sort((a, b) => Math.abs(num(b.delta)) - Math.abs(num(a.delta)))[0];
+    .sort((a, b) => compareMoney(magnitude(b.delta), magnitude(a.delta)))[0];
   if (moverRow?.top_payee_mover) {
     const mover = moverRow.top_payee_mover;
     card.append(
@@ -155,7 +160,7 @@ function renderBaseline(data: SpendingBaselineResult, host: WidgetHost): void {
         "p",
         { style: "font-size:13px;color:var(--text-secondary);margin:14px 0 0;display:flex;align-items:center;gap:6px;" },
         icon("trend-up", "currentColor", 15),
-        `Biggest mover: ${label(moverRow.key).toLowerCase()} ${num(moverRow.delta) >= 0 ? "+" : "−"}${money(String(Math.abs(num(moverRow.delta))))}, mostly ${mover.payee} (${mover.count} orders vs your usual ${mover.baseline_count})`,
+        `Biggest mover: ${label(moverRow.key).toLowerCase()} ${money(moverRow.delta, { sign: true })}, mostly ${mover.payee} (${mover.count} orders vs your usual ${mover.baseline_count})`,
       ),
     );
   }

@@ -105,7 +105,7 @@ class ForecastResult(TypedDict):
     # --------------------------------------------------------------------------
     # list_recurring (#74)
     # --------------------------------------------------------------------------
-    # Fields the user's privacy defaults withheld from this answer (#437).
+    # Fields this answer withheld because the call asked (withhold; #437, #613).
     withheld: NotRequired[list[str]]
 
 
@@ -142,7 +142,7 @@ class RecurringResult(TypedDict):
     # --------------------------------------------------------------------------
     # net_worth series mode (#75)
     # --------------------------------------------------------------------------
-    # Fields the user's privacy defaults withheld from this answer (#437).
+    # Fields this answer withheld because the call asked (withhold; #437, #613).
     withheld: NotRequired[list[str]]
 
 
@@ -175,7 +175,7 @@ class NetWorthSeriesResult(TypedDict):
     # --------------------------------------------------------------------------
     # spending_summary baseline mode (#76)
     # --------------------------------------------------------------------------
-    # Fields the user's privacy defaults withheld from this answer (#437).
+    # Fields this answer withheld because the call asked (withhold; #437, #613).
     withheld: NotRequired[list[str]]
 
 
@@ -207,7 +207,7 @@ class SpendingBaselineResult(TypedDict):
     # --------------------------------------------------------------------------
     # whats_new (#77)
     # --------------------------------------------------------------------------
-    # Fields the user's privacy defaults withheld from this answer (#437).
+    # Fields this answer withheld because the call asked (withhold; #437, #613).
     withheld: NotRequired[list[str]]
 
 
@@ -373,7 +373,7 @@ class WhatsNewResult(TypedDict):
     # --------------------------------------------------------------------------
     # balance_history (#199)
     # --------------------------------------------------------------------------
-    # Fields the user's privacy defaults withheld from this answer (#437).
+    # Fields this answer withheld because the call asked (withhold; #437, #613).
     withheld: NotRequired[list[str]]
 
 
@@ -420,8 +420,10 @@ class BalanceHistoryResult(TypedDict):
     change: BalanceHistoryChange
     # End-of-day balances over EVERY day with activity in the window, never
     # the sampled subset — that is what makes publishing a downsampled series
-    # honest — and never an intra-day row (decision 63). Null only when the
-    # window holds no activity at all.
+    # honest — and never an intra-day row (decision 63). On the series' own
+    # basis (`method`, decision 129): a brokerage or loan account also ranks
+    # its snapshot or valuation days. Null only when the window holds no
+    # activity at all.
     low: BalanceHistoryExtreme | None
     high: BalanceHistoryExtreme | None
     density: BalanceHistoryDensity
@@ -433,7 +435,7 @@ class BalanceHistoryResult(TypedDict):
     # --------------------------------------------------------------------------
     # list_holdings / record_position (#390, decisions 88/89)
     # --------------------------------------------------------------------------
-    # Fields the user's privacy defaults withheld from this answer (#437).
+    # Fields this answer withheld because the call asked (withhold; #437, #613).
     withheld: NotRequired[list[str]]
 
 
@@ -522,7 +524,7 @@ class HoldingsResult(TypedDict):
     # One named account only: the cursor of the next page (the last symbol
     # listed; pages go in symbol order), null on the last.
     next_cursor: NotRequired[str | None]
-    # Fields the user's privacy defaults withheld from this answer (#437).
+    # Fields this answer withheld because the call asked (withhold; #437, #613).
     withheld: NotRequired[list[str]]
 
 
@@ -598,11 +600,44 @@ class RecordSaleResult(TypedDict):
     # With force_cash: the row of the same amount the cash was (or, on a dry
     # run, would be) posted over, so the override is never silent; else null.
     cash_probe_overridden: SaleCashFound | None
-    # Fields the user's privacy defaults withheld from this answer (#437).
+    # Fields this answer withheld because the call asked (withhold; #437, #613).
     withheld: NotRequired[list[str]]
     # The lots it drew on (#393): count, terms and the summed basis /
     # proceeds / gain where known.
     lots: NotRequired[SaleLots | None]
+
+
+# --------------------------------------------------------------------------
+# record_split (#624, decision 127)
+# --------------------------------------------------------------------------
+
+
+class SplitPosition(TypedDict):
+    position_id: str
+    symbol: str
+    quantity_before: str  # held the day before the effective date
+    quantity_after: str  # what those shares became (before any cash in lieu)
+
+
+class SplitCashInLieu(TypedDict):
+    event_id: str  # the sell of the fraction, reversed with the split
+    fraction: str  # the fractional share paid in cash
+    # The cash, to the cent; omitted (and named in `withheld`) while single
+    # amounts are withheld (decision 91).
+    amount: NotRequired[str]
+    settle_on: str
+    transaction_id: str | None  # the cash row (Purser's, or the linked one)
+    linked: bool  # the cash is a row the account already showed
+    lots: NotRequired[SaleLots | None]  # the lots the fraction drew on (#393)
+
+
+class RecordSplitResult(TypedDict):
+    position: SplitPosition
+    ratio: str  # numerator:denominator, new shares for old
+    effective_date: str
+    event_id: str  # the split event (reverse_position_event undoes it)
+    cash_in_lieu: SplitCashInLieu | None  # null when the broker paid none
+    withheld: NotRequired[list[str]]
 
 
 # --------------------------------------------------------------------------
@@ -628,6 +663,8 @@ class ReversePositionEventResult(TypedDict):
     occurred_on: str
     position: ReversedPosition
     cash: ReversedCash | None  # null when the event moved no cash
+    # A split's cash-in-lieu sale, reversed with it (#624); absent otherwise.
+    cash_in_lieu: NotRequired[ReversedCash | None]
 
 
 class ReopenPositionResult(TypedDict):

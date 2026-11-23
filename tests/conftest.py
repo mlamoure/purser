@@ -8,6 +8,7 @@ import base64
 import os
 import time
 from collections.abc import Iterator
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -17,16 +18,78 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 from testcontainers.postgres import PostgresContainer
 
+import purser.clock
 import purser.config
 import purser.db
 
-# The suite runs with the default household time zone (UTC, decision 105), and
-# many tests compute their expected dates with ``date.today()``. Pin the test
-# process to UTC so that host-local "today" is the ledger day on any host —
-# a developer box in New York at 19:30 is already tomorrow in UTC. Tests of the
-# time-zone setting itself (tests/test_ledger_day.py) pin purser.clock instead.
+# The suite runs with the default household time zone (UTC, decision 105).
+# Pin the test process to UTC as well, so that anything host-local agrees
+# with the ledger day on any host: a developer box in New York at 19:30 is
+# already tomorrow in UTC. Tests read the day from ``today()`` below, never
+# from ``date.today()``; tests of the time-zone setting itself
+# (tests/test_ledger_day.py) pin purser.clock to their own instant.
 os.environ["TZ"] = "UTC"
 time.tzset()
+
+
+# One clock per test (#533). The application reads the ledger day through
+# purser.clock; a test that built its dates from the live clock (worse, from
+# a module constant set at import) disagreed with it as soon as a run crossed
+# UTC midnight. ``pinned_clock`` (autouse) freezes purser.clock at the moment
+# the test starts, and ``now()`` / ``today()`` read that same instant, so a
+# test's fixtures and the code under test always agree on the day, however
+# long the run. The instant is the real one, not a fixed date, because
+# instants (audit ``at``, ``created_at``, token expiry) are deliberately not
+# the ledger day and still come from the live clock and Postgres ``now()``
+# (decision 105); only a test whose own few seconds straddle midnight can see
+# one of those on the next day. tests/test_midnight.py moves the clock across
+# midnight on purpose, and keeps import-time and live day reads out of tests/.
+_LIVE_CLOCK = purser.clock._utc_now
+
+
+class PinnedClock:
+    """The instant purser.clock answers with during one test. A test moves
+    it with ``set`` or ``advance``; nothing else does."""
+
+    def __init__(self, instant: datetime) -> None:
+        self.instant = instant
+
+    def __call__(self) -> datetime:
+        return self.instant
+
+    def set(self, instant: datetime) -> None:
+        if instant.tzinfo is None:
+            raise ValueError("the pinned clock takes an aware instant")
+        self.instant = instant
+
+    def advance(self, delta: timedelta) -> None:
+        self.instant += delta
+
+
+@pytest.fixture(autouse=True)
+def pinned_clock(monkeypatch: pytest.MonkeyPatch) -> PinnedClock:
+    """Freeze purser.clock for this test at the moment it starts."""
+    pinned = PinnedClock(datetime.now(UTC))
+    monkeypatch.setattr(purser.clock, "_utc_now", pinned)
+    return pinned
+
+
+def now() -> datetime:
+    """This test's instant: what purser.clock answers right now. Only valid
+    inside a test (a module constant would freeze the import's clock, #533)."""
+    if purser.clock._utc_now is _LIVE_CLOCK:
+        raise RuntimeError(
+            "now()/today() read the per-test pinned clock: call them inside a test,"
+            " never at import time (#533)"
+        )
+    return purser.clock._utc_now()
+
+
+def today() -> date:
+    """This test's day: the UTC date of ``now()``, which is the ledger day in
+    the suite's default household time zone."""
+    return now().date()
+
 
 # Encryption at rest is required (issue #93): the key must exist before
 # migrations run (0007 seeds the canary + encrypts the backfill with it).

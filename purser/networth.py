@@ -9,6 +9,7 @@ Materialized nightly into net_worth_daily.
 
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date as date_type
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
@@ -236,29 +237,6 @@ def latest_holdings(
     )
 
 
-def _postings_balance(session: Session, account_id: uuid.UUID, as_of: date_type) -> Decimal:
-    total = session.execute(
-        select(func.coalesce(func.sum(Posting.amount), 0))
-        .join(Transaction, Transaction.id == Posting.transaction_id)
-        .where(
-            Posting.account_id == account_id,
-            Transaction.status.in_(["pending", "posted"]),
-            Transaction.date <= as_of,
-        )
-    ).scalar_one()
-    return Decimal(total)
-
-
-def _latest_valuation(session: Session, account_id: uuid.UUID, as_of: date_type) -> Decimal | None:
-    row = session.execute(
-        select(Valuation.value)
-        .where(Valuation.account_id == account_id, Valuation.as_of <= as_of)
-        .order_by(*VALUATION_NEWEST_FIRST)
-        .limit(1)
-    ).scalar_one_or_none()
-    return Decimal(row) if row is not None else None
-
-
 def valuation_balances(
     session: Session,
     account_ids: list[uuid.UUID] | None = None,
@@ -290,6 +268,32 @@ def valuation_balances(
             continue
         overlay[account_id] = (Decimal(value), valued_as_of)
     return overlay
+
+
+def _set_market_value(h: Any) -> Any:
+    """The market value of one snapshot set, as an aggregate over its rows
+    (``h`` must be the ``HoldingsSnapshot`` alias named ``h``, which
+    ``overlay.FEED_VALUE_SQL`` refers to). A feed row with no stored value
+    adds what a stored close makes it (decision 92), folded into the one
+    aggregate (evaluated only for those rows), so a set costs no extra round
+    trip. Shared by :func:`holdings_addends` and :func:`net_worth_on`, so
+    the account surfaces and net worth value a set one way."""
+    return func.coalesce(
+        func.sum(
+            case(
+                (
+                    and_(
+                        h.source == "feed",
+                        h.quantity > 0,
+                        or_(h.market_value.is_(None), h.market_value == 0),
+                    ),
+                    literal_column(overlay.FEED_VALUE_SQL),
+                ),
+                else_=h.market_value,
+            )
+        ),
+        0,
+    )
 
 
 def holdings_addends(
@@ -325,29 +329,11 @@ def holdings_addends(
     if account_ids is not None:
         latest = latest.where(HoldingsSnapshot.account_id.in_(account_ids))
     latest_cte = latest.cte("latest_holdings")
-    # A feed row with no stored value adds what a stored close makes it
-    # (decision 92), folded into the one aggregate (overlay.FEED_VALUE_SQL,
-    # evaluated only for those rows), so a day costs no extra round trip.
     h = aliased(HoldingsSnapshot, name="h")
     stmt = (
         select(
             h.account_id,
-            func.coalesce(
-                func.sum(
-                    case(
-                        (
-                            and_(
-                                h.source == "feed",
-                                h.quantity > 0,
-                                or_(h.market_value.is_(None), h.market_value == 0),
-                            ),
-                            literal_column(overlay.FEED_VALUE_SQL),
-                        ),
-                        else_=h.market_value,
-                    )
-                ),
-                0,
-            ),
+            _set_market_value(h),
             latest_cte.c.as_of,
             Account.closed_at,
         )
@@ -492,8 +478,11 @@ def account_balance_series(
 ) -> tuple[dict[date_type, Decimal], str]:
     """One account's reported balance on each requested date, as
     ``({date: balance}, method)`` — the series counterpart of
-    :func:`account_balance_at`, and the single source behind the REST series
-    endpoint, the MCP tool and its ``purser://`` resource.
+    :func:`account_balance_at`, and the single source behind MCP
+    ``balance_history``'s series and extremes and the admin chart
+    (``GET /accounts/{id}/balance/history``). The per-change series
+    (``/balance/series`` and its ``purser://`` resource) is the postings
+    history instead (``balances.change_series``, decision 129).
 
     Branches ONCE on account type rather than per date, because an account
     does not change how it is valued mid-window:
@@ -568,66 +557,301 @@ def account_balance_series(
     return postings, "postings"
 
 
-def net_worth_at(session: Session, as_of: date_type) -> dict[str, Any]:
-    accounts = session.execute(
-        select(Account).where(Account.is_virtual.is_(False)).order_by(Account.path)
-    ).scalars()
-    # One set-based pass for every brokerage account, rather than a
-    # latest_holdings() round-trip inside the loop.
-    market_overlay = holdings_addends(session, as_of=as_of)
-    breakdown: list[dict[str, Any]] = []
-    assets = Decimal(0)
-    liabilities = Decimal(0)
-    for account in accounts:
-        value = Decimal(0)
-        method_parts: list[str] = []
-        # A closed account carries nothing into net worth from its close date
-        # onward: the closing adjustment zeroed its postings, and stale
-        # valuations/holdings after that date must not resurrect it. History
-        # BEFORE the close date is untouched (DESIGN §3.4).
-        closed_cutoff = account.closed_at is not None and as_of >= clock.ledger_date(
-            account.closed_at
+# The days in [s, e] on which an overlay account's reported balance can move:
+# a running-balance row (its postings basis), and a holdings snapshot set for
+# brokerage or a valuation for a loan. A snapshot is valued at its own as_of
+# (decision 92: a later close never re-values an older set), so between two of
+# these days the reported balance is flat.
+_OVERLAY_ACTIVITY = {
+    "brokerage": text(
+        """
+SELECT date FROM account_running_balances
+WHERE account_id = CAST(:a AS UUID) AND date >= :s AND date <= :e
+UNION
+SELECT as_of FROM holdings_snapshots
+WHERE account_id = CAST(:a AS UUID) AND as_of >= :s AND as_of <= :e
+ORDER BY 1
+"""
+    ),
+    "loan": text(
+        """
+SELECT date FROM account_running_balances
+WHERE account_id = CAST(:a AS UUID) AND date >= :s AND date <= :e
+UNION
+SELECT as_of FROM valuations
+WHERE account_id = CAST(:a AS UUID) AND as_of >= :s AND as_of <= :e
+ORDER BY 1
+"""
+    ),
+}
+
+Extreme = tuple[date_type, Decimal]
+
+
+def account_window_extremes(
+    session: Session, account: Account, *, start: date_type, end: date_type
+) -> tuple[Extreme | None, Extreme | None]:
+    """The lowest and highest END-OF-DAY reported balance over EVERY day
+    with activity in ``[start, end]``, as ``((date, balance) | None,
+    (date, balance) | None)`` — on the basis :func:`account_balance_series`
+    reports (decision 129), earliest date on a tie, ``None`` when the window
+    holds no activity.
+
+    A postings account ranks its running-balance days
+    (``balances.window_extremes``, decision 63). A brokerage or loan account's
+    value also moves on days with no posting — a new holdings snapshot, a new
+    valuation — and from its close date the account answers from postings, so
+    those days are ranked too, each valued by :func:`account_balance_series`.
+    Every such day, not a sample, so downsampling never hides an extreme."""
+    if account.type not in _OVERLAY_ACTIVITY:
+        low_row, high_row = balances.window_extremes(session, account.id, start=start, end=end)
+        return (
+            (low_row.date, Decimal(low_row.balance)) if low_row is not None else None,
+            (high_row.date, Decimal(high_row.balance)) if high_row is not None else None,
         )
-        if account.type in VALUATION_TYPES and not closed_cutoff:
-            valuation = _latest_valuation(session, account.id, as_of)
-            if valuation is not None:
+    days = set(
+        session.execute(
+            _OVERLAY_ACTIVITY[account.type], {"a": str(account.id), "s": start, "e": end}
+        ).scalars()
+    )
+    if account.closed_at is not None:
+        closed_on = clock.ledger_date(account.closed_at)
+        if start <= closed_on <= end:
+            days.add(closed_on)
+    if not days:
+        return None, None
+    ordered = sorted(days)
+    series, _method = account_balance_series(session, account, dates=ordered)
+    low = min(ordered, key=lambda d: (series[d], d))
+    high = min(ordered, key=lambda d: (-series[d], d))
+    return (low, series[low]), (high, series[high])
+
+
+def net_worth_at(session: Session, as_of: date_type) -> dict[str, Any]:
+    """Net worth on one day, with its per-account breakdown — the single-date
+    form of :func:`net_worth_on`."""
+    return net_worth_on(session, [as_of])[as_of]
+
+
+def _postings_by_day(
+    session: Session, first: date_type, last: date_type
+) -> dict[uuid.UUID, list[tuple[date_type, Decimal]]]:
+    """Every real account's pending/posted posting sums by date through
+    ``last``, oldest first, with everything dated before ``first`` folded
+    into ``first`` — so a running sum read at any day >= ``first`` is the
+    account's sum over all its rows dated on or before that day. Every row,
+    not chain heads: net worth is a sum over all rows (decision 37's
+    registered divergence from the running-balance store). One statement for
+    every account and every day."""
+    # Grouped by the output column, not a second copy of the expression: each
+    # copy would carry its own bind parameter, and Postgres groups by text.
+    bucket: Any = literal_column("bucket")
+    rows = session.execute(
+        select(
+            Posting.account_id,
+            func.greatest(Transaction.date, first).label("bucket"),
+            func.sum(Posting.amount),
+        )
+        .join(Transaction, Transaction.id == Posting.transaction_id)
+        .join(Account, Account.id == Posting.account_id)
+        .where(
+            Account.is_virtual.is_(False),
+            Transaction.status.in_(["pending", "posted"]),
+            Transaction.date <= last,
+        )
+        .group_by(Posting.account_id, bucket)
+        .order_by(Posting.account_id, bucket)
+    )
+    out: dict[uuid.UUID, list[tuple[date_type, Decimal]]] = {}
+    for account_id, day, total in rows:
+        out.setdefault(account_id, []).append((day, Decimal(total)))
+    return out
+
+
+def _valuations_by_day(
+    session: Session, last: date_type
+) -> dict[uuid.UUID, list[tuple[date_type, Decimal]]]:
+    """Every valuation of a valued account through ``last``, in
+    :data:`VALUATION_NEWEST_FIRST` reversed, so the last one at or before a
+    day is the one that day reads (of two on one date, the later recorded)."""
+    rows = session.execute(
+        select(Valuation.account_id, Valuation.as_of, Valuation.value)
+        .join(Account, Account.id == Valuation.account_id)
+        .where(Account.type.in_(VALUATION_TYPES), Valuation.as_of <= last)
+        .order_by(Valuation.account_id, Valuation.as_of, Valuation.created_at, Valuation.id)
+    )
+    out: dict[uuid.UUID, list[tuple[date_type, Decimal]]] = {}
+    for account_id, as_of, value in rows:
+        out.setdefault(account_id, []).append((as_of, Decimal(value)))
+    return out
+
+
+def _holdings_by_day(
+    session: Session, first: date_type, last: date_type
+) -> dict[uuid.UUID, list[tuple[date_type, Decimal]]]:
+    """Every brokerage snapshot set's market value through ``last``, oldest
+    first, by :func:`_set_market_value` — from the set in effect on
+    ``first`` on (older sets can never be read). One statement."""
+    floors = (
+        select(
+            HoldingsSnapshot.account_id.label("account_id"),
+            func.max(HoldingsSnapshot.as_of).label("floor"),
+        )
+        .where(HoldingsSnapshot.as_of <= first)
+        .group_by(HoldingsSnapshot.account_id)
+        .cte("holdings_floors")
+    )
+    h = aliased(HoldingsSnapshot, name="h")
+    rows = session.execute(
+        select(h.account_id, h.as_of, _set_market_value(h))
+        .select_from(h)
+        .join(Account, Account.id == h.account_id)
+        .outerjoin(floors, floors.c.account_id == h.account_id)
+        .where(
+            Account.type == "brokerage",
+            h.as_of <= last,
+            or_(floors.c.floor.is_(None), h.as_of >= floors.c.floor),
+        )
+        .group_by(h.account_id, h.as_of)
+        .order_by(h.account_id, h.as_of)
+    )
+    out: dict[uuid.UUID, list[tuple[date_type, Decimal]]] = {}
+    for account_id, as_of, market in rows:
+        out.setdefault(account_id, []).append((as_of, Decimal(market)))
+    return out
+
+
+class _Cursor:
+    """The newest entry at or before a day, walking days in ascending order
+    over one account's ``(date, value)`` list (oldest first)."""
+
+    __slots__ = ("_entries", "_next", "current")
+
+    def __init__(self, entries: list[tuple[date_type, Decimal]]) -> None:
+        self._entries = entries
+        self._next = 0
+        self.current: Decimal | None = None
+
+    def at(self, day: date_type) -> Decimal | None:
+        while self._next < len(self._entries) and self._entries[self._next][0] <= day:
+            self.current = self._entries[self._next][1]
+            self._next += 1
+        return self.current
+
+
+class _RunningSum(_Cursor):
+    """The sum of every entry at or before a day (0 before the first)."""
+
+    __slots__ = ("total",)
+
+    def __init__(self, entries: list[tuple[date_type, Decimal]]) -> None:
+        super().__init__(entries)
+        self.total = Decimal(0)
+
+    def at(self, day: date_type) -> Decimal:
+        while self._next < len(self._entries) and self._entries[self._next][0] <= day:
+            self.total += self._entries[self._next][1]
+            self._next += 1
+        return self.total
+
+
+def net_worth_on(session: Session, dates: Sequence[date_type]) -> dict[date_type, dict[str, Any]]:
+    """Net worth on each of ``dates``, as ``{date: {as_of, assets,
+    liabilities, net_worth, breakdown}}`` (DESIGN §8).
+
+    Per real account and day: a loan reads its latest valuation at or before
+    the day (its postings when it has none yet); every other account its
+    postings sum over all rows dated on or before the day, plus, for a
+    brokerage account, the market value of its latest snapshot set when that
+    is not zero (the same rule as :func:`holdings_addends`). A closed account
+    from its close date on contributes its postings alone, which closing
+    zeroed; before the close date it is untouched (§3.4).
+
+    Set-based (#610): three statements read every posting sum, valuation and
+    snapshot set the dates need, for every account at once, and the days are
+    then walked in order — never a query per account per day, so
+    re-materializing years of history after an import costs a few
+    statements, not one per account per day."""
+    if not dates:
+        return {}
+    days = sorted(set(dates))
+    first, last = days[0], days[-1]
+    accounts = list(
+        session.execute(
+            select(Account).where(Account.is_virtual.is_(False)).order_by(Account.path)
+        ).scalars()
+    )
+    postings = _postings_by_day(session, first, last)
+    valuations = (
+        _valuations_by_day(session, last)
+        if any(a.type in VALUATION_TYPES for a in accounts)
+        else {}
+    )
+    holdings = (
+        _holdings_by_day(session, first, last)
+        if any(a.type == "brokerage" for a in accounts)
+        else {}
+    )
+
+    out: dict[date_type, dict[str, Any]] = {
+        day: {
+            "as_of": day,
+            "assets": Decimal(0),
+            "liabilities": Decimal(0),
+            "net_worth": Decimal(0),
+            "breakdown": [],
+        }
+        for day in days
+    }
+    for account in accounts:
+        closed_on = clock.ledger_date(account.closed_at) if account.closed_at is not None else None
+        basis = _RunningSum(postings.get(account.id, []))
+        valued = _Cursor(valuations.get(account.id, []))
+        market = _Cursor(holdings.get(account.id, []))
+        for day in days:
+            # A closed account carries nothing into net worth from its close
+            # date onward: the closing adjustment zeroed its postings, and
+            # stale valuations/holdings after that date must not resurrect it.
+            # History BEFORE the close date is untouched (DESIGN §3.4).
+            closed_cutoff = closed_on is not None and day >= closed_on
+            method_parts: list[str] = []
+            posted = basis.at(day)
+            valuation = valued.at(day)
+            set_value = market.at(day)
+            if account.type in VALUATION_TYPES and not closed_cutoff and valuation is not None:
                 value = valuation
                 method_parts.append("valuation")
             else:
-                value = _postings_balance(session, account.id, as_of)
+                value = posted
                 if value != 0:
                     method_parts.append("postings")
-        else:
-            value = _postings_balance(session, account.id, as_of)
-            if value != 0:
-                method_parts.append("postings")
-            if account.type == "brokerage" and not closed_cutoff:
-                market = market_overlay.get(account.id)
-                if market is not None:
-                    value += market[0]
+                if (
+                    account.type == "brokerage"
+                    and not closed_cutoff
+                    and set_value is not None
+                    and set_value != 0
+                ):
+                    value += set_value
                     method_parts.append("holdings")
-        if value == 0 and not method_parts:
-            continue
-        breakdown.append(
-            {
-                "account_id": account.id,
-                "path": account.path,
-                "type": account.type,
-                "value": value,
-                "method": "+".join(method_parts) or "postings",
-            }
-        )
-        if value >= 0:
-            assets += value
-        else:
-            liabilities += -value
-    return {
-        "as_of": as_of,
-        "assets": assets,
-        "liabilities": liabilities,
-        "net_worth": assets - liabilities,
-        "breakdown": breakdown,
-    }
+            if value == 0 and not method_parts:
+                continue
+            result = out[day]
+            result["breakdown"].append(
+                {
+                    "account_id": account.id,
+                    "path": account.path,
+                    "type": account.type,
+                    "value": value,
+                    "method": "+".join(method_parts) or "postings",
+                }
+            )
+            if value >= 0:
+                result["assets"] += value
+            else:
+                result["liabilities"] += -value
+    for result in out.values():
+        result["net_worth"] = result["assets"] - result["liabilities"]
+    return out
 
 
 def earliest_activity_date(session: Session) -> date_type | None:
@@ -637,6 +861,91 @@ def earliest_activity_date(session: Session) -> date_type | None:
     first_row = session.execute(select(func.min(NetWorthDaily.as_of))).scalar()
     candidates = [d for d in (first_tx, first_row) if d is not None]
     return min(candidates) if candidates else None
+
+
+def account_first_activity(session: Session, account: Account) -> date_type | None:
+    """The first date ONE account has anything to report: its first stored
+    running-balance row, holdings snapshot or valuation, whichever is
+    earliest (#594). A chart window clamps its start here so a 5-year view
+    of a one-year-old account does not open on four flat years of zero."""
+    return session.execute(
+        text(
+            "SELECT LEAST("
+            " (SELECT min(date) FROM account_running_balances WHERE account_id = CAST(:a AS UUID)),"
+            " (SELECT min(as_of) FROM holdings_snapshots WHERE account_id = CAST(:a AS UUID)),"
+            " (SELECT min(as_of) FROM valuations WHERE account_id = CAST(:a AS UUID)))"
+        ),
+        {"a": str(account.id)},
+    ).scalar()
+
+
+# Density ladder for the admin chart (#594): a REST read is not token-budgeted,
+# so it runs far denser than balance_history's 31 points — 1y is a true daily
+# series at the default cap, 5y weekly, longer histories monthly.
+CHART_INTERVALS_DAYS = (1, 2, 3, 7, 14, 30, 91)
+CHART_MAX_POINTS = 400
+
+
+@dataclass(frozen=True)
+class BalanceHistory:
+    """One account's reported end-of-day balance over sampled dates, with
+    the window's change and extremes computed here in Decimal so a caller
+    never does arithmetic on money (#594)."""
+
+    start: date_type
+    end: date_type
+    method: str
+    interval_days: int
+    points: list[tuple[date_type, Decimal]]
+    current: Decimal
+    change: Decimal
+    change_pct: Decimal | None
+    low: tuple[date_type, Decimal] | None
+    high: tuple[date_type, Decimal] | None
+    first_activity: date_type | None
+
+
+def account_balance_history(
+    session: Session,
+    account: Account,
+    *,
+    start: date_type,
+    end: date_type,
+    max_points: int = CHART_MAX_POINTS,
+) -> BalanceHistory:
+    """The chart series for one account (#594): ``account_balance_series``
+    over dates sampled across ``[start, end]``, so every point is the same
+    reported balance the account header, MCP ``balance_history`` and net
+    worth use — holdings added for brokerage, valuations for loans.
+
+    ``start`` clamps forward to the account's first activity (never past
+    ``end``). Extremes rank EVERY day with activity on the same reported
+    basis (:func:`account_window_extremes`, decisions 63 and 129), so
+    sampling cannot hide a low — for an overlay account too, whose value also
+    moves on a snapshot's or a valuation's date."""
+    first = account_first_activity(session, account)
+    if first is not None and start < first:
+        start = min(first, end)
+    dates = sampling.sample_dates(start, end, intervals=CHART_INTERVALS_DAYS, max_points=max_points)
+    series, method = account_balance_series(session, account, dates=dates)
+    points = [(d, series[d]) for d in dates]
+    opening, current = points[0][1], points[-1][1]
+    change = current - opening
+    change_pct = (change / abs(opening) * 100).quantize(Decimal("0.01")) if opening != 0 else None
+    low, high = account_window_extremes(session, account, start=start, end=end)
+    return BalanceHistory(
+        start=start,
+        end=end,
+        method=method,
+        interval_days=(dates[-1] - dates[-2]).days if len(dates) > 1 else 0,
+        points=points,
+        current=current,
+        change=change,
+        change_pct=change_pct,
+        low=low,
+        high=high,
+        first_activity=first,
+    )
 
 
 ATTRIBUTION_BUCKETS: dict[str, str] = {
@@ -657,12 +966,9 @@ def attribution(session: Session, *, start: date_type, end: date_type) -> list[d
     delta BY CONSTRUCTION. Tradeoff (documented): `market` moves include
     contributions as well as growth — separating them would break the
     partition property."""
-    start_values = {
-        b["account_id"]: Decimal(b["value"]) for b in net_worth_at(session, start)["breakdown"]
-    }
-    end_values = {
-        b["account_id"]: Decimal(b["value"]) for b in net_worth_at(session, end)["breakdown"]
-    }
+    worth = net_worth_on(session, [start, end])
+    start_values = {b["account_id"]: Decimal(b["value"]) for b in worth[start]["breakdown"]}
+    end_values = {b["account_id"]: Decimal(b["value"]) for b in worth[end]["breakdown"]}
     involved = set(start_values) | set(end_values)
     if not involved:
         return []
@@ -708,6 +1014,15 @@ def series_sampled(
         ).scalars()
         if dirty_from is None or row.as_of < dirty_from
     }
+    return _stored_or_computed(session, dates, stored)
+
+
+def _stored_or_computed(
+    session: Session, dates: Sequence[date_type], stored: dict[date_type, NetWorthDaily]
+) -> list[dict[str, Any]]:
+    """Each of ``dates`` from its stored row when it has a usable one, the
+    rest computed live in ONE :func:`net_worth_on` pass."""
+    computed = net_worth_on(session, [day for day in dates if day not in stored])
     out: list[dict[str, Any]] = []
     for day in dates:
         if day in stored:
@@ -721,26 +1036,48 @@ def series_sampled(
                 }
             )
         else:
-            computed = net_worth_at(session, day)
+            live = computed[day]
             out.append(
                 {
                     "as_of": day,
-                    "assets": computed["assets"],
-                    "liabilities": computed["liabilities"],
-                    "net_worth": computed["net_worth"],
+                    "assets": live["assets"],
+                    "liabilities": live["liabilities"],
+                    "net_worth": live["net_worth"],
                 }
             )
     return out
 
 
 def materialize_day(session: Session, as_of: date_type) -> None:
-    result = net_worth_at(session, as_of)
+    materialize_range(session, as_of, as_of)
+
+
+# Days one consume_watermark step materializes and commits together: one
+# net_worth_on pass and one upsert each, so a re-materialization of years of
+# history is a few dozen statements and its progress is still committed as it
+# goes (#610).
+MATERIALIZE_CHUNK_DAYS = 92
+
+
+def materialize_range(session: Session, start: date_type, end: date_type) -> int:
+    """Store net worth for every day in ``[start, end]`` in ``net_worth_daily``
+    (upsert), from one :func:`net_worth_on` pass and one statement. Returns
+    the number of days written; the caller commits."""
+    if end < start:
+        return 0
+    days = [start + timedelta(days=n) for n in range((end - start).days + 1)]
+    computed = net_worth_on(session, days)
     stmt = pg_insert(NetWorthDaily).values(
-        as_of=as_of,
-        currency="USD",
-        assets=result["assets"],
-        liabilities=result["liabilities"],
-        net_worth=result["net_worth"],
+        [
+            {
+                "as_of": day,
+                "currency": "USD",
+                "assets": computed[day]["assets"],
+                "liabilities": computed[day]["liabilities"],
+                "net_worth": computed[day]["net_worth"],
+            }
+            for day in days
+        ]
     )
     stmt = stmt.on_conflict_do_update(
         index_elements=["as_of", "currency"],
@@ -752,6 +1089,7 @@ def materialize_day(session: Session, as_of: date_type) -> None:
         },
     )
     session.execute(stmt)
+    return len(days)
 
 
 def series(session: Session, *, start: date_type, end: date_type) -> list[dict[str, Any]]:
@@ -768,31 +1106,8 @@ def series(session: Session, *, start: date_type, end: date_type) -> list[dict[s
         ).scalars()
         if dirty_from is None or row.as_of < dirty_from
     }
-    out: list[dict[str, Any]] = []
-    day = start
-    while day <= end:
-        if day in stored:
-            row = stored[day]
-            out.append(
-                {
-                    "as_of": day,
-                    "assets": Decimal(row.assets),
-                    "liabilities": Decimal(row.liabilities),
-                    "net_worth": Decimal(row.net_worth),
-                }
-            )
-        else:
-            computed = net_worth_at(session, day)
-            out.append(
-                {
-                    "as_of": day,
-                    "assets": computed["assets"],
-                    "liabilities": computed["liabilities"],
-                    "net_worth": computed["net_worth"],
-                }
-            )
-        day += timedelta(days=1)
-    return out
+    days = [start + timedelta(days=n) for n in range((end - start).days + 1)]
+    return _stored_or_computed(session, days, stored)
 
 
 def _stale_from(session: Session) -> date_type | None:
@@ -808,10 +1123,11 @@ def _stale_from(session: Session) -> date_type | None:
 def consume_watermark() -> int:
     """Async watermark consumer (decision 38, issue #145): claim-and-clear
     ``networth_dirty_from`` in a short transaction, then re-materialize
-    stored days from it through today with per-day commits — the watermark
-    lock is never held across the (possibly minutes-long) loop. On failure
-    the unfinished range is re-marked; concurrent callers no-op on the
-    claim. Returns the number of days materialized."""
+    stored days from it through today, committing every
+    :data:`MATERIALIZE_CHUNK_DAYS` days (#610) — the watermark lock is never
+    held across the loop. On failure the unfinished range is re-marked from
+    the chunk that failed; concurrent callers no-op on the claim. Returns the
+    number of days materialized."""
 
     from purser.db import get_sessionmaker
 
@@ -827,10 +1143,11 @@ def consume_watermark() -> int:
     try:
         with maker() as session:
             while day <= today:
-                materialize_day(session, day)
+                chunk_end = min(today, day + timedelta(days=MATERIALIZE_CHUNK_DAYS - 1))
+                written = materialize_range(session, day, chunk_end)
                 session.commit()
-                day += timedelta(days=1)
-                done += 1
+                day = chunk_end + timedelta(days=1)
+                done += written
     except Exception:
         with maker() as session:
             balances.mark_dirty(session, day, networth_only=True)
@@ -849,7 +1166,6 @@ def materialize_job() -> None:
     consume_watermark()
     today = clock.ledger_today()
     with get_sessionmaker()() as session:
-        for offset in range(3):
-            materialize_day(session, today - timedelta(days=offset))
+        materialize_range(session, today - timedelta(days=2), today)
         balances.heal_and_probe(session)
         session.commit()

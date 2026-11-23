@@ -23,7 +23,7 @@ from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import Select, select, text
+from sqlalchemy import Select, func, select, text
 from sqlalchemy.orm import Session
 
 from purser.logging import get_logger
@@ -207,6 +207,7 @@ def record_call(
                 token = session.get(ApiToken, actor_token_id)
                 who = detail.get("identity") or (identity(session, token) if token else {})
                 summary = detail.get("sharing") or {}
+                record = detail.get("privacy")
                 session.add(
                     AuditLog(
                         id=row_id,
@@ -227,6 +228,8 @@ def record_call(
                         else None,
                         data_types=summary.get("data_types"),
                         account_ids=account_ids(session, summary),
+                        privacy_requested=record.get("requested") if record else None,
+                        identifiable=record.get("identifiable") if record else None,
                     )
                 )
                 session.commit()
@@ -299,11 +302,19 @@ def audit_query(
     since: datetime | None = None,
     until: datetime | None = None,
     disclosed: bool = False,
+    privacy_requested: bool = False,
+    identifiable: bool = False,
 ) -> Select[AuditLog]:
     stmt = select(AuditLog)
+    if privacy_requested:
+        # Calls that asked to withhold fields: the privacy feature in use (#613).
+        stmt = stmt.where(func.cardinality(AuditLog.privacy_requested) > 0)
+    if identifiable:
+        # Calls whose answer returned payees, descriptions or amounts (#613).
+        stmt = stmt.where(func.cardinality(AuditLog.identifiable) > 0)
     if disclosed:
-        # Calls where the agent asked for fields beyond the user's privacy
-        # defaults (#437): "what did my AI choose to see".
+        # Calls that asked for external identifiers with include and got them
+        # (#437, #613).
         stmt = stmt.where(AuditLog.disclosed.is_not(None))
     if kind is not None:
         stmt = stmt.where(AuditLog.kind == kind)

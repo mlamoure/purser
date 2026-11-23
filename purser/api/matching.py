@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from purser import matching
 from purser.admin.auth import ReadToken, WriteToken
+from purser.api.disclosure import Emits, disclose
 from purser.core import matching as core_matching
 from purser.db import get_session
 from purser.ledger import LedgerError, NotFoundError
@@ -178,7 +179,19 @@ def run_matching(token: WriteToken, session: DbSession) -> dict[str, int]:
     return stats
 
 
-@router.get("/proposed")
+@router.get(
+    "/proposed",
+    dependencies=[
+        disclose(
+            Emits(
+                payee=True,
+                narrative=True,
+                description=("[].expected_description",),
+                amount=("[].expected_amount", "[].variance"),
+            )
+        )
+    ],
+)
 def list_proposed(token: ReadToken, session: DbSession) -> list[MatchOut]:
     rows = list(
         session.execute(
@@ -201,7 +214,16 @@ def list_proposed(token: ReadToken, session: DbSession) -> list[MatchOut]:
     return [MatchOut.from_model(m, expected=expected_by_id.get(m.expected_id)) for m in rows]
 
 
-@router.get("/unmatched")
+@router.get(
+    "/unmatched",
+    dependencies=[
+        disclose(
+            Emits(
+                payee=True, narrative=True, description=("[].description",), amount=("[].amount",)
+            )
+        )
+    ],
+)
 def list_unmatched(
     token: ReadToken,
     session: DbSession,
@@ -216,7 +238,18 @@ def list_unmatched(
     return [UnmatchedOut(**r) for r in rows]
 
 
-@router.get("/transfer-candidates")
+@router.get(
+    "/transfer-candidates",
+    dependencies=[
+        disclose(
+            Emits(
+                payee=True,
+                description=("[].incoming_description", "[].outgoing_description"),
+                amount=("[].amount",),
+            )
+        )
+    ],
+)
 def transfer_candidates(
     token: ReadToken,
     session: DbSession,

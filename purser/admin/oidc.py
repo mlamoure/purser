@@ -127,9 +127,13 @@ class _IdTokenClaims(jwt.JWTClaimsRegistry):
 
     The registry applies one leeway to ``exp``, ``nbf`` and ``iat``. Purser
     wants skew tolerance only for a token stamped slightly in the future, so
-    ``exp`` is checked on its own: the token is refused at or after it."""
+    ``exp`` is checked on its own: the token is refused at or after it.
 
-    def validate_exp(self, value: int) -> None:
+    ``value`` is typed ``object`` (joserfc >= 1.8 does the same): a wider
+    parameter is a valid override of the ``int`` older releases declare, and
+    the isinstance check below is what narrows it."""
+
+    def validate_exp(self, value: object) -> None:
         if isinstance(value, bool) or not isinstance(value, int | float):
             raise InvalidClaimError("exp")
         if value <= self.now:

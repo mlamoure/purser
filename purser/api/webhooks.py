@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from purser import webhooks as service
 from purser.admin.auth import AdminToken, ReadToken
+from purser.api.disclosure import NOTHING, Emits, disclose
 from purser.db import get_session
 from purser.ledger import LedgerError, NotFoundError
 from purser.models import WebhookDelivery, WebhookSubscription
@@ -59,7 +60,44 @@ def _handle(exc: LedgerError) -> HTTPException:
     return HTTPException(code, str(exc))
 
 
-@events_router.get("")
+@events_router.get(
+    "",
+    dependencies=[
+        disclose(
+            Emits(
+                payee=True,
+                narrative=True,
+                # Payload keys by name, across event types (#648): a match
+                # card's label and an agent proposal's name, a reconcile
+                # note; one row's or one bill's amount wherever an event
+                # carries it. Balances (reported, statement, bank_balance,
+                # low, value) are aggregates and stay; drift's delta goes
+                # with recurring.price_changed's (its two balances stay).
+                description=(
+                    "[].payload.description",
+                    "[].payload.memo",
+                    "[].payload.lines[].memo",
+                    "[].payload.label",
+                    "[].payload.name",
+                    "[].payload.note",
+                ),
+                amount=(
+                    "[].payload.amount",
+                    "[].payload.lines[].amount",
+                    "[].payload.previous_amount",
+                    "[].payload.posted_amount",
+                    "[].payload.expected_amount",
+                    "[].payload.variance",
+                    "[].payload.old_estimate",
+                    "[].payload.new_estimate",
+                    "[].payload.delta",
+                    "[].payload.adjustment",
+                    "[].payload.remainder",
+                ),
+            )
+        )
+    ],
+)
 def replay_events(
     token: ReadToken,
     session: DbSession,
@@ -103,7 +141,7 @@ def create_subscription(
     )
 
 
-@router.get("")
+@router.get("", dependencies=[disclose(NOTHING)])
 def list_subscriptions(token: AdminToken, session: DbSession) -> list[SubscriptionOut]:
     rows = session.execute(select(WebhookSubscription)).scalars()
     return [
@@ -130,7 +168,7 @@ def deactivate(subscription_id: uuid.UUID, token: AdminToken, session: DbSession
     return {"status": "deactivated"}
 
 
-@router.get("/{subscription_id}/deliveries")
+@router.get("/{subscription_id}/deliveries", dependencies=[disclose(NOTHING)])
 def list_deliveries(
     subscription_id: uuid.UUID, token: AdminToken, session: DbSession
 ) -> list[DeliveryOut]:

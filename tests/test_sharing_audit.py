@@ -358,7 +358,7 @@ def test_real_mcp_direct_resource_and_tool_have_one_record_each(
             assert result.contents
             tool = await client.call_tool("read_series", {"uri": uri})
             assert not tool.is_error
-            empty = await client.call_tool("search_transactions", {"include": ["payee"]})
+            empty = await client.call_tool("search_transactions", {"withhold": ["payee"]})
             assert not empty.is_error
 
     asyncio.run(run())

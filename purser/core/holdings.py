@@ -4,7 +4,9 @@ snapshot projection of manually tracked positions (DESIGN §8, decisions
 service layer (``purser.holdings``) loads the facts and persists the rows.
 
 A position's history is a sequence of ``set_quantity`` / ``buy`` / ``sell``
-events (issue #390), plus ``vest`` and ``transfer_out`` (issue #393). Its
+events (issue #390), plus ``vest`` and ``transfer_out`` (issue #393) and
+``split`` (issue #624: every share becomes numerator/denominator shares at
+the start of its day). Its
 running cost basis is a total carried at average cost; a position that
 tracks lots (``purser.core.lots``) takes its basis from its lots instead,
 through ``PositionFacts.lots`` (decision 107).
@@ -20,6 +22,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, localcontext
+from fractions import Fraction
 from typing import NamedTuple, Protocol
 from uuid import UUID
 
@@ -28,7 +31,9 @@ BUY = "buy"
 SELL = "sell"
 VEST = "vest"  # an award vest: the net shares delivered (#393)
 TRANSFER_OUT = "transfer_out"  # shares leave with no price and no cash (#393)
-KINDS = (SET_QUANTITY, BUY, SELL, VEST, TRANSFER_OUT)
+SPLIT = "split"  # every share becomes numerator/denominator shares (#624)
+KINDS = (SET_QUANTITY, BUY, SELL, VEST, TRANSFER_OUT, SPLIT)
+MAX_SPLIT_TERM = 1_000_000  # a split ratio's numerator and denominator (CHECK)
 ADDS = (BUY, VEST)  # kinds that add their quantity
 REMOVES = (SELL, TRANSFER_OUT)  # kinds that remove theirs (lot dispositions)
 
@@ -134,6 +139,8 @@ class Event:
     # A correction of a reversed event (#401): it takes that event's place
     # in its day instead of going after the day's other events.
     replaces_id: UUID | None = None
+    # A split's ratio, (numerator, denominator): 2:1 forward, 1:10 reverse.
+    split: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -168,10 +175,13 @@ class MarketValueOutOfRange(OutOfRange):
 
 def effective_events(events: Iterable[Event]) -> list[Event]:
     """The events that count: neither a reversal nor reversed, in the total
-    order ``(occurred_on, slot, created_at, id)`` — the same idea as the
-    ledger's register order, with the id as the last tiebreak. ``slot`` is
-    ``created_at``, except that a replacement (``replaces_id``) takes the
-    slot of the event it replaces, through a chain of replacements (#401)."""
+    order ``(occurred_on, split first, slot, created_at, id)`` — the same idea
+    as the ledger's register order, with the id as the last tiebreak.
+    ``slot`` is ``created_at``, except that a replacement (``replaces_id``)
+    takes the slot of the event it replaces, through a chain of replacements
+    (#401). A split takes effect at the START of its effective date (#624):
+    every other event that day is in post-split shares, as on an exchange,
+    where the effective date is the first day shares trade split."""
     every = list(events)
     by_id = {e.id: e for e in every}
     reversed_ids = {e.reverses_id for e in every if e.reverses_id is not None}
@@ -186,8 +196,32 @@ def effective_events(events: Iterable[Event]) -> list[Event]:
             seen.add(event.id)
         return event.created_at
 
-    live.sort(key=lambda e: (e.occurred_on, slot(e), e.created_at, e.id))
+    live.sort(key=lambda e: (e.occurred_on, e.kind != SPLIT, slot(e), e.created_at, e.id))
     return live
+
+
+def round_fraction(value: Fraction, quant: Decimal) -> Decimal:
+    """An exact rational rounded to ``quant`` (a power of ten), half to
+    even, with no intermediate rounding."""
+    places = -int(quant.as_tuple().exponent)
+    units = round(value * 10**places)  # Fraction rounds half to even, exactly
+    return Decimal(units).scaleb(-places).quantize(quant)
+
+
+def split_quantity(quantity: Decimal, numerator: int, denominator: int) -> Decimal:
+    """The shares ``quantity`` becomes in a ``numerator:denominator`` split:
+    the exact product rounded to six places (NUMERIC(20,6)), half to even."""
+    return round_fraction(Fraction(quantity) * numerator / denominator, QUANTITY_QUANT)
+
+
+def split_points(events: Iterable[Event]) -> list[tuple[date, Fraction]]:
+    """The effective splits of a history, oldest first, as (effective date,
+    ratio)."""
+    return [
+        (e.occurred_on, Fraction(e.split[0], e.split[1]))
+        for e in effective_events(events)
+        if e.kind == SPLIT and e.split is not None
+    ]
 
 
 def quantity_timeline(events: Iterable[Event]) -> list[Point]:
@@ -204,6 +238,8 @@ def quantity_timeline(events: Iterable[Event]) -> list[Point]:
       amounts and the remaining basis always sum to the basis before.
     - ``vest`` adds like a priced buy (its price is the fair market value),
       and ``transfer_out`` removes like a sell (#393).
+    - ``split`` multiplies the count by its ratio, rounded to six places half
+      to even (``split_quantity``), and keeps the total basis (#624).
 
     A position that tracks lots reports its lots' basis instead from the
     first day a lot counts (``PositionFacts.lots``); this running basis is
@@ -239,6 +275,12 @@ def quantity_timeline(events: Iterable[Event]) -> list[Point]:
                     raise NegativeQuantity(event.occurred_on, quantity)
                 if basis is not None and held > 0:
                     basis -= money(basis * event.quantity / held)
+            elif event.kind == SPLIT:
+                # Every share becomes numerator/denominator shares; the total
+                # basis is unchanged (a split moves no money), so the basis
+                # per share is divided by the ratio (#624).
+                assert event.split is not None
+                quantity = split_quantity(quantity, *event.split)
             else:
                 raise ValueError(f"unknown position event kind {event.kind!r}")
             if quantity < 0:
@@ -481,6 +523,33 @@ def feed_value(
     return value, close
 
 
+def adjusted_close(
+    point: PricePoint | None, splits: Sequence[tuple[date, Fraction]], day: date
+) -> PricePoint | None:
+    """The close ``point`` in effect on ``day``, in the shares the position
+    holds that day (#624). Provider closes are stored as published, not
+    split-adjusted (Tiingo's ``close``), so a close dated on or after a
+    split is already in post-split shares and needs nothing; a close dated
+    BEFORE a split that took effect by ``day`` (the effective date's own
+    close not published yet, a weekend, a price recorded weeks earlier) is
+    divided by the ratio of every such split, so post-split shares times it
+    are worth what the pre-split shares were: no jump or dip on the
+    effective date. Rounded to six places half to even; None when that does
+    not fit a price."""
+    if point is None:
+        return None
+    factor = Fraction(1)
+    for on, ratio in splits:
+        if point.price_date < on <= day:
+            factor *= ratio
+    if factor == 1:
+        return point
+    close = round_fraction(Fraction(point.close) / factor, PRICE_QUANT)
+    if not 0 < close < MAX_PRICE:
+        return None
+    return PricePoint(point.price_date, close, point.source)
+
+
 def projection_rows(
     positions: Sequence[PositionFacts],
     prices: Mapping[str, PriceBook],
@@ -488,9 +557,21 @@ def projection_rows(
     lower: date,
     upper: date,
     settle_after: bool = False,
+    start: date | None = None,
 ) -> list[Row]:
     """The manual snapshot rows of one account, for every date in
     ``[lower, upper]`` on which something changes (decision 88).
+
+    ``start`` (#404) bounds the work to the rows dated on or after it: the
+    result is exactly the full result's rows dated ``start`` or later, so a
+    write dated near today costs what its window holds, not the account's
+    whole history. ``lower`` stays the period's own first date (only it
+    carries the set that replaces whatever came before), and what the set
+    before the window showed is read off the day before ``start``: every
+    date that changes a position's shares or cash in transit is a change
+    date, so that day holds what the last set before the window held.
+    ``prices`` must answer like full books from the day before ``start``
+    on (``purser.holdings.projection.price_books`` with that start).
 
     A row set is written on each event date and on each price date of a
     symbol some position holds that day, plus ``lower`` itself. Readers take
@@ -533,8 +614,19 @@ def projection_rows(
     ``OutOfRange`` (a share count or basis beyond its column)."""
     if upper < lower:
         return []
+    if start is not None and start > upper:
+        # Past the period's end only the landing days of cash in transit
+        # remain (``settle_after``), and the day before ``start`` need not
+        # be a day the period tracks: bounding saves nothing here.
+        full = projection_rows(
+            positions, prices, lower=lower, upper=upper, settle_after=settle_after
+        )
+        return [r for r in full if r.as_of >= start]
+    # The first date the window writes: the period's own lower, or ``start``.
+    begin = lower if start is None or start <= lower else start
     ordered = sorted(positions, key=lambda p: p.id)
     timelines = {p.id: Timeline(quantity_timeline(p.events)) for p in ordered}
+    splits = {p.id: split_points(p.events) for p in ordered}
     transits: dict[UUID, list[InTransit]] = {}
     for position in ordered:
         live = {e.id for e in effective_events(position.events)}
@@ -544,30 +636,51 @@ def projection_rows(
             if t.event_id in live and t.start < t.end and t.amount != 0
         ]
 
-    change: set[date] = {lower}
+    change: set[date] = {lower} if begin == lower else set()
     for position in ordered:
         timeline = timelines[position.id]
-        change.update(point.on for point in timeline.points if lower <= point.on <= upper)
+        change.update(point.on for point in timeline.points if begin <= point.on <= upper)
         if position.lots is not None:
-            change.update(d for d in position.lots.change_dates() if lower <= d <= upper)
+            change.update(d for d in position.lots.change_dates() if begin <= d <= upper)
         book = prices.get(position.symbol)
         if book is not None:
             change.update(
-                day for day in book.dates_between(lower, upper) if timeline.quantity_on(day) > 0
+                day for day in book.dates_between(begin, upper) if timeline.quantity_on(day) > 0
             )
         for t in transits[position.id]:
-            change.update(day for day in (t.start, t.end) if lower <= day <= upper)
+            change.update(day for day in (t.start, t.end) if begin <= day <= upper)
             if settle_after and t.end > upper:
                 change.add(t.end)
+    if not change:
+        return []
 
     def in_transit_on(position: PositionFacts, day: date) -> Decimal:
         return sum((t.amount for t in transits[position.id] if t.start <= day < t.end), Decimal(0))
+
+    # The positions of each symbol, in id order (one pass per symbol a day).
+    by_symbol: dict[str, list[PositionFacts]] = {}
+    for position in ordered:
+        by_symbol.setdefault(position.symbol, []).append(position)
 
     rows: list[Row] = []
     # Whether the position's row on the previous set counted for something:
     # shares, or cash in transit. Its next set then needs a zero row.
     held_before = dict.fromkeys(timelines, False)
-    symbols = sorted({p.symbol for p in ordered})
+    if begin > lower:
+        # The window starts after the period does: the set before it showed
+        # the positions holding shares the day before ``begin``, else the
+        # first carrying cash in transit (as the loop below decides).
+        before = begin - timedelta(days=1)
+        for members in by_symbol.values():
+            holding = [p for p in members if timelines[p.id].quantity_on(before) > 0]
+            if holding:
+                for p in holding:
+                    held_before[p.id] = True
+                continue
+            carrying = [p for p in members if in_transit_on(p, before) != 0]
+            if carrying and sum((in_transit_on(p, before) for p in carrying), Decimal(0)) != 0:
+                held_before[carrying[0].id] = True
+    symbols = sorted(by_symbol)
     for day in sorted(change):
         for symbol in symbols:
             # At most one row per (date, symbol): positions in one symbol never
@@ -577,9 +690,7 @@ def projection_rows(
             zero: list[tuple[bool, PositionFacts]] = []
             carriers: list[PositionFacts] = []
             transit = Decimal(0)
-            for position in ordered:
-                if position.symbol != symbol:
-                    continue
+            for position in by_symbol[symbol]:
                 state = timelines[position.id].state_on(day)
                 quantity = state.quantity if state is not None else Decimal(0)
                 own = in_transit_on(position, day)
@@ -589,7 +700,12 @@ def projection_rows(
                 if quantity > 0:
                     assert state is not None
                     book = prices.get(position.symbol)
-                    close, value = valued(quantity, book.on(day) if book is not None else None)
+                    close, value = valued(
+                        quantity,
+                        adjusted_close(
+                            book.on(day) if book is not None else None, splits[position.id], day
+                        ),
+                    )
                     held.append(
                         Row(
                             as_of=day,
@@ -656,9 +772,8 @@ def projection_rows(
                         price_as_of=None,
                     )
                 )
-            for position in ordered:
-                if position.symbol == symbol:
-                    held_before[position.id] = position.id in shown
+            for position in by_symbol[symbol]:
+                held_before[position.id] = position.id in shown
     rows.sort(key=lambda r: (r.as_of, r.position_id))
     return rows
 
@@ -827,6 +942,7 @@ __all__ = [
     "SET_QUANTITY",
     "SOURCE_FEED",
     "SOURCE_MANUAL",
+    "SPLIT",
     "SYMBOL_PATTERN",
     "Event",
     "MarketValueOutOfRange",
@@ -839,6 +955,7 @@ __all__ = [
     "Row",
     "Timeline",
     "Valued",
+    "adjusted_close",
     "answered_through",
     "check_money",
     "check_price",
@@ -856,8 +973,11 @@ __all__ = [
     "price_on",
     "projection_rows",
     "quantity_timeline",
+    "round_fraction",
     "settled",
     "source_rank",
+    "split_points",
+    "split_quantity",
     "stale",
     "unrealized_gain",
     "valued",

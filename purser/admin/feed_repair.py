@@ -29,7 +29,7 @@ import typer
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, aliased, selectinload
 
-from purser import audit, balances, events, transfers
+from purser import audit, balances, events, splits, transfers
 from purser import ledger as ledger_service
 from purser.admin.account_delete import _live_linked_transfers_touching, guarded_delete
 from purser.core import ledger as core
@@ -331,6 +331,13 @@ def execute_purge(
     for t in _merge_transfers_touching_doomed(session, account, doomed):
         transfers.unlink_transfer(session, transfer_id=t.id, token=None)
         transfers_unlinked += 1
+    # A split whose backing rows include doomed rows (decision 118) is removed
+    # the same way: its backing rows come back (the clone landing here rejoins
+    # the doomed set), so the replay re-lands them beside no split leg.
+    doomed_set = set(doomed)
+    for t in splits.splits_touching(session, account.id):
+        if {b.id for b in splits.current_backers(session, t)} & doomed_set:
+            splits.unsplit_transaction(session, tx_id=t.id, token=None)
     session.flush()
 
     doomed = _doomed_feed_tx_ids(session, account.id, since)  # re-query after unlinking
@@ -411,6 +418,10 @@ def execute_replay(
         session.commit()
     totals["fetches_replayed"] = len(fetch_ids)
     if fetch_ids:
+        # Replayed rows may predate an account's horizon (decision 123).
+        from purser import starting_balance
+
+        starting_balance.reseat_all(session)
         connection_id = session.execute(
             select(RawFetch.connection_id).where(RawFetch.id == fetch_ids[0])
         ).scalar_one()

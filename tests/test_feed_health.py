@@ -1,13 +1,14 @@
 """Feed freshness and bank errors (#480): one event per episode, nothing
 while healthy, recovery re-arms; the digest names what is open now."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 import pytest
 from sqlalchemy import Engine, select
 
 from tests import test_feed
+from tests.conftest import now
 from tests.test_feed import FeedHarness, account_of
 from tests.test_feed_v2 import CONN, as_v2
 
@@ -18,7 +19,7 @@ ACCOUNT = "Demo Checking"
 
 
 def _days_ago(days: int) -> int:
-    return int((datetime.now(UTC) - timedelta(days=days)).timestamp())
+    return int((now() - timedelta(days=days)).timestamp())
 
 
 def _payload(

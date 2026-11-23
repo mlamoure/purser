@@ -42,6 +42,27 @@ export const ACCOUNT_TYPE_LABELS: Record<string, string> = {
 export const accountTypeLabel = (type: string | null | undefined) =>
   labelFor(ACCOUNT_TYPE_LABELS, type);
 
+/** How the Dashboard groups accounts (#593), the way personal-finance apps
+ * do (Quicken's Banking / Investing / Property & Debt): everyday money first,
+ * then long-term assets, then what is owed against them. Order is display
+ * order. A type no group names falls into "Other" rather than vanishing. */
+export const ACCOUNT_GROUPS = [
+  { key: "banking", label: "Banking", types: ["checking", "savings", "cash"] },
+  { key: "credit_cards", label: "Credit cards", types: ["credit_card"] },
+  { key: "investments", label: "Investments", types: ["brokerage"] },
+  { key: "property", label: "Property", types: ["property"] },
+  { key: "loans", label: "Loans", types: ["loan"] },
+] as const;
+
+export type AccountGroupKey = (typeof ACCOUNT_GROUPS)[number]["key"] | "other";
+
+export const OTHER_ACCOUNT_GROUP = { key: "other", label: "Other" } as const;
+
+/** The group an account type belongs to. */
+export function accountGroupOf(type: string): AccountGroupKey {
+  return ACCOUNT_GROUPS.find((g) => (g.types as readonly string[]).includes(type))?.key ?? "other";
+}
+
 /** Rule kinds (DESIGN §3.1 rules.type). */
 export const RULE_TYPE_LABELS: Record<string, string> = {
   categorize: "Categorize",

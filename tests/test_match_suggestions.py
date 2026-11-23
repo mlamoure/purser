@@ -26,6 +26,7 @@ from hypothesis import strategies as st
 from sqlalchemy import Engine, text
 
 import purser.db
+from tests.conftest import today
 from tests.test_matching import TODAY, _expected, _imported
 from tests.test_mcp import LiveServer, _mcp_call
 
@@ -550,14 +551,13 @@ class TestTheSweep:
         from purser import db, ledger, suggestions
         from purser.core import ledger as core
 
-        today = date.today()
         with db.get_sessionmaker()() as session:
             expected = ledger.create_transfer(
                 session,
                 from_account_ref="assets.checking",
                 to_account_ref="assets.savings",
                 amount=Decimal("275.00"),
-                date=today,
+                date=today(),
                 description="Monthly savings",
                 requested_status=core.Status.EXPECTED,
                 origin=core.Origin.RULE,
@@ -571,7 +571,7 @@ class TestTheSweep:
             migrated_engine,
             "assets.checking",
             "-275.00",
-            today,
+            today(),
             "TRANSFER TO SAVINGS",
             "pending",
         )
@@ -594,7 +594,7 @@ class TestTheSweep:
         with migrated_engine.begin() as conn:
             conn.execute(
                 text("UPDATE transactions SET date = :d WHERE id = :t"),
-                {"d": today - timedelta(days=10), "t": leg},
+                {"d": today() - timedelta(days=10), "t": leg},
             )
         sweep()
         assert _only_card(client)["status"] == "open"

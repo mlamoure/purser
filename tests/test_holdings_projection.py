@@ -14,7 +14,7 @@ Fixtures are synthetic: TEST / ACME-style symbols, made-up prices.
 """
 
 import uuid
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -29,8 +29,7 @@ from purser.holdings import prices as price_service
 from purser.holdings import projection, service
 from purser.ledger import LedgerError
 from purser.models import Account, HoldingsSnapshot, Position, PositionEvent, SecurityPrice
-
-TODAY = datetime.now(UTC).date()
+from tests.conftest import today
 
 
 def _symbol(prefix: str = "T") -> str:
@@ -115,7 +114,7 @@ class TestRecordAndValidate:
             account_ref=str(account.id),
             symbol=symbol.lower(),
             quantity=Decimal("10"),
-            as_of=TODAY - timedelta(days=5),
+            as_of=today() - timedelta(days=5),
             token=None,
         )
         again = service.record_position(
@@ -123,13 +122,13 @@ class TestRecordAndValidate:
             account_ref=account.path,
             symbol=symbol,
             quantity=Decimal("12"),
-            as_of=TODAY,
+            as_of=today(),
             token=None,
         )
         assert first.created and not again.created
         assert first.position.id == again.position.id
         assert first.position.symbol == symbol  # normalized upper case
-        assert first.position.opened_on == TODAY - timedelta(days=5)
+        assert first.position.opened_on == today() - timedelta(days=5)
 
     def test_future_dated_events_are_refused(self, db_session: Session) -> None:
         """C5: the projection runs to today, so a future event is refused."""
@@ -140,7 +139,7 @@ class TestRecordAndValidate:
                 account_ref=str(account.id),
                 symbol=_symbol(),
                 quantity=Decimal("1"),
-                as_of=TODAY + timedelta(days=1),
+                as_of=today() + timedelta(days=1),
                 token=None,
             )
 
@@ -153,10 +152,10 @@ class TestRecordAndValidate:
             account_ref=str(account.id),
             symbol=_symbol(),
             quantity=Decimal("10"),
-            as_of=TODAY - timedelta(days=20),
+            as_of=today() - timedelta(days=20),
             token=None,
         )
-        sell_day = TODAY - timedelta(days=5)
+        sell_day = today() - timedelta(days=5)
         service.record_event(
             db_session,
             position_id=recorded.position.id,
@@ -171,7 +170,7 @@ class TestRecordAndValidate:
                 db_session,
                 position_id=recorded.position.id,
                 kind="set_quantity",
-                occurred_on=TODAY - timedelta(days=10),
+                occurred_on=today() - timedelta(days=10),
                 quantity=Decimal("3"),
                 token=None,
             )
@@ -183,18 +182,18 @@ class TestRecordAndValidate:
             account_ref=str(account.id),
             symbol=_symbol(),
             quantity=Decimal("1"),
-            as_of=TODAY,
+            as_of=today(),
             token=None,
         )
         service.record_event(
             db_session,
             position_id=recorded.position.id,
             kind="buy",
-            occurred_on=TODAY - timedelta(days=30),
+            occurred_on=today() - timedelta(days=30),
             quantity=Decimal("1"),
             token=None,
         )
-        assert recorded.position.opened_on == TODAY - timedelta(days=30)
+        assert recorded.position.opened_on == today() - timedelta(days=30)
 
     def test_shape_rules(self, db_session: Session) -> None:
         account = _brokerage(db_session)
@@ -203,7 +202,7 @@ class TestRecordAndValidate:
             account_ref=str(account.id),
             symbol=_symbol(),
             quantity=Decimal("1"),
-            as_of=TODAY,
+            as_of=today(),
             token=None,
         )
         pid = recorded.position.id
@@ -215,13 +214,14 @@ class TestRecordAndValidate:
                 {"kind": "sell", "quantity": Decimal("0.0000001"), "proceeds_to": "none"},
                 "6 decimal places",
             ),
-            ({"kind": "split"}, "kind must be one of"),
+            ({"kind": "dividend"}, "kind must be one of"),
+            ({"kind": "split"}, "ratio"),  # #624: a split takes a ratio (record_split)
         ]
         for overrides, message in cases:
             args = {"kind": "buy", "quantity": Decimal("1"), **overrides}
             with pytest.raises(LedgerError, match=message):
                 service.record_event(
-                    db_session, position_id=pid, occurred_on=TODAY, token=None, **args
+                    db_session, position_id=pid, occurred_on=today(), token=None, **args
                 )
 
     def test_positions_need_a_manual_brokerage_account(self, db_session: Session) -> None:
@@ -260,7 +260,7 @@ class TestRecordAndValidate:
             account_ref=str(account.id),
             symbol=_symbol(),
             quantity=Decimal("1"),
-            as_of=TODAY,
+            as_of=today(),
             token=None,
         )
         db_session.commit()
@@ -279,7 +279,7 @@ class TestReplace:
 
     def _day(self, session: Session) -> tuple[Account, Position, PositionEvent, PositionEvent]:
         account = _brokerage(session)
-        day = TODAY - timedelta(days=5)
+        day = today() - timedelta(days=5)
         opening = service.record_position(
             session,
             account_ref=str(account.id),
@@ -372,13 +372,13 @@ class TestReverseAndClose:
     def test_reversal_restores_the_history_and_the_rows(self, db_session: Session) -> None:
         account = _brokerage(db_session)
         symbol = _symbol()
-        _price(db_session, symbol, TODAY - timedelta(days=10), "10")
+        _price(db_session, symbol, today() - timedelta(days=10), "10")
         recorded = service.record_position(
             db_session,
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("5"),
-            as_of=TODAY - timedelta(days=10),
+            as_of=today() - timedelta(days=10),
             token=None,
         )
         before = _manual_rows(db_session, account.id)
@@ -386,7 +386,7 @@ class TestReverseAndClose:
             db_session,
             position_id=recorded.position.id,
             kind="buy",
-            occurred_on=TODAY - timedelta(days=4),
+            occurred_on=today() - timedelta(days=4),
             quantity=Decimal("3"),
             price=Decimal("11"),
             token=None,
@@ -406,14 +406,14 @@ class TestReverseAndClose:
             db_session,
             account_ref=str(account.id),
             symbol=_symbol(),
-            opened_on=TODAY - timedelta(days=9),
+            opened_on=today() - timedelta(days=9),
             token=None,
         )
         buy = service.record_event(
             db_session,
             position_id=position.id,
             kind="buy",
-            occurred_on=TODAY - timedelta(days=9),
+            occurred_on=today() - timedelta(days=9),
             quantity=Decimal("4"),
             token=None,
         )
@@ -422,7 +422,7 @@ class TestReverseAndClose:
             position_id=position.id,
             kind="sell",
             proceeds_to="none",  # share mechanics only (cash: decision 103)
-            occurred_on=TODAY - timedelta(days=2),
+            occurred_on=today() - timedelta(days=2),
             quantity=Decimal("1"),
             token=None,
         )
@@ -436,7 +436,7 @@ class TestReverseAndClose:
             account_ref=str(account.id),
             symbol=_symbol(),
             quantity=Decimal("2"),
-            as_of=TODAY - timedelta(days=3),
+            as_of=today() - timedelta(days=3),
             token=None,
         )
         with pytest.raises(LedgerError, match="still holds 2"):
@@ -448,7 +448,7 @@ class TestReverseAndClose:
             position_id=recorded.position.id,
             kind="sell",
             proceeds_to="none",  # share mechanics only (cash: decision 103)
-            occurred_on=TODAY,
+            occurred_on=today(),
             quantity=Decimal("2"),
             token=None,
         )
@@ -461,7 +461,7 @@ class TestReverseAndClose:
                 db_session,
                 position_id=closed.id,
                 kind="buy",
-                occurred_on=TODAY,
+                occurred_on=today(),
                 quantity=Decimal("1"),
                 token=None,
             )
@@ -479,13 +479,13 @@ class TestProjection:
         account = _brokerage(db_session)
         symbol = _symbol()
         for n, close in ((12, "10"), (8, "12"), (2, "15")):
-            _price(db_session, symbol, TODAY - timedelta(days=n), close)
+            _price(db_session, symbol, today() - timedelta(days=n), close)
         recorded = service.record_position(
             db_session,
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("3"),
-            as_of=TODAY - timedelta(days=10),
+            as_of=today() - timedelta(days=10),
             cost_basis=Decimal("25.50"),
             token=None,
         )
@@ -494,7 +494,7 @@ class TestProjection:
             position_id=recorded.position.id,
             kind="sell",
             proceeds_to="none",  # share mechanics only (cash: decision 103)
-            occurred_on=TODAY - timedelta(days=5),
+            occurred_on=today() - timedelta(days=5),
             quantity=Decimal("3"),
             token=None,
         )
@@ -502,26 +502,34 @@ class TestProjection:
         pid = recorded.position.id
         assert rows == [
             (
-                TODAY - timedelta(days=10),
+                today() - timedelta(days=10),
                 pid,
                 Decimal("3.000000"),
                 Decimal("25.5000"),
                 Decimal("30.0000"),
                 Decimal("10.000000"),
-                TODAY - timedelta(days=12),
+                today() - timedelta(days=12),
             ),
             (
-                TODAY - timedelta(days=8),
+                today() - timedelta(days=8),
                 pid,
                 Decimal("3.000000"),
                 Decimal("25.5000"),
                 Decimal("36.0000"),
                 Decimal("12.000000"),
-                TODAY - timedelta(days=8),
+                today() - timedelta(days=8),
             ),
             # Sold out: the tombstone, then nothing — the newer close on day -2
             # concerns no held position.
-            (TODAY - timedelta(days=5), pid, Decimal("0"), Decimal("0"), Decimal("0"), None, None),
+            (
+                today() - timedelta(days=5),
+                pid,
+                Decimal("0"),
+                Decimal("0"),
+                Decimal("0"),
+                None,
+                None,
+            ),
         ]
 
     def test_no_price_means_null_market_value_never_zero(self, db_session: Session) -> None:
@@ -531,7 +539,7 @@ class TestProjection:
             account_ref=str(account.id),
             symbol=_symbol(),
             quantity=Decimal("7"),
-            as_of=TODAY,
+            as_of=today(),
             token=None,
         )
         (row,) = _manual_rows(db_session, account.id)
@@ -542,14 +550,14 @@ class TestProjection:
         (market value / quantity), computed on read and never stored."""
         symbol = _symbol()
         other = _brokerage(db_session, manual=False)
-        _feed_snapshot(db_session, other.id, TODAY - timedelta(days=1), symbol, "4", "50.00")
+        _feed_snapshot(db_session, other.id, today() - timedelta(days=1), symbol, "4", "50.00")
         account = _brokerage(db_session)
         service.record_position(
             db_session,
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("2"),
-            as_of=TODAY,
+            as_of=today(),
             token=None,
         )
         (row,) = _manual_rows(db_session, account.id)
@@ -567,36 +575,36 @@ class TestProjection:
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("1"),
-            as_of=TODAY - timedelta(days=6),
+            as_of=today() - timedelta(days=6),
             token=None,
         )
         price_service.record_price(
             db_session,
             symbol=symbol,
-            price_date=TODAY - timedelta(days=6),
+            price_date=today() - timedelta(days=6),
             close=Decimal("100"),
             token=None,
         )
-        _price(db_session, symbol, TODAY - timedelta(days=1), "90")
-        _price(db_session, symbol, TODAY - timedelta(days=6), "99")  # loses the same-day tie
+        _price(db_session, symbol, today() - timedelta(days=1), "90")
+        _price(db_session, symbol, today() - timedelta(days=6), "99")  # loses the same-day tie
         account = projection.lock_account(db_session, account.id)
         projection.project_account(db_session, account)
         rows = _manual_rows(db_session, account.id)
         assert [(r[0], r[5]) for r in rows] == [
-            (TODAY - timedelta(days=6), Decimal("100")),
-            (TODAY - timedelta(days=1), Decimal("90")),
+            (today() - timedelta(days=6), Decimal("100")),
+            (today() - timedelta(days=1), Decimal("90")),
         ]
 
     def test_a_second_pass_changes_nothing_and_marks_nothing(self, db_session: Session) -> None:
         account = _brokerage(db_session)
         symbol = _symbol()
-        _price(db_session, symbol, TODAY - timedelta(days=3), "5")
+        _price(db_session, symbol, today() - timedelta(days=3), "5")
         service.record_position(
             db_session,
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("1"),
-            as_of=TODAY - timedelta(days=3),
+            as_of=today() - timedelta(days=3),
             token=None,
         )
         db_session.commit()
@@ -613,13 +621,13 @@ class TestProjection:
     def test_a_backdated_write_marks_net_worth_from_its_date(self, db_session: Session) -> None:
         account = _brokerage(db_session)
         symbol = _symbol()
-        _price(db_session, symbol, TODAY - timedelta(days=40), "5")
+        _price(db_session, symbol, today() - timedelta(days=40), "5")
         recorded = service.record_position(
             db_session,
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("1"),
-            as_of=TODAY - timedelta(days=2),
+            as_of=today() - timedelta(days=2),
             token=None,
         )
         db_session.execute(text("UPDATE balance_watermark SET networth_dirty_from = NULL"))
@@ -627,14 +635,14 @@ class TestProjection:
             db_session,
             position_id=recorded.position.id,
             kind="set_quantity",
-            occurred_on=TODAY - timedelta(days=30),
+            occurred_on=today() - timedelta(days=30),
             quantity=Decimal("4"),
             token=None,
         )
         cursor = db_session.execute(
             text("SELECT networth_dirty_from FROM balance_watermark")
         ).scalar()
-        assert cursor == TODAY - timedelta(days=30)
+        assert cursor == today() - timedelta(days=30)
         db_session.rollback()
 
 
@@ -644,8 +652,8 @@ class TestSwitchingSource:
     ) -> None:
         symbol = _symbol()
         account = _brokerage(db_session, manual=False)
-        last_feed = TODAY - timedelta(days=4)
-        _feed_snapshot(db_session, account.id, TODAY - timedelta(days=9), symbol, "3", "30.00")
+        last_feed = today() - timedelta(days=4)
+        _feed_snapshot(db_session, account.id, today() - timedelta(days=9), symbol, "3", "30.00")
         _feed_snapshot(db_session, account.id, last_feed, symbol, "3", "33.00")
         from purser import ledger
 
@@ -657,7 +665,7 @@ class TestSwitchingSource:
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("5"),
-            as_of=TODAY - timedelta(days=20),  # backdated into feed territory
+            as_of=today() - timedelta(days=20),  # backdated into feed territory
             token=None,
         )
         rows = _manual_rows(db_session, account.id)
@@ -668,7 +676,7 @@ class TestSwitchingSource:
             )
         ).all()
         assert sorted(feed) == [
-            (TODAY - timedelta(days=9), Decimal("30.0000")),
+            (today() - timedelta(days=9), Decimal("30.0000")),
             (last_feed, Decimal("33.0000")),
         ]
         # The first manual set is valued with the feed-implied close (33/3).
@@ -688,19 +696,19 @@ class TestSwitchingSource:
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("2"),
-            as_of=TODAY - timedelta(days=3),
+            as_of=today() - timedelta(days=3),
             token=None,
         )
         service.record_event(
             db_session,
             position_id=recorded.position.id,
             kind="buy",
-            occurred_on=TODAY,
+            occurred_on=today(),
             quantity=Decimal("1"),
             token=None,
         )
         before = _manual_rows(db_session, account.id)
-        assert {r[0] for r in before} == {TODAY - timedelta(days=3), TODAY}
+        assert {r[0] for r in before} == {today() - timedelta(days=3), today()}
         _mapped(db_session, account)
         ledger.update_account(
             db_session, account_id=account.id, holdings_source="feed", actor_token_id=None
@@ -708,8 +716,9 @@ class TestSwitchingSource:
         assert _manual_rows(db_session, account.id) == before
         switched_at = account.holdings_source_changed_at
         assert switched_at is not None
-        # The suite can cross midnight UTC after TODAY was taken (#397).
-        assert switched_at.date() in {TODAY, TODAY + timedelta(days=1)}
+        # The database stamps the switch with its own now(), a live instant:
+        # a test that itself straddles midnight UTC sees it on the next day.
+        assert switched_at.date() in {today(), today() + timedelta(days=1)}
         assert account.manual_period_open is True
         # Both switches ran in this one transaction (one timestamp): pick the
         # manual -> feed row by its content, not by order.
@@ -729,7 +738,7 @@ class TestSwitchingSource:
                 db_session,
                 position_id=recorded.position.id,
                 kind="buy",
-                occurred_on=TODAY,
+                occurred_on=today(),
                 quantity=Decimal("1"),
                 token=None,
             )
@@ -758,29 +767,29 @@ class TestSwitchingSource:
 
         account = _mapped(db_session, _brokerage(db_session))
         symbol = _symbol()
-        _price(db_session, symbol, TODAY - timedelta(days=5), "50")
+        _price(db_session, symbol, today() - timedelta(days=5), "50")
         recorded = service.record_position(
             db_session,
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("4"),
-            as_of=TODAY - timedelta(days=5),
+            as_of=today() - timedelta(days=5),
             token=None,
         )
         ledger.update_account(
             db_session, account_id=account.id, holdings_source="feed", actor_token_id=None
         )
-        assert networth.holdings_addends(db_session, [account.id], as_of=TODAY)[account.id][0] == (
-            Decimal("200")
-        )  # the switch alone changes nothing
+        assert networth.holdings_addends(db_session, [account.id], as_of=today())[account.id][
+            0
+        ] == (Decimal("200"))  # the switch alone changes nothing
         deleted, ended = projection.end_manual_period(
-            db_session, account, TODAY, reported=set(), raw_fetch_id=None
+            db_session, account, today(), reported=set(), raw_fetch_id=None
         )
         assert (deleted, ended) == (0, 1)
         zero = db_session.execute(
             select(
                 HoldingsSnapshot.source, HoldingsSnapshot.quantity, HoldingsSnapshot.position_id
-            ).where(HoldingsSnapshot.account_id == account.id, HoldingsSnapshot.as_of == TODAY)
+            ).where(HoldingsSnapshot.account_id == account.id, HoldingsSnapshot.as_of == today())
         ).all()
         assert [tuple(r) for r in zero] == [("manual", Decimal("0.000000"), recorded.position.id)]
         assert projection.feed_floor(db_session, account.id) is None
@@ -791,12 +800,12 @@ class TestSwitchingSource:
             )
         ).scalars()
         assert audit.before_after["after"]["tombstones_written"] == 1
-        for day in (TODAY, TODAY + timedelta(days=90)):
+        for day in (today(), today() + timedelta(days=90)):
             assert networth.holdings_addends(db_session, [account.id], as_of=day) == {}
             assert networth.latest_holdings(db_session, account.id, as_of=day) == []
-        assert networth.holdings_addends(db_session, [account.id], as_of=TODAY - timedelta(days=1))[
-            account.id
-        ][0] == Decimal("200")
+        assert networth.holdings_addends(
+            db_session, [account.id], as_of=today() - timedelta(days=1)
+        )[account.id][0] == Decimal("200")
 
     def test_a_sold_out_position_stays_sold_out_across_the_switch(
         self, db_session: Session
@@ -805,13 +814,13 @@ class TestSwitchingSource:
 
         account = _brokerage(db_session)
         symbol = _symbol()
-        _price(db_session, symbol, TODAY - timedelta(days=5), "10")
+        _price(db_session, symbol, today() - timedelta(days=5), "10")
         recorded = service.record_position(
             db_session,
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("10"),
-            as_of=TODAY - timedelta(days=5),
+            as_of=today() - timedelta(days=5),
             token=None,
         )
         service.record_event(
@@ -819,16 +828,16 @@ class TestSwitchingSource:
             position_id=recorded.position.id,
             kind="sell",
             proceeds_to="none",  # share mechanics only (cash: decision 103)
-            occurred_on=TODAY,
+            occurred_on=today(),
             quantity=Decimal("10"),
             token=None,
         )
-        assert networth.holdings_addends(db_session, [account.id], as_of=TODAY) == {}
+        assert networth.holdings_addends(db_session, [account.id], as_of=today()) == {}
         _mapped(db_session, account)
         ledger.update_account(
             db_session, account_id=account.id, holdings_source="feed", actor_token_id=None
         )
-        assert networth.holdings_addends(db_session, [account.id], as_of=TODAY) == {}
+        assert networth.holdings_addends(db_session, [account.id], as_of=today()) == {}
         assert networth.latest_holdings(db_session, account.id) == []
 
     def test_only_brokerage_accounts_switch(self, db_session: Session) -> None:
@@ -888,7 +897,7 @@ def _build(session: Session, spec: dict) -> Account:
     if spec["feed"] is not None:
         # The account's own feed history: the projection must start after it.
         _feed_snapshot(
-            session, account.id, TODAY - timedelta(days=spec["feed"]), symbols[0], "1", "10.00"
+            session, account.id, today() - timedelta(days=spec["feed"]), symbols[0], "1", "10.00"
         )
     from purser import ledger
 
@@ -899,7 +908,7 @@ def _build(session: Session, spec: dict) -> Account:
         session.merge(
             SecurityPrice(
                 symbol=symbols[index],
-                price_date=TODAY - timedelta(days=days_ago),
+                price_date=today() - timedelta(days=days_ago),
                 source=source,
                 close=close,
             )
@@ -910,7 +919,7 @@ def _build(session: Session, spec: dict) -> Account:
             session,
             account_ref=str(account.id),
             symbol=s,
-            opened_on=TODAY - timedelta(days=30),
+            opened_on=today() - timedelta(days=30),
             token=None,
         )
         for s in symbols
@@ -922,7 +931,7 @@ def _build(session: Session, spec: dict) -> Account:
                     session,
                     position_id=positions[index].id,
                     kind=kind,
-                    occurred_on=TODAY - timedelta(days=days_ago),
+                    occurred_on=today() - timedelta(days=days_ago),
                     quantity=quantity,
                     token=None,
                     proceeds_to="none" if kind == "sell" else None,
@@ -996,7 +1005,7 @@ def test_projection_is_regenerable_complete_and_respects_the_feed(
                 if timeline.quantity_on(day) > 0:
                     assert on_day[pid][2] == timeline.quantity_on(day)
         if dates:
-            for offset in range((TODAY - dates[0]).days + 1):
+            for offset in range((today() - dates[0]).days + 1):
                 day = dates[0] + timedelta(days=offset)
                 newest = max(d for d in dates if d <= day)
                 latest = {row[1]: row[2] for row in first if row[0] == newest}
@@ -1017,13 +1026,13 @@ def test_account_purge_removes_positions_events_and_manual_rows(
             account_ref=str(account.id),
             symbol=_symbol(),
             quantity=Decimal("2"),
-            as_of=TODAY,
+            as_of=today(),
             token=None,
         )
         price_service.record_price(
             session,
             symbol=recorded.position.symbol,
-            price_date=TODAY,
+            price_date=today(),
             close=Decimal("3"),
             token=None,
         )
@@ -1062,7 +1071,7 @@ class TestConcurrentWrites:
                 account_ref=str(account.id),
                 symbol=symbol,
                 quantity=Decimal("10"),
-                as_of=TODAY - timedelta(days=5),
+                as_of=today() - timedelta(days=5),
                 token=None,
             )
             sell = service.record_event(
@@ -1070,7 +1079,7 @@ class TestConcurrentWrites:
                 position_id=recorded.position.id,
                 kind="sell",
                 proceeds_to="none",  # share mechanics only (cash: decision 103)
-                occurred_on=TODAY - timedelta(days=2),
+                occurred_on=today() - timedelta(days=2),
                 quantity=Decimal("10"),
                 token=None,
             )
@@ -1140,7 +1149,7 @@ class TestConcurrentWrites:
                 s,
                 position_id=position_id,
                 kind="buy",
-                occurred_on=TODAY,
+                occurred_on=today(),
                 quantity=Decimal("7"),
                 token=None,
             ),
@@ -1169,7 +1178,7 @@ class TestConcurrentWrites:
                 s,
                 position_id=position_id,
                 kind="buy",
-                occurred_on=TODAY - timedelta(days=20),
+                occurred_on=today() - timedelta(days=20),
                 quantity=Decimal("1"),
                 token=None,
             ),
@@ -1177,7 +1186,7 @@ class TestConcurrentWrites:
                 s,
                 position_id=position_id,
                 kind="buy",
-                occurred_on=TODAY - timedelta(days=10),
+                occurred_on=today() - timedelta(days=10),
                 quantity=Decimal("1"),
                 token=None,
             ),
@@ -1186,7 +1195,7 @@ class TestConcurrentWrites:
         with db.get_sessionmaker()() as session:
             position = session.get(Position, position_id)
             assert position is not None
-            assert position.opened_on == TODAY - timedelta(days=20)
+            assert position.opened_on == today() - timedelta(days=20)
 
 
 class TestNoOverlap:
@@ -1199,13 +1208,13 @@ class TestNoOverlap:
         """ACME held 10 from T-20, sold out on T-10, closed."""
         account = _brokerage(session)
         symbol = _symbol()
-        _price(session, symbol, TODAY - timedelta(days=30), "10")
+        _price(session, symbol, today() - timedelta(days=30), "10")
         first = service.record_position(
             session,
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("10"),
-            as_of=TODAY - timedelta(days=20),
+            as_of=today() - timedelta(days=20),
             token=None,
         )
         service.record_event(
@@ -1213,7 +1222,7 @@ class TestNoOverlap:
             position_id=first.position.id,
             kind="sell",
             proceeds_to="none",  # share mechanics only (cash: decision 103)
-            occurred_on=TODAY - timedelta(days=10),
+            occurred_on=today() - timedelta(days=10),
             quantity=Decimal("10"),
             token=None,
         )
@@ -1226,13 +1235,13 @@ class TestNoOverlap:
         recorded on its real date, does not block a later position."""
         account = _brokerage(db_session)
         symbol = _symbol()
-        _price(db_session, symbol, TODAY - timedelta(days=60), "10")
+        _price(db_session, symbol, today() - timedelta(days=60), "10")
         first = service.record_position(
             db_session,
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("10"),
-            as_of=TODAY - timedelta(days=40),
+            as_of=today() - timedelta(days=40),
             token=None,
         )
         wrong = service.record_event(
@@ -1240,7 +1249,7 @@ class TestNoOverlap:
             position_id=first.position.id,
             kind="sell",
             proceeds_to="none",  # share mechanics only (cash: decision 103)
-            occurred_on=TODAY,
+            occurred_on=today(),
             quantity=Decimal("10"),
             token=None,
         )
@@ -1250,7 +1259,7 @@ class TestNoOverlap:
             position_id=first.position.id,
             kind="sell",
             proceeds_to="none",  # share mechanics only (cash: decision 103)
-            occurred_on=TODAY - timedelta(days=30),
+            occurred_on=today() - timedelta(days=30),
             quantity=Decimal("10"),
             token=None,
         )
@@ -1260,7 +1269,7 @@ class TestNoOverlap:
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("5"),
-            as_of=TODAY - timedelta(days=20),
+            as_of=today() - timedelta(days=20),
             token=None,
         )
         assert again.created
@@ -1270,7 +1279,7 @@ class TestNoOverlap:
                 db_session,
                 position_id=again.position.id,
                 kind="set_quantity",
-                occurred_on=TODAY - timedelta(days=30),
+                occurred_on=today() - timedelta(days=30),
                 quantity=Decimal("5"),
                 token=None,
             )
@@ -1282,7 +1291,7 @@ class TestNoOverlap:
         anything, so the real holding may start on any date."""
         account = _brokerage(db_session)
         symbol = _symbol()
-        wrong_day = TODAY - timedelta(days=100)
+        wrong_day = today() - timedelta(days=100)
         mistaken = service.record_position(
             db_session,
             account_ref=str(account.id),
@@ -1300,10 +1309,10 @@ class TestNoOverlap:
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("7"),
-            as_of=TODAY - timedelta(days=200),
+            as_of=today() - timedelta(days=200),
             token=None,
         )
-        assert real.created and real.position.opened_on == TODAY - timedelta(days=200)
+        assert real.created and real.position.opened_on == today() - timedelta(days=200)
 
     @pytest.mark.parametrize("days_ago", [15, 10])
     def test_a_new_position_cannot_start_inside_a_closed_ones_history(
@@ -1316,7 +1325,7 @@ class TestNoOverlap:
                 account_ref=str(account.id),
                 symbol=symbol,
                 quantity=Decimal("10"),
-                as_of=TODAY - timedelta(days=days_ago),
+                as_of=today() - timedelta(days=days_ago),
                 token=None,
             )
 
@@ -1329,10 +1338,10 @@ class TestNoOverlap:
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("4"),
-            as_of=TODAY - timedelta(days=9),
+            as_of=today() - timedelta(days=9),
             token=None,
         )
-        on = TODAY - timedelta(days=5)
+        on = today() - timedelta(days=5)
         assert networth.holdings_addends(db_session, [account.id], as_of=on)[account.id][0] == (
             Decimal("40")
         )
@@ -1344,7 +1353,7 @@ class TestNoOverlap:
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("4"),
-            as_of=TODAY - timedelta(days=5),
+            as_of=today() - timedelta(days=5),
             token=None,
         )
         with pytest.raises(service.PositionConflict, match="closed position"):
@@ -1352,7 +1361,7 @@ class TestNoOverlap:
                 db_session,
                 position_id=second.position.id,
                 kind="set_quantity",
-                occurred_on=TODAY - timedelta(days=12),
+                occurred_on=today() - timedelta(days=12),
                 quantity=Decimal("4"),
                 token=None,
             )
@@ -1369,13 +1378,13 @@ class TestOverlapBothWays:
         re-recorded at T-10, closed."""
         account = _brokerage(session)
         symbol = _symbol()
-        _price(session, symbol, TODAY - timedelta(days=50), "10")
+        _price(session, symbol, today() - timedelta(days=50), "10")
         first = service.record_position(
             session,
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("10"),
-            as_of=TODAY - timedelta(days=40),
+            as_of=today() - timedelta(days=40),
             token=None,
         )
         for days in (30, 10):
@@ -1383,7 +1392,7 @@ class TestOverlapBothWays:
                 session,
                 position_id=first.position.id,
                 kind="set_quantity",
-                occurred_on=TODAY - timedelta(days=days),
+                occurred_on=today() - timedelta(days=days),
                 quantity=Decimal("0"),
                 token=None,
             )
@@ -1401,12 +1410,12 @@ class TestOverlapBothWays:
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("3"),
-            as_of=TODAY - timedelta(days=20),
+            as_of=today() - timedelta(days=20),
             token=None,
         )
         assert again.created
         for days in (20, 10, 0):
-            on = TODAY - timedelta(days=days)
+            on = today() - timedelta(days=days)
             assert networth.holdings_addends(db_session, [account.id], as_of=on)[account.id][
                 0
             ] == Decimal("30")
@@ -1416,7 +1425,7 @@ class TestOverlapBothWays:
                 db_session,
                 position_id=again.position.id,
                 kind="set_quantity",
-                occurred_on=TODAY - timedelta(days=30),
+                occurred_on=today() - timedelta(days=30),
                 quantity=Decimal("3"),
                 token=None,
             )
@@ -1432,7 +1441,7 @@ class TestOverlapBothWays:
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("0"),
-            as_of=TODAY - timedelta(days=60),
+            as_of=today() - timedelta(days=60),
             token=None,
         )
         with pytest.raises(service.PositionConflict, match="closed position"):
@@ -1440,7 +1449,7 @@ class TestOverlapBothWays:
                 db_session,
                 position_id=empty.position.id,
                 kind="buy",
-                occurred_on=TODAY - timedelta(days=35),
+                occurred_on=today() - timedelta(days=35),
                 quantity=Decimal("2"),
                 token=None,
             )
@@ -1458,7 +1467,7 @@ class TestOverlapBothWays:
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("2"),
-            as_of=TODAY - timedelta(days=10),
+            as_of=today() - timedelta(days=10),
             token=None,
         )
         service.record_event(
@@ -1466,7 +1475,7 @@ class TestOverlapBothWays:
             position_id=later.position.id,
             kind="sell",
             proceeds_to="none",  # share mechanics only (cash: decision 103)
-            occurred_on=TODAY - timedelta(days=5),
+            occurred_on=today() - timedelta(days=5),
             quantity=Decimal("2"),
             token=None,
         )
@@ -1476,14 +1485,14 @@ class TestOverlapBothWays:
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("0"),
-            as_of=TODAY - timedelta(days=25),
+            as_of=today() - timedelta(days=25),
             token=None,
         )
         sold = service.record_event(
             db_session,
             position_id=earlier.position.id,
             kind="set_quantity",
-            occurred_on=TODAY - timedelta(days=15),
+            occurred_on=today() - timedelta(days=15),
             quantity=Decimal("0"),
             token=None,
         )
@@ -1491,7 +1500,7 @@ class TestOverlapBothWays:
             db_session,
             position_id=earlier.position.id,
             kind="set_quantity",
-            occurred_on=TODAY - timedelta(days=20),
+            occurred_on=today() - timedelta(days=20),
             quantity=Decimal("3"),
             token=None,
         )
@@ -1511,7 +1520,7 @@ class TestOverlapBothWays:
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("10"),
-            as_of=TODAY - timedelta(days=100),
+            as_of=today() - timedelta(days=100),
             token=None,
         )
         service.reverse_event(db_session, event_id=mistaken.event.id, token=None)
@@ -1523,7 +1532,7 @@ class TestOverlapBothWays:
             account_ref=str(account.id),
             symbol=symbol,
             quantity=Decimal("5"),
-            as_of=TODAY - timedelta(days=50),
+            as_of=today() - timedelta(days=50),
             token=None,
         )
         service.record_event(
@@ -1531,7 +1540,7 @@ class TestOverlapBothWays:
             position_id=held.position.id,
             kind="sell",
             proceeds_to="none",  # share mechanics only (cash: decision 103)
-            occurred_on=TODAY - timedelta(days=20),
+            occurred_on=today() - timedelta(days=20),
             quantity=Decimal("5"),
             token=None,
         )
@@ -1546,7 +1555,7 @@ class TestOverlapBothWays:
                 db_session,
                 position_id=mistaken.position.id,
                 kind="set_quantity",
-                occurred_on=TODAY - timedelta(days=30),
+                occurred_on=today() - timedelta(days=30),
                 quantity=Decimal("4"),
                 token=None,
             )
@@ -1555,7 +1564,7 @@ class TestOverlapBothWays:
             db_session,
             position_id=mistaken.position.id,
             kind="set_quantity",
-            occurred_on=TODAY - timedelta(days=19),
+            occurred_on=today() - timedelta(days=19),
             quantity=Decimal("4"),
             token=None,
         )
@@ -1573,7 +1582,7 @@ def test_timeline_loads_leave_the_encrypted_notes_unread(db_session: Session) ->
         account_ref=str(account.id),
         symbol=_symbol(),
         quantity=Decimal("2"),
-        as_of=TODAY,
+        as_of=today(),
         note="opening count",
         source_note="broker page",
         token=None,
@@ -1582,6 +1591,20 @@ def test_timeline_loads_leave_the_encrypted_notes_unread(db_session: Session) ->
     rows = projection.position_events(db_session, [recorded.position.id])[recorded.position.id]
     unloaded = inspect(rows[0]).unloaded
     assert {"note", "source_note"} <= unloaded
+    # Every column a timeline reads is loaded with the rows: a missing one
+    # costs a SELECT per event when event_fact reads it (#404).
+    assert not unloaded & {
+        "occurred_on",
+        "created_at",
+        "kind",
+        "quantity",
+        "price",
+        "fees",
+        "cost_basis",
+        "reverses_id",
+        "replaces_id",
+        "transaction_id",
+    }
     assert rows[0].note == "opening count"  # still there on demand
 
 
@@ -1596,7 +1619,7 @@ class TestEarlierManualPeriods:
 
         account = _mapped(session, _brokerage(session))
         symbol = _symbol()
-        d1, feed_from, feed_to = (TODAY - timedelta(days=n) for n in (20, 12, 8))
+        d1, feed_from, feed_to = (today() - timedelta(days=n) for n in (20, 12, 8))
         _price(session, symbol, d1, "50")
         recorded = service.record_position(
             session,
@@ -1647,13 +1670,13 @@ class TestEarlierManualPeriods:
         price_service.record_price(
             db_session,
             symbol=symbol,
-            price_date=TODAY - timedelta(days=18),
+            price_date=today() - timedelta(days=18),
             close=Decimal("60"),
             token=None,
         )
         manual = self._values(db_session, account, "manual")
         first_period = {d: v for d, v in manual.items() if d < feed_from}
-        assert first_period[TODAY - timedelta(days=18)] == (
+        assert first_period[today() - timedelta(days=18)] == (
             Decimal("4.000000"),
             Decimal("240.0000"),
         )
@@ -1672,13 +1695,13 @@ class TestEarlierManualPeriods:
             db_session,
             position_id=position.id,
             kind="sell",
-            occurred_on=TODAY - timedelta(days=17),
+            occurred_on=today() - timedelta(days=17),
             quantity=Decimal("1"),
             price=Decimal("50"),
             token=None,
         )
         manual = self._values(db_session, account, "manual")
-        assert manual[TODAY - timedelta(days=17)] == (Decimal("3.000000"), Decimal("150.0000"))
+        assert manual[today() - timedelta(days=17)] == (Decimal("3.000000"), Decimal("150.0000"))
         assert not any(feed_from <= d <= feed_to for d in manual)
         assert manual[feed_to + timedelta(days=1)][0] == Decimal("3.000000")
 
@@ -1695,7 +1718,7 @@ class TestValueOutOfRangeLogging:
 
         account = _brokerage(db_session)
         symbol = _symbol()
-        start = TODAY - timedelta(days=3)
+        start = today() - timedelta(days=3)
         _price(db_session, symbol, start, "10000")
         with capture_logs() as logs:
             # The module logger caches its processors on first use
@@ -1713,8 +1736,8 @@ class TestValueOutOfRangeLogging:
                 token=None,
             )
             for days in (2, 1):
-                _price(db_session, symbol, TODAY - timedelta(days=days), "10001")
-                projection.project_account(db_session, account, today=TODAY)
+                _price(db_session, symbol, today() - timedelta(days=days), "10001")
+                projection.project_account(db_session, account, today=today())
         logged = [e for e in logs if e["event"] == "holdings.value_out_of_range"]
         assert len(logged) == 1
         assert logged[0]["first"] == start.isoformat()

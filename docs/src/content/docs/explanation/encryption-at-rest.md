@@ -112,8 +112,16 @@ the database wrapped (encrypted) by `PURSER_ENCRYPTION_KEY`. Because they are
 random rather than derived from your key, rotating your key only rewraps them:
 every index, content hash and payee reference stays byte-identical.
 
-Substring search in descriptions works by decrypting the candidate rows in the
-application, after the database has narrowed them by account, date and status.
+Searching descriptions needs the decrypted text, so the Purser server keeps a
+decrypted copy of each transaction's searchable text (description, memos and
+payee name) in its memory. It is built in the background when the server
+starts, kept up to date as rows arrive, and never written to disk or to the
+database, so a dump or a backup holds nothing more than before. A search finds
+the matching rows in memory, and the database then applies the account, date
+and status filters. Until that copy is ready, a search decrypts the candidate
+rows one by one instead: the same results, only slower. Encryption at rest
+protects copies of the database, not the running server, which holds your key
+all the time it runs.
 
 ## Rotating the key
 

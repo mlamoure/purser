@@ -1,6 +1,8 @@
 /* Synthetic fixtures the harness serves to widgets — the same numbers as the
  * design mockups. Decimal strings only; nothing real (guardrail 1/7). */
 
+import { negateMoney, sumMoney } from "../lib/kit";
+
 export interface WidgetFixture {
   /** The tool arguments the "agent" used (sent as ui/notifications/tool-input). */
   toolInput: Record<string, unknown>;
@@ -15,9 +17,9 @@ export interface WidgetFixture {
 function forecastResult(days: number): Record<string, unknown> {
   const events = [
     { date: "2026-07-14", name: "Mortgage", amount: "-2400.00", balance_after: "1048.00", transaction_id: "11111111-1111-4111-8111-111111111111" },
-    { date: "2026-07-19", name: "Car insurance", amount: "-1190.00", balance_after: "-142.00", transaction_id: "22222222-2222-4222-8222-222222222222", range: { low: "-1290.00", high: "-1100.00" } },
+    { date: "2026-07-19", name: "Car insurance", amount: "-1190.00", balance_after: "-142.00", transaction_id: "22222222-2222-4222-8222-222222222222", certainty: { status: "estimated", amount_estimated: true }, range: { low: "-1290.00", high: "-1100.00" } },
     { date: "2026-07-20", name: "Payroll", amount: "3100.00", balance_after: "2958.00", transaction_id: "33333333-3333-4333-8333-333333333333" },
-    { date: "2026-08-01", name: "Rent", amount: "-1800.00", balance_after: "1158.00", transaction_id: "44444444-4444-4444-8444-444444444444", range: { low: "-1900.00", high: "-1750.00" } },
+    { date: "2026-08-01", name: "Rent", amount: "-1800.00", balance_after: "1158.00", transaction_id: "44444444-4444-4444-8444-444444444444", certainty: { status: "estimated", amount_estimated: true }, range: { low: "-1900.00", high: "-1750.00" } },
     { date: "2026-08-03", name: "Payroll", amount: "3100.00", balance_after: "4258.00", transaction_id: "55555555-5555-4555-8555-555555555555" },
   ];
   const horizonEnd = new Date(Date.parse("2026-07-08") + days * 86_400_000).toISOString().slice(0, 10);
@@ -121,20 +123,26 @@ const recurringResult = {
 /* balance_history (#199): a 31-point daily 30d window with one big outflow
  * and one payroll, so the mover dots and the low label both have something
  * to point at. */
+function centsToDecimal(cents: bigint): string {
+  const abs = cents < 0n ? -cents : cents;
+  return `${cents < 0n ? "-" : ""}${abs / 100n}.${String(abs % 100n).padStart(2, "0")}`;
+}
+
 function balanceHistoryResult(period: string): Record<string, unknown> {
   const spans: Record<string, number> = { "30d": 30, "90d": 90, "1y": 365, all: 500 };
   const days = spans[period] ?? 30;
   const step = days <= 30 ? 1 : days <= 90 ? 3 : 14;
   const dates: string[] = [];
   const balances: string[] = [];
-  let balance = 4060.4;
+  // Whole cents as a BigInt, never a float (guardrail 1, fixtures included).
+  let cents = 406040n;
   for (let d = days; d >= 0; d -= step) {
     const iso = new Date(Date.UTC(2026, 7, 9) - d * 86400000).toISOString().slice(0, 10);
-    if (iso === "2026-07-19") balance -= 2400;
-    if (iso === "2026-07-26") balance += 2148;
-    balance -= 12.4;
+    if (iso === "2026-07-19") cents -= 240000n;
+    if (iso === "2026-07-26") cents += 214800n;
+    cents -= 1240n;
     dates.push(iso);
-    balances.push(balance.toFixed(2));
+    balances.push(centsToDecimal(cents));
   }
   return {
     account: "assets.checking",
@@ -145,7 +153,7 @@ function balanceHistoryResult(period: string): Record<string, unknown> {
     current: balances[balances.length - 1],
     change: {
       period,
-      delta: (Number(balances[balances.length - 1]) - Number(balances[0])).toFixed(2),
+      delta: sumMoney([balances[balances.length - 1], negateMoney(balances[0])]),
       pct: "-15.1",
     },
     low: { date: "2026-07-19", balance: "1842.10" },

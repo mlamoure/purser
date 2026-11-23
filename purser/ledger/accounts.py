@@ -75,6 +75,10 @@ REVALUATION_PATH = "equity.revaluation"
 # apart from equity.revaluation so it never reads as a gain in value.
 CAPITAL_PATH = "equity.capital"
 ASSET_ENTRY_PATHS = frozenset({REVALUATION_PATH, CAPITAL_PATH})
+# The other side of an account's starting balance (#585, decision 123): what
+# the account held before the first transaction Purser knows, taken from the
+# bank's reported balance. Only the starting-balance service books here.
+OPENING_PATH = "equity.opening_balances"
 # The subtree the system accounts live in. Nothing else may: a category under
 # equity.securities, or an ``equity`` category, would share the subtree that
 # path-based reports and filters read, and mix with trade cash there.
@@ -117,6 +121,11 @@ def is_value_change(postings: "Iterable[Posting]") -> bool:
     return any(p.account is not None and p.account.path in ASSET_ENTRY_PATHS for p in postings)
 
 
+def is_starting_balance(postings: "Iterable[Posting]") -> bool:
+    """An account's starting balance: a leg on equity.opening_balances."""
+    return any(p.account is not None and p.account.path == OPENING_PATH for p in postings)
+
+
 def is_capital(postings: "Iterable[Posting]") -> bool:
     """Money put into a hand-valued asset: a leg on equity.capital."""
     return any(p.account is not None and p.account.path == CAPITAL_PATH for p in postings)
@@ -125,6 +134,80 @@ def is_capital(postings: "Iterable[Posting]") -> bool:
 def is_securities_trade(postings: "Iterable[Posting]") -> bool:
     """A securities trade's cash: a leg on equity.securities."""
     return any(p.account is not None and p.account.path == SECURITIES_PATH for p in postings)
+
+
+def securities_trade_refusal(account: Account) -> str | None:
+    """Why a row on ``account`` cannot be marked as a securities trade by a
+    person, an agent or a rule (#591, decision 119), or None when it can: a
+    brokerage account whose holdings come from the feed. A feed-holdings
+    account's buy and sell rows are cash the shares already counted in its
+    holdings came from; on an account tracked by hand the trade is recorded
+    as a position event whose cash links that row (decision 103), so the
+    shares and the cash move together and the double-count probe sees it."""
+    if account.is_virtual or account.type != "brokerage":
+        return (
+            f"{account.path} is a {account.type} account; only a row on a brokerage account "
+            "can be a securities trade (a buy or sell moves cash between the account and its "
+            "shares)"
+        )
+    if account.holdings_source != "feed":
+        return (
+            f"{account.path} tracks its holdings by hand: record the trade (record_sale, or a "
+            "buy or sell position event) and pass this row as its transaction_id, so the "
+            "shares and the cash move together"
+        )
+    return None
+
+
+def require_securities_trade_account(account: Account) -> None:
+    refusal = securities_trade_refusal(account)
+    if refusal is not None:
+        raise LedgerError(refusal)
+
+
+def trade_chain_ids(session: Session, tx: Transaction) -> set[uuid.UUID]:
+    """``tx``'s whole correction chain (back to the bank's row, forward to the
+    live head) plus any row voided INTO it (Purser's own trade cash that a
+    broker's copy took over at import, #408): every id a position event may
+    name for this bank line."""
+    ids = {tx.id}
+    current: Transaction | None = tx
+    while current is not None and current.reverses_id is not None:
+        ids.add(current.reverses_id)
+        current = session.get(Transaction, current.reverses_id)
+    current = tx
+    while current is not None:
+        current = session.execute(
+            select(Transaction).where(Transaction.reverses_id == current.id)
+        ).scalar_one_or_none()
+        if current is not None:
+            ids.add(current.id)
+    ids |= set(
+        session.execute(
+            select(Transaction.id).where(
+                Transaction.superseded_by.in_(ids), Transaction.status == "void"
+            )
+        ).scalars()
+    )
+    return ids
+
+
+def held_by_trade(session: Session, tx: Transaction) -> bool:
+    """Whether a recorded trade (a position event, standing or reversed)
+    names a row of ``tx``'s bank line as its cash (decision 103). Such a row
+    moves only with its trade. A row on ``equity.securities`` that no trade
+    holds was marked a securities trade by a person, an agent or a rule, or
+    is a balance true-up (decision 119): it stays editable."""
+    from purser.models import PositionEvent  # function-local: one model, no cycle
+
+    return (
+        session.execute(
+            select(PositionEvent.id)
+            .where(PositionEvent.transaction_id.in_(trade_chain_ids(session, tx)))
+            .limit(1)
+        ).first()
+        is not None
+    )
 
 
 def _system_leg_rows() -> Any:
@@ -247,6 +330,19 @@ def refuse_trade_cash_lineage(
             f"entry against {REVALUATION_PATH}, so it cannot {what}. Reverse it "
             "(reverse_value_change) and record the right figure if it is wrong"
         )
+    if found and is_starting_balance(tx.postings):
+        raise LedgerError(
+            f"transaction {tx.id} is an account's starting balance: it is Purser's own "
+            f"entry against {OPENING_PATH}, so it cannot {what}. Remove it "
+            "(set_starting_balance with remove) if the account should not have one"
+        )
+    if found and is_securities_trade(tx.postings) and not held_by_trade(session, tx):
+        # Marked a securities trade by a person, an agent or a rule (decision
+        # 119), or a balance true-up: no position event holds it.
+        raise LedgerError(
+            f"transaction {tx.id} is marked as a securities trade, so it cannot {what}. "
+            "Change it back to a category first (update_transaction with a category)"
+        )
     if found:
         raise LedgerError(
             f"transaction {tx.id} is the cash of a securities trade (or the row a trade "
@@ -260,11 +356,12 @@ def refuse_system_account(account: Account) -> None:
     other side of a securities trade's cash, or of a change in an asset's
     value) is refused, naming why."""
     if is_system_account(account):
-        what = (
-            "an asset's value entries book to it (record_value_change)"
-            if account.path in ASSET_ENTRY_PATHS
-            else "securities trades book their cash to it"
-        )
+        if account.path in ASSET_ENTRY_PATHS:
+            what = "an asset's value entries book to it (record_value_change)"
+        elif account.path == OPENING_PATH:
+            what = "an account's starting balance books to it (set_starting_balance)"
+        else:
+            what = "securities trades book their cash to it"
         raise LedgerError(
             f"{account.path} is a system account: {what}, never a category you choose"
         )
@@ -311,6 +408,22 @@ def capital_account(session: Session) -> Account:
             "tracked account paid. Not a category."
         ),
         needed_for="money put into an asset needs that path for the system capital account",
+    )
+
+
+def opening_balances_account(session: Session) -> Account:
+    """``equity.opening_balances``, the account a starting balance balances
+    against (decision 123). Migration 0059 seeds it; recreated here, audited,
+    if it is ever missing."""
+    return _system_account(
+        session,
+        path=OPENING_PATH,
+        name="Starting balances",
+        description=(
+            "System account: the other side of an account's starting balance, which stands "
+            "for everything before the first transaction Purser holds. Not a category."
+        ),
+        needed_for="a starting balance needs that path for the system starting-balances account",
     )
 
 
@@ -430,6 +543,9 @@ def create_account(
         connection_id=connection_id,
         min_balance=min_balance,
         description=description,
+        # A new brokerage account takes its holdings from the feed, and its
+        # balance true-up is on by default there (decision 119).
+        balance_true_up=type_ == "brokerage",
     )
     session.add(account)
     session.flush()
@@ -510,6 +626,7 @@ def update_account(
     min_balance: Decimal | None = None,
     min_balance_set: bool = False,
     feed_balance_is_cash: bool | None = None,
+    balance_true_up: bool | None = None,
     path: str | None = None,
     actor_token_id: uuid.UUID | None,
 ) -> Account:
@@ -533,7 +650,9 @@ def update_account(
     (``move_account``, decision 72); None = unchanged. ``min_balance`` (§3.4,
     #466), the floor the nightly forecast.shortfall scan checks, applies only
     when ``min_balance_set`` (None clears it, like ``feed_start``) and passes
-    ``check_min_balance``."""
+    ``check_min_balance``. ``balance_true_up`` (decision 119; None =
+    unchanged) switches the post-sync balance true-up of a brokerage account
+    whose holdings come from the feed; past adjustments stay."""
     account = get_account(session, account_id)
     if is_system_account(account):
         raise LedgerError(f"{account.path} is a system account; Purser keeps it as it is")
@@ -569,6 +688,12 @@ def update_account(
             "whose holdings are tracked by hand (holdings_source 'manual'); other "
             "accounts' feed balances are already compared as cash, or are market value"
         )
+    if balance_true_up and (account.type != "brokerage" or resulting_source != "feed"):
+        raise LedgerError(
+            f"{account.path}: balance_true_up applies only to a brokerage account whose "
+            "holdings come from the feed (holdings_source 'feed'): it keeps the account's cash "
+            "in step with the balance the broker reports beside those holdings"
+        )
     if drift_basis_override_set:
         if drift_basis_override is not None and drift_basis_override not in drift.BASES:
             raise LedgerError(
@@ -594,6 +719,7 @@ def update_account(
         "holdings_source": account.holdings_source,
         "min_balance": _money(account.min_balance),
         "feed_balance_is_cash": account.feed_balance_is_cash,
+        "balance_true_up": account.balance_true_up,
     }
     if name is not None:
         account.name = name
@@ -613,12 +739,17 @@ def update_account(
         account.drift_basis_override = drift_basis_override
     if min_balance_set:
         account.min_balance = min_balance
+    if balance_true_up is not None and holdings_source is None:
+        account.balance_true_up = balance_true_up
     session.flush()
     switched: dict[str, Any] = {}
     if holdings_source is not None:
         from purser.holdings import service as holdings_service
 
         switched = holdings_service.switch_source(session, account, holdings_source)
+        if balance_true_up is not None and account.holdings_source == "feed":
+            account.balance_true_up = balance_true_up
+            session.flush()
     if feed_balance_is_cash is not None and account.holdings_source == "manual":
         account.feed_balance_is_cash = feed_balance_is_cash
         if (
@@ -646,6 +777,7 @@ def update_account(
             "holdings_source": account.holdings_source,
             "min_balance": _money(account.min_balance),
             "feed_balance_is_cash": account.feed_balance_is_cash,
+            "balance_true_up": account.balance_true_up,
             **switched,
         },
     )

@@ -20,7 +20,7 @@ import typer
 from sqlalchemy import delete, func, or_, select, text, update
 from sqlalchemy.orm import Session, selectinload
 
-from purser import audit, balances, events, locks, matching, transfers
+from purser import audit, balances, events, locks, matching, splits, transfers
 from purser import ledger as ledger_service
 from purser.models import (
     Account,
@@ -327,6 +327,15 @@ def execute_delete(
     # 1. Unlink live merge-created transfers touching the account: the
     # counterpart's bank rows resurrect on their surviving accounts carrying
     # their content_hash; the clone landing here joins the doomed set.
+    # 0. Remove live splits touching the account (decision 118): the split's
+    # own bank line comes back as a flat row and every backing row comes back
+    # on its account, so neither is deleted with this account's footprint.
+    splits_removed = 0
+    for t in splits.splits_touching(session, account.id):
+        splits.unsplit_transaction(session, tx_id=t.id, token=None)
+        splits_removed += 1
+    session.flush()
+
     transfers_unlinked = 0
     for t in _live_linked_transfers_touching(session, account.id):
         transfers.unlink_transfer(session, transfer_id=t.id, token=None)
@@ -415,6 +424,7 @@ def execute_delete(
         "name": account.name,
         "was_closed": was_closed,
         "transfers_unlinked": transfers_unlinked,
+        "splits_removed": splits_removed,
         **deleted,
         "schedules_deleted": schedules_deleted,
         "valuations_deleted": valuations_deleted,
