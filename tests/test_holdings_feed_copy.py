@@ -236,16 +236,13 @@ class TestTheTradeStillOwnsItsCash:
         assert _postings(db_session, account) == Decimal("1000.0000")
         assert not ledger.is_trade_cash_lineage(db_session, bank_row)
 
-    def test_review_names_the_trade_and_the_purge_refuses_the_row(self, db_session) -> None:
+    def test_no_review_and_the_purge_refuses_the_row(self, db_session) -> None:
         from purser import review
         from purser.admin import feed_repair
 
-        account, position, event, holder, bank_row = self._taken_over(db_session)
-        batch = review.batch(db_session, limit=50, account_ref=str(account.id))
-        (row,) = [r for r in batch["rows"] if r["id"] == str(holder.id)]
-        assert "securities_trade" in row["flags"]
-        assert row["locked"] == {"event_id": str(event.id), "position_id": str(position.id)}
-        assert not [r for r in batch["rows"] if r["id"] == str(event.transaction_id)]
+        _account, _position, event, holder, bank_row = self._taken_over(db_session)
+        # The broker's copy now books to equity.securities: nothing to review.
+        assert review.review_reasons(db_session, [holder.id, bank_row.id]) == {}
         (described,) = feed_repair._trade_links(db_session, [bank_row.id])
         assert str(event.id) in described
 

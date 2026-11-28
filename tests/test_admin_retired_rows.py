@@ -22,7 +22,7 @@ from sqlalchemy import Engine, func, select, text
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
-from purser import audit, balances, ledger, matching, qif_import, review
+from purser import audit, balances, ledger, matching, qif_import
 from purser.admin import retired_rows
 from purser.admin.feed_repair import RepairRefused
 from purser.core import ledger as core
@@ -35,7 +35,6 @@ from purser.models import (
     Match,
     Posting,
     Transaction,
-    TransactionReview,
     User,
 )
 from tests.conftest import reset_db
@@ -94,13 +93,12 @@ def _retired_batch(
     *,
     account: str = CARD,
     provenance: str | None = "connection.ingest_direct",
-    reviewed: bool = False,
     void_last: bool = False,
 ) -> tuple[datetime, list[uuid.UUID]]:
     """Write rows the way the removed ingest did — origin import, a content
     hash, NO source fetch — in one committed transaction. ``rows`` is
-    (amount, status) pairs; ``reviewed`` adds migration 0021's backfill mark;
-    ``void_last`` voids the last (pending) row in the same transaction."""
+    (amount, status) pairs; ``void_last`` voids the last (pending) row in the
+    same transaction."""
     with get_sessionmaker()() as session:
         target = ledger.account_by_path(session, account)
         category = ledger.ensure_category_path(session, "income.uncategorized", actor_token_id=None)
@@ -118,8 +116,6 @@ def _retired_batch(
                 token=None,
                 content_hash=f"retired-{uuid.uuid4().hex}",
             )
-            if reviewed:
-                review.mark(session, tx_id=tx.id, token=None, via=review.VIA_BACKFILL)
             ids.append(tx.id)
         if void_last:
             ledger.transition_status(
@@ -282,7 +278,6 @@ class TestPurge:
         qif_at = _qif_batch()
         retired_at, (posted_a, posted_b, pending, voided) = _retired_batch(
             [("50.00", "posted"), ("20.00", "posted"), ("7.25", "pending"), ("3.00", "pending")],
-            reviewed=True,  # every pre-0021 row carries a backfill mark
             void_last=True,
         )
         other_at, (other,) = _retired_batch([("99.00", "posted")])
@@ -292,7 +287,6 @@ class TestPurge:
         summary = _purge([retired_at])
 
         assert {k: summary[k] for k in plan.counts()} == plan.counts()
-        assert summary["reviews_deleted"] == 2
         assert _status(posted_a) is None and _status(posted_b) is None  # hard-deleted
         assert _status(pending) == "void"  # the normal void path
         assert _status(voided) == "void"  # already void: lineage, untouched
@@ -596,7 +590,7 @@ class TestProperty:
         reset_db(migrated_engine)
         _accounts()
         as_rows = [(str(a), s) for a, s in doomed]
-        batch_at, _ = _retired_batch(as_rows, reviewed=True)
+        batch_at, _ = _retired_batch(as_rows)
         _retired_batch([(str(a), s) for a, s in kept])
         _retired_batch([(str(a), s) for a, s in elsewhere], account=SAVINGS)
         card_before, savings_before = _live_balance(CARD), _live_balance(SAVINGS)
@@ -610,14 +604,6 @@ class TestProperty:
         assert _live_balance(CARD) == card_before - sum((a for a, _s in doomed), Decimal("0"))
         assert _live_balance(SAVINGS) == savings_before
         with get_sessionmaker()() as session:
-            assert (
-                session.execute(
-                    select(func.count())
-                    .select_from(TransactionReview)
-                    .where(TransactionReview.transaction_id.not_in(select(Transaction.id)))
-                ).scalar_one()
-                == 0
-            )
             for path in (CARD, SAVINGS):
                 acct = session.execute(select(Account).where(Account.path == path)).scalar_one()
                 newest = session.execute(

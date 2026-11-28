@@ -231,7 +231,7 @@ function useDecide(suggestionId: string, onSuccess: (data: DecisionOut) => void)
     },
     onSuccess: (data) => {
       setError(null);
-      qc.invalidateQueries({ queryKey: ["unreviewed"] });
+      qc.invalidateQueries({ queryKey: ["needs-review"] });
       qc.invalidateQueries({ queryKey: ["register"] });
       onSuccess(data);
     },
@@ -595,8 +595,8 @@ type MatchDraft = {
 };
 
 /** A match suggestion: the bill Purser expected against the bank row the
- * matcher thinks paid it. Accept confirms the match (the bill is paid and
- * the bank row counts as reviewed); reject is remembered, so the pair is not
+ * matcher thinks paid it. Accept confirms the match (the bill is paid by
+ * that bank row); reject is remembered, so the pair is not
  * proposed again; snooze only hides the card — the proposal keeps holding
  * the bank row. To pair the bill with a different row, use Mark paid in the
  * register: there is nothing to edit here. */
@@ -655,8 +655,8 @@ function MatchCard({
         Inspect expectation and bank transaction
       </Link>
       <p className="mt-1 text-xs text-muted-foreground">
-        Confirming settles this expectation with the bank row and records its review. Use Unmatch in
-        the register to correct a mistake.
+        Confirming settles this expectation with the bank row. Use Unmatch in the register to
+        correct a mistake.
       </p>
       <div className="mt-3 flex flex-wrap gap-2">
         {!rejecting && (
@@ -988,7 +988,7 @@ function TransferLinkCard({
           <Button size="sm" variant="ghost" onClick={finish}>
             Leave as draft
           </Button>
-          <Link to="/settings/rules" className="self-center text-xs underline">
+          <Link to="/settings/categories/rules" className="self-center text-xs underline">
             review on the Rules page
           </Link>
         </div>
@@ -1204,7 +1204,7 @@ function TradeRuleCard({
           <Button size="sm" variant="ghost" onClick={finish}>
             Leave as draft
           </Button>
-          <Link to="/settings/rules" className="self-center text-xs underline">
+          <Link to="/settings/categories/rules" className="self-center text-xs underline">
             review on the Rules page
           </Link>
         </div>

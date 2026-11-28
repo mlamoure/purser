@@ -1,9 +1,14 @@
 import { screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { apiMock, mockApi, ok } from "../../test/api";
+import { apiMock, fail, mockApi, ok } from "../../test/api";
 import { configOut } from "../../test/fixtures";
 import { renderWithProviders } from "../../test/render";
-import { AiCard, CLOUD_DEFAULT_BASE_URL } from "./AiCategorization";
+import AiCategorization, {
+  AiCard,
+  CLOUD_DEFAULT_BASE_URL,
+  confidencePercent,
+  parseConfidencePercent,
+} from "./AiCategorization";
 
 const freshInstall = () => configOut({ ai_base_url: CLOUD_DEFAULT_BASE_URL });
 
@@ -87,7 +92,7 @@ describe("AI categorization card (#640)", () => {
       "To categorize a transaction that no rule or earlier choice covers, Purser sends the server at this address:",
     );
     expect(within(box).getByText("its payee, description and amount")).toBeInTheDocument();
-    expect(within(box).getByText("your reviewer checklist")).toBeInTheDocument();
+    expect(within(box).getByText("your categories and their descriptions")).toBeInTheDocument();
     expect(box).toHaveTextContent("this stays on your network");
 
     await user.selectOptions(screen.getByLabelText("Provider"), "openai");
@@ -288,5 +293,94 @@ describe("AI categorization card (#640)", () => {
     expect(screen.queryByText(hint)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Find models" }));
     await waitFor(() => expect(lastBody()).toMatchObject({ api_key: "typed-key" }));
+  });
+});
+
+describe("Settings, Categories, AI categorization tab (#694)", () => {
+  it("shows the provider card and the confidence floor as a percentage", async () => {
+    mockApi({ "GET /config": ok(configOut({ ai_provider: "local", ai_base_url: "http://10.0.0.5:8080/v1" })) });
+    renderWithProviders(<AiCategorization />);
+
+    expect(await screen.findByRole("heading", { name: "AI categorization" })).toBeInTheDocument();
+    const card = screen.getByRole("heading", { name: "Minimum confidence" }).closest("div")!;
+    expect(within(card).getByLabelText("Minimum confidence")).toHaveValue("70");
+    expect(card).toHaveTextContent(
+      "A guess below this is not applied: the transaction stays uncategorized, so it is flagged for review.",
+    );
+    expect(card).not.toHaveTextContent("AI categorization is off");
+  });
+
+  it("saves a percentage as the 0 to 1 value the server stores", async () => {
+    const config = configOut({ ai_provider: "local", ai_base_url: "http://10.0.0.5:8080/v1" });
+    mockApi({ "GET /config": ok(config), "PUT /config": ok(config) });
+    const { user } = renderWithProviders(<AiCategorization />);
+
+    const card = (await screen.findByRole("heading", { name: "Minimum confidence" })).closest("div")!;
+    const floor = within(card).getByLabelText("Minimum confidence");
+    await user.clear(floor);
+    await user.type(floor, "82.5");
+    await user.click(within(card).getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(apiMock.PUT).toHaveBeenCalledWith("/config", { body: { ai_min_confidence: 0.825 } }),
+    );
+    expect(await within(card).findByText("Saved.")).toBeInTheDocument();
+  });
+
+  it.each(["101", "-5", "abc", "70.25", ""])("refuses %j without calling the server", async (typed) => {
+    mockApi({ "GET /config": ok(configOut()) });
+    const { user } = renderWithProviders(<AiCategorization />);
+
+    const card = (await screen.findByRole("heading", { name: "Minimum confidence" })).closest("div")!;
+    const floor = within(card).getByLabelText("Minimum confidence");
+    await user.clear(floor);
+    if (typed) await user.type(floor, typed);
+    await user.click(within(card).getByRole("button", { name: "Save" }));
+
+    expect(within(card).getByRole("alert")).toHaveTextContent("a percentage from 0 to 100");
+    expect(apiMock.PUT).not.toHaveBeenCalled();
+  });
+
+  it("shows a stored floor to a tenth of a percent, and says when AI is off", async () => {
+    mockApi({ "GET /config": ok(configOut({ ai_min_confidence: 0.725 })) });
+    renderWithProviders(<AiCategorization />);
+
+    const card = (await screen.findByRole("heading", { name: "Minimum confidence" })).closest("div")!;
+    expect(within(card).getByLabelText("Minimum confidence")).toHaveValue("72.5");
+    expect(card).toHaveTextContent("AI categorization is off, so this applies once you choose a provider.");
+  });
+
+  it("shows a failed config read instead of an empty tab", async () => {
+    mockApi({ "GET /config": fail(500, "database unavailable") });
+    renderWithProviders(<AiCategorization />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Could not load the AI categorization settings: database unavailable",
+    );
+  });
+});
+
+describe("confidence percentages (#694)", () => {
+  it.each([
+    [0.7, "70"],
+    [0.725, "72.5"],
+    [0, "0"],
+    [1, "100"],
+    [0.85, "85"],
+  ])("shows %s as %s", (value, shown) => {
+    expect(confidencePercent(value)).toBe(shown);
+  });
+
+  it.each([
+    ["70", 0.7],
+    ["72.5", 0.725],
+    [" 85 % ", 0.85],
+    ["0", 0],
+    ["100", 1],
+    ["100.1", null],
+    ["7e1", null],
+    ["0.75", null],
+  ])("reads %j as %s", (typed, value) => {
+    expect(parseConfidencePercent(typed)).toBe(value);
   });
 });

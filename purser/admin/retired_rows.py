@@ -450,7 +450,6 @@ def execute_purge(
         **executed,
         "postings_deleted": deleted["postings_deleted"],
         "matches_deleted": deleted["matches_deleted"],
-        "reviews_deleted": deleted["reviews_deleted"],
         "lineage_nulled": deleted["lineage_nulled"],
         "voided_ids": [str(i) for i in void_ids],
         "deleted_ids": [str(i) for i in delete_ids],

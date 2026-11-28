@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import Engine, text
 
 import purser.config
-from purser import appsettings, clock, crypto, digest, matching, review
+from purser import appsettings, clock, crypto, digest, matching
 from purser.cli import _record_env_timezone
 from purser.db import get_sessionmaker
 
@@ -87,29 +87,6 @@ def _expected_bill(client: TestClient, on: date) -> str:
     )
     assert resp.status_code == 201, resp.text
     return str(resp.json()["id"])
-
-
-def _system_row(engine: Engine, on: date) -> None:
-    """A posted system-origin row: in the review scope (manual rows are not)."""
-    with engine.begin() as conn:
-        checking, housing = (
-            conn.execute(text("SELECT id FROM accounts WHERE path = :p"), {"p": p}).scalar_one()
-            for p in ("assets.checking", "expenses.housing")
-        )
-        tx = conn.execute(
-            text(
-                "INSERT INTO transactions (date, description_enc, status, origin)"
-                " VALUES (:d, :desc, 'posted', 'system') RETURNING id"
-            ),
-            {"d": on, "desc": crypto.encrypt("SYNTHETIC SYSTEM ROW")},
-        ).scalar_one()
-        conn.execute(
-            text(
-                "INSERT INTO postings (transaction_id, account_id, amount)"
-                " VALUES (:tx, :a, -12.00), (:tx, :c, 12.00)"
-            ),
-            {"tx": tx, "a": checking, "c": housing},
-        )
 
 
 def _recurring(engine: Engine, day: date) -> None:
@@ -192,11 +169,6 @@ def test_every_surface_agrees_on_the_ledger_day(
         upcoming = digest.whats_new(session)["upcoming"]
         listed = {str(item["transaction_id"]) for item in upcoming["items"]}
         assert (bill_id in listed) is (ledger_day == NY_DAY)
-
-    # Review: the age of the oldest unreviewed row counts ledger days.
-    _system_row(migrated_engine, NY_DAY)
-    with get_sessionmaker()() as session:
-        assert review.oldest_unreviewed_days(session) == (ledger_day - NY_DAY).days
 
     # Net worth: "today" is the ledger day.
     worth = client.get("/networth")

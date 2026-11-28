@@ -41,6 +41,7 @@ EXPECTED_TABLES = {
     "position_events",  # their append-only share-count history (#390)
     "security_prices",  # daily closes, manual and provider (#390, decision 89)
     "price_answered",  # the date ranges each provider answered for good (#390)
+    "security_settings",  # per-symbol aliases and price-by-hand (#686, decision 139)
     "ledger_clock",  # the env time zone the readmodel's ledger day reads (#471)
 }
 

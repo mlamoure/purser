@@ -118,18 +118,6 @@ def _contribution(client: TestClient, engine: Engine, amount: str = "600.00", **
     )
 
 
-def _review(engine: Engine, tx_id: str) -> dict[str, Any] | None:
-    with engine.connect() as conn:
-        row = conn.execute(
-            text(
-                "SELECT reviewed_at, reviewed_by, via, carried_from FROM transaction_reviews "
-                "WHERE transaction_id = :id"
-            ),
-            {"id": tx_id},
-        ).one_or_none()
-    return dict(row._mapping) if row is not None else None
-
-
 def _events(engine: Engine, type_: str) -> int:
     with engine.connect() as conn:
         return int(
@@ -607,58 +595,6 @@ class TestReplaceAndUnsplit:
         head2 = _ok(_split(client, flat, PAYCHECK_LINES))["transaction_id"]
         flat2 = _ok(client.delete(f"/transactions/{head2}/split"))
         assert flat2["category"] == "income.uncategorized"
-
-    def test_unsplit_keeps_the_rows_review_mark(
-        self, seeded: None, client: TestClient, migrated_engine: Engine
-    ) -> None:
-        """Removing a split restores the bank line, so the restored row keeps
-        the split row's mark whole (who, how, when) instead of one stamped
-        at the un-split, as each restored backing row keeps its own
-        (decision 130)."""
-        tx_id = _paycheck(client, migrated_engine)
-        backer = _contribution(client, migrated_engine)
-        assert _ok(client.post("/transactions/mark-reviewed", json={"transaction_ids": [backer]}))
-        lines = [*PAYCHECK_LINES[:2], {**PAYCHECK_LINES[2], "backing_ids": [backer]}]
-        head = _ok(_split(client, tx_id, lines))["transaction_id"]
-        # The marks were made earlier than the un-split.
-        with migrated_engine.begin() as conn:
-            conn.execute(
-                text(
-                    "UPDATE transaction_reviews SET reviewed_at = :at, note_enc = NULL "
-                    "WHERE transaction_id IN (:head, :backer)"
-                ),
-                {"at": "2026-07-16T09:30:00+00:00", "head": head, "backer": backer},
-            )
-        before = _review(migrated_engine, head)
-        body = _ok(client.delete(f"/transactions/{head}/split"))
-        flat, (clone,) = body["transaction_id"], body["restored_ids"]
-        kept = _review(migrated_engine, flat)
-        assert kept is not None and before is not None
-        assert {k: kept[k] for k in ("reviewed_at", "reviewed_by", "via")} == {
-            k: before[k] for k in ("reviewed_at", "reviewed_by", "via")
-        }
-        assert str(kept["carried_from"]) == head
-        restored = _review(migrated_engine, clone)
-        assert restored is not None
-        assert restored["reviewed_at"].isoformat() == "2026-07-16T09:30:00+00:00"
-        assert (
-            client.get(f"/transactions/{flat}")
-            .json()["reviewed_at"]
-            .startswith("2026-07-16T09:30:00")
-        )
-
-    def test_unsplit_of_an_unmarked_split_is_the_review(
-        self, seeded: None, client: TestClient, migrated_engine: Engine
-    ) -> None:
-        tx_id = _paycheck(client, migrated_engine)
-        head = _ok(_split(client, tx_id, PAYCHECK_LINES))["transaction_id"]
-        with migrated_engine.begin() as conn:
-            conn.execute(
-                text("DELETE FROM transaction_reviews WHERE transaction_id = :id"), {"id": head}
-            )
-        flat = _ok(client.delete(f"/transactions/{head}/split"))["transaction_id"]
-        mark = _review(migrated_engine, flat)
-        assert mark is not None and mark["via"] == "update" and mark["carried_from"] is None
 
     def test_a_qif_split_is_editable_through_the_same_path(
         self, seeded: None, client: TestClient, migrated_engine: Engine

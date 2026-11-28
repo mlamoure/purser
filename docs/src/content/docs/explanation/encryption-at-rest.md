@@ -51,10 +51,10 @@ written to logs.
 - **Bank data:** the archive of every payload received from the bank feed, and
   the SimpleFIN access URLs, which are the credentials to your bank data.
 - **Descriptive text (the "narrative layer"):** payee names, transaction
-  descriptions, posting memos, schedule names, review notes, financial notes,
+  descriptions, posting memos, schedule names, financial notes,
   rules' match text, payee names and notes, suggestion drafts, evidence and
   decision notes, the notes and history on bill estimates, and the notes,
-  plans and references on hand-tracked holdings, tax lots and equity awards.
+  plans and references on holdings entered in Purser, tax lots and equity awards.
 - **Audit and events:** the before and after detail of audit entries, the
   recorded authorization details of tokens, and the payloads of the event
   stream.
@@ -142,8 +142,9 @@ database files. It does not protect against:
   container's environment (for example with `docker inspect`) holds the key.
   Restrict who can administer the host.
 - **A token or a signed-in session.** Purser decrypts data for whoever is
-  authorized to read it. What an agent receives is governed by
-  [scopes and disclosure settings](../security/), not by encryption.
+  authorized to read it. What an agent receives is governed by its token's
+  [scopes](../security/) and by what the agent asks Purser to `withhold` on
+  each call, not by encryption.
 - **The plaintext columns on disk.** Encrypting the disk or the volume that
   holds the database, and the disks that hold your backups, is outside
   Purser's control and still recommended.

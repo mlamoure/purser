@@ -787,12 +787,6 @@ class TestForecastMatchesPending:
         )
         assert matched["state"] == "confirmed", matched
         assert matched["match_id"] == proposal_id  # the proposal itself, confirmed in place
-        with migrated_engine.connect() as conn:
-            via = conn.execute(
-                text("SELECT via FROM transaction_reviews WHERE transaction_id = :t"),
-                {"t": proposed["posted_id"]},
-            ).scalar_one()
-        assert via == "match"
         got = _mcp_call_raw(
             live_server.url,
             proposed["reader"],

@@ -1,6 +1,80 @@
 {
   "components": {
     "schemas": {
+      "AcceptAdjustmentIn": {
+        "additionalProperties": false,
+        "properties": {
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "why the adjustment is right (audit only)",
+            "title": "Note"
+          }
+        },
+        "title": "AcceptAdjustmentIn",
+        "type": "object"
+      },
+      "AcceptAdjustmentOut": {
+        "description": "A reconciliation adjustment's acceptance (decision 141).",
+        "properties": {
+          "accepted_at": {
+            "format": "date-time",
+            "title": "Accepted At",
+            "type": "string"
+          },
+          "accepted_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "the token that accepted it",
+            "title": "Accepted By"
+          },
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "adjustment_tx_id": {
+            "description": "the row the reconcile posted",
+            "format": "uuid",
+            "title": "Adjustment Tx Id",
+            "type": "string"
+          },
+          "created": {
+            "description": "true when this call recorded the acceptance; false when it was already accepted (the call is idempotent)",
+            "title": "Created",
+            "type": "boolean"
+          },
+          "reconciliation_id": {
+            "format": "uuid",
+            "title": "Reconciliation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reconciliation_id",
+          "account_id",
+          "adjustment_tx_id",
+          "accepted_at",
+          "accepted_by",
+          "created"
+        ],
+        "title": "AcceptAdjustmentOut",
+        "type": "object"
+      },
       "AccountCreate": {
         "properties": {
           "acquired_on": {
@@ -422,6 +496,17 @@
             "title": "Secured Loan Ids",
             "type": "array"
           },
+          "statement_close_day": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statement Close Day"
+          },
           "type": {
             "title": "Type",
             "type": "string"
@@ -741,6 +826,17 @@
             "title": "Secured Loan Ids",
             "type": "array"
           },
+          "statement_close_day": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Statement Close Day"
+          },
           "type": {
             "title": "Type",
             "type": "string"
@@ -865,7 +961,7 @@
                 "type": "null"
               }
             ],
-            "description": "Say that this brokerage account's feed balance is its CASH, as for a cash sweep whose positions are tracked by hand (`holdings_source` `manual`; 422 otherwise). The post-sync drift check then compares that balance with the account's transactions, like a checking account's. Off by default because many brokers report the whole account value instead. Turning it off clears a drift-basis pin; switching the account back to the feed turns it off. Admin scope.",
+            "description": "Say that this brokerage account's feed balance is its CASH, as for a cash sweep whose positions are entered in Purser (`holdings_source` `manual`; 422 otherwise). The post-sync drift check then compares that balance with the account's transactions, like a checking account's. Off by default because many brokers report the whole account value instead. Turning it off clears a drift-basis pin; switching the account back to the feed turns it off. Admin scope.",
             "title": "Feed Balance Is Cash"
           },
           "feed_invert": {
@@ -915,7 +1011,7 @@
                 "type": "null"
               }
             ],
-            "description": "Where this brokerage account's holdings come from: `feed` (the SimpleFIN snapshots) or `manual` (positions recorded by hand, priced daily, and projected into the same snapshots). Switching to `manual` keeps every feed snapshot as history; the first manual snapshot is dated the day after the last feed one. Switching back to `feed` needs a feed mapping (422 without one) and changes no snapshot: the hand-tracked holdings stay in effect until the first sync after the switch, which ends them from its own date (a position the feed does not report ends there); positions stay, read-only. Admin scope; brokerage accounts only (422 otherwise).",
+            "description": "Where this brokerage account's holdings come from: `feed` (the SimpleFIN snapshots) or `manual` (positions entered in Purser, priced daily, and projected into the same snapshots). Switching to `manual` keeps every feed snapshot as history; the first manual snapshot is dated the day after the last feed one. Switching back to `feed` needs a feed mapping (422 without one) and changes no snapshot: the holdings entered in Purser stay in effect until the first sync after the switch, which ends them from its own date (a position the feed does not report ends there); positions stay, read-only. Admin scope; brokerage accounts only (422 otherwise).",
             "title": "Holdings Source"
           },
           "min_balance": {
@@ -983,6 +1079,20 @@
             ],
             "description": "A loan only: the hand-valued asset that secures it (a mortgage's house, a car loan's car); the asset then reports its equity. An explicit null clears it; absent leaves it unchanged. Write scope.",
             "title": "Secured By Id"
+          },
+          "statement_close_day": {
+            "anyOf": [
+              {
+                "maximum": 31.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A credit card only (422 otherwise): the day of the month its statement closes, 1..31 (a day past a month's end means that month's last day). Payments to the card whose schedule sets payment_amount are then sized from the statement cycle (decision 136) and resized at once. GET /accounts/{id}/statement-cycle suggests a day from the card's history. An explicit null clears it; absent leaves it unchanged. Write scope.",
+            "title": "Statement Close Day"
           }
         },
         "title": "AccountUpdate",
@@ -1309,10 +1419,7 @@
         "description": "What one AI capability sends to the provider, in plain words\n(``ai_providers.DISCLOSURES``, pinned to the prompt builders by a test).",
         "properties": {
           "capability": {
-            "enum": [
-              "categorize",
-              "review"
-            ],
+            "const": "categorize",
             "title": "Capability",
             "type": "string"
           },
@@ -4130,6 +4237,11 @@
             "title": "Price Api Key Set",
             "type": "boolean"
           },
+          "price_fallback_api_key_set": {
+            "default": false,
+            "title": "Price Fallback Api Key Set",
+            "type": "boolean"
+          },
           "sync_reschedule_live": {
             "title": "Sync Reschedule Live",
             "type": "boolean"
@@ -4177,6 +4289,20 @@
               }
             ],
             "title": "Ai Base Url"
+          },
+          "ai_min_confidence": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An AI category guess below this confidence (0 to 1) is not applied: the row stays uncategorized. An [account] answer needs at least 0.85 as well.",
+            "title": "Ai Min Confidence"
           },
           "ai_model": {
             "anyOf": [
@@ -4313,12 +4439,40 @@
             ],
             "title": "Price Api Key"
           },
+          "price_fallback_api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Fallback Api Key"
+          },
+          "price_fallback_provider": {
+            "anyOf": [
+              {
+                "enum": [
+                  "none",
+                  "tiingo",
+                  "eodhd"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Fallback Provider"
+          },
           "price_provider": {
             "anyOf": [
               {
                 "enum": [
                   "none",
-                  "tiingo"
+                  "tiingo",
+                  "eodhd"
                 ],
                 "type": "string"
               },
@@ -4340,6 +4494,18 @@
               }
             ],
             "title": "Price Stale Days"
+          },
+          "review_uncategorized": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Bank-sync transactions with no category need review. Reconciliation adjustments need review whatever this says.",
+            "title": "Review Uncategorized"
           },
           "session_idle_hours": {
             "anyOf": [
@@ -4410,6 +4576,10 @@
             "title": "Ai Base Url",
             "type": "string"
           },
+          "ai_min_confidence": {
+            "title": "Ai Min Confidence",
+            "type": "number"
+          },
           "ai_model": {
             "anyOf": [
               {
@@ -4478,6 +4648,11 @@
             ],
             "title": "Oidc Issuer"
           },
+          "price_fallback_provider": {
+            "default": "none",
+            "title": "Price Fallback Provider",
+            "type": "string"
+          },
           "price_provider": {
             "title": "Price Provider",
             "type": "string"
@@ -4485,6 +4660,10 @@
           "price_stale_days": {
             "title": "Price Stale Days",
             "type": "integer"
+          },
+          "review_uncategorized": {
+            "title": "Review Uncategorized",
+            "type": "boolean"
           },
           "session_idle_hours": {
             "title": "Session Idle Hours",
@@ -4513,6 +4692,8 @@
           "ai_model",
           "ai_base_url",
           "ai_timeout_seconds",
+          "ai_min_confidence",
+          "review_uncategorized",
           "grafana_url",
           "session_ttl_days",
           "session_idle_hours",
@@ -5758,9 +5939,33 @@
             "title": "Failed",
             "type": "array"
           },
+          "fallback": {
+            "default": "none",
+            "title": "Fallback",
+            "type": "string"
+          },
+          "fallback_skipped": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fallback Skipped"
+          },
           "fetched": {
             "title": "Fetched",
             "type": "integer"
+          },
+          "not_covered": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Not Covered",
+            "type": "array"
           },
           "provider": {
             "title": "Provider",
@@ -5916,7 +6121,11 @@
                   "rolling_avg_12",
                   "counterparty_balance",
                   "override",
-                  "statement"
+                  "statement",
+                  "statement_close",
+                  "cycle_projection",
+                  "statement_average",
+                  "same_cycle_last_year"
                 ],
                 "type": "string"
               },
@@ -5924,7 +6133,7 @@
                 "type": "null"
               }
             ],
-            "description": "where the amount comes from: fixed, an estimate basis (last, rolling_avg_3, rolling_avg_12, counterparty_balance = the card's current balance), override (a pinned instance: the amount is yours) or statement (a recorded card statement balance, decision 80)",
+            "description": "where the amount comes from: fixed, an estimate basis (last, rolling_avg_3, rolling_avg_12, counterparty_balance = the card's current balance), override (a pinned instance: the amount is yours), statement (a recorded card statement, decision 80), or a card payment sized from its statement cycle (decision 136): statement_close (the statement has closed; what remains of it), cycle_projection (the next statement, projected to its close), statement_average or same_cycle_last_year (later payments)",
             "title": "Basis"
           },
           "certainty": {
@@ -7149,7 +7358,7 @@
             "title": "Amount"
           },
           "basis": {
-            "description": "where the amount comes from: fixed, an estimate basis (last, rolling_avg_3, rolling_avg_12, counterparty_balance = the card's current balance), override (a pinned instance: the amount is yours) or statement (a recorded card statement balance, decision 80)",
+            "description": "where the amount comes from: fixed, an estimate basis (last, rolling_avg_3, rolling_avg_12, counterparty_balance = the card's current balance), override (a pinned instance: the amount is yours), statement (a recorded card statement, decision 80), or a card payment sized from its statement cycle (decision 136): statement_close (the statement has closed; what remains of it), cycle_projection (the next statement, projected to its close), statement_average or same_cycle_last_year (later payments)",
             "enum": [
               "fixed",
               "last",
@@ -7157,7 +7366,11 @@
               "rolling_avg_12",
               "counterparty_balance",
               "override",
-              "statement"
+              "statement",
+              "statement_close",
+              "cycle_projection",
+              "statement_average",
+              "same_cycle_last_year"
             ],
             "title": "Basis",
             "type": "string"
@@ -7176,6 +7389,18 @@
             "format": "date",
             "title": "Date",
             "type": "string"
+          },
+          "minimum_due": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "the recorded statement's minimum payment, when given",
+            "title": "Minimum Due"
           },
           "occurrence_date": {
             "anyOf": [
@@ -8659,40 +8884,6 @@
         "title": "MappedAccount",
         "type": "object"
       },
-      "MarkReviewed": {
-        "additionalProperties": false,
-        "properties": {
-          "escalate": {
-            "default": false,
-            "title": "Escalate",
-            "type": "boolean"
-          },
-          "note": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Note"
-          },
-          "transaction_ids": {
-            "items": {
-              "format": "uuid",
-              "type": "string"
-            },
-            "title": "Transaction Ids",
-            "type": "array"
-          }
-        },
-        "required": [
-          "transaction_ids"
-        ],
-        "title": "MarkReviewed",
-        "type": "object"
-      },
       "MatchOut": {
         "properties": {
           "expected_amount": {
@@ -9185,6 +9376,380 @@
           "kind"
         ],
         "title": "PlanItemOut",
+        "type": "object"
+      },
+      "PortfolioAccountOut": {
+        "properties": {
+          "account_id": {
+            "format": "uuid",
+            "title": "Account Id",
+            "type": "string"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "As Of"
+          },
+          "cash": {
+            "title": "Cash",
+            "type": "string"
+          },
+          "cost_basis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Basis"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "gain_pct": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gain Pct"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/PortfolioLineOut"
+            },
+            "title": "Lines",
+            "type": "array"
+          },
+          "market_value": {
+            "title": "Market Value",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "string"
+          },
+          "unrealized_gain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unrealized Gain"
+          }
+        },
+        "required": [
+          "account_id",
+          "name",
+          "path",
+          "currency",
+          "as_of",
+          "source",
+          "cash",
+          "market_value",
+          "cost_basis",
+          "unrealized_gain",
+          "gain_pct",
+          "total",
+          "lines"
+        ],
+        "title": "PortfolioAccountOut",
+        "type": "object"
+      },
+      "PortfolioLineOut": {
+        "properties": {
+          "cost_basis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cost Basis"
+          },
+          "gain_pct": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Gain Pct"
+          },
+          "in_transit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "In Transit"
+          },
+          "manual_price": {
+            "default": false,
+            "title": "Manual Price",
+            "type": "boolean"
+          },
+          "market_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Market Value"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "no_price": {
+            "title": "No Price",
+            "type": "boolean"
+          },
+          "position_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position Id"
+          },
+          "price": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price"
+          },
+          "price_as_of": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price As Of"
+          },
+          "price_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Source"
+          },
+          "quantity": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quantity"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "stale_price": {
+            "title": "Stale Price",
+            "type": "boolean"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          },
+          "unpriceable": {
+            "title": "Unpriceable",
+            "type": "boolean"
+          },
+          "unrealized_gain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unrealized Gain"
+          },
+          "value_out_of_range": {
+            "title": "Value Out Of Range",
+            "type": "boolean"
+          },
+          "weight_pct": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weight Pct"
+          }
+        },
+        "required": [
+          "symbol",
+          "name",
+          "source",
+          "position_id",
+          "quantity",
+          "price",
+          "price_as_of",
+          "price_source",
+          "market_value",
+          "cost_basis",
+          "unrealized_gain",
+          "gain_pct",
+          "weight_pct",
+          "in_transit",
+          "stale_price",
+          "no_price",
+          "unpriceable",
+          "value_out_of_range"
+        ],
+        "title": "PortfolioLineOut",
+        "type": "object"
+      },
+      "PortfolioOut": {
+        "description": "Every open brokerage account's newest holdings (#684), largest\naccount first, lines largest first. All figures are computed here.",
+        "properties": {
+          "accounts": {
+            "items": {
+              "$ref": "#/components/schemas/PortfolioAccountOut"
+            },
+            "title": "Accounts",
+            "type": "array"
+          },
+          "as_of": {
+            "format": "date",
+            "title": "As Of",
+            "type": "string"
+          },
+          "lines": {
+            "title": "Lines",
+            "type": "integer"
+          },
+          "no_price": {
+            "title": "No Price",
+            "type": "integer"
+          },
+          "stale_price": {
+            "title": "Stale Price",
+            "type": "integer"
+          },
+          "totals": {
+            "items": {
+              "$ref": "#/components/schemas/PortfolioTotalOut"
+            },
+            "title": "Totals",
+            "type": "array"
+          },
+          "unpriceable": {
+            "title": "Unpriceable",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "as_of",
+          "totals",
+          "accounts",
+          "lines",
+          "stale_price",
+          "no_price",
+          "unpriceable"
+        ],
+        "title": "PortfolioOut",
+        "type": "object"
+      },
+      "PortfolioTotalOut": {
+        "properties": {
+          "cash": {
+            "title": "Cash",
+            "type": "string"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "market_value": {
+            "title": "Market Value",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "string"
+          }
+        },
+        "required": [
+          "currency",
+          "market_value",
+          "cash",
+          "total"
+        ],
+        "title": "PortfolioTotalOut",
         "type": "object"
       },
       "PositionCreate": {
@@ -10496,6 +11061,11 @@
       },
       "PriceStatusOut": {
         "properties": {
+          "fallback_provider": {
+            "default": "none",
+            "title": "Fallback Provider",
+            "type": "string"
+          },
           "last_failure": {
             "anyOf": [
               {
@@ -10517,6 +11087,30 @@
               }
             ],
             "title": "Last Fetched At"
+          },
+          "last_run_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Run At"
+          },
+          "next_run_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Run At"
           },
           "provider": {
             "title": "Provider",
@@ -10542,6 +11136,80 @@
           "last_failure"
         ],
         "title": "PriceStatusOut",
+        "type": "object"
+      },
+      "PriceTestIn": {
+        "additionalProperties": false,
+        "description": "A provider key test (#682). Both fields are optional: absent, the\nconfigured provider and the stored key are tested. The key is used for\nthis one request and never stored, logged or echoed.",
+        "properties": {
+          "api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "enum": [
+                  "tiingo",
+                  "eodhd"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          }
+        },
+        "title": "PriceTestIn",
+        "type": "object"
+      },
+      "PriceTestOut": {
+        "properties": {
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          }
+        },
+        "required": [
+          "ok",
+          "provider"
+        ],
+        "title": "PriceTestOut",
         "type": "object"
       },
       "PrivacyRecord": {
@@ -10974,6 +11642,30 @@
             "title": "Adjustment",
             "type": "string"
           },
+          "adjustment_accepted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adjustment Accepted At"
+          },
+          "adjustment_accepted_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adjustment Accepted By"
+          },
           "adjustment_tx_id": {
             "anyOf": [
               {
@@ -11231,6 +11923,7 @@
             "type": "string"
           },
           "agent_pending": {
+            "description": "an agent's pending rows on this account",
             "title": "Agent Pending",
             "type": "integer"
           },
@@ -11243,11 +11936,23 @@
             "type": "string"
           },
           "pending": {
+            "description": "of them, pending rows",
             "title": "Pending",
             "type": "integer"
           },
+          "reconciliation_adjustments": {
+            "description": "of them, reconciliation adjustments nobody has explained or accepted",
+            "title": "Reconciliation Adjustments",
+            "type": "integer"
+          },
           "total": {
+            "description": "rows on this account that need review",
             "title": "Total",
+            "type": "integer"
+          },
+          "uncategorized": {
+            "description": "of them, bank-sync rows with no category",
+            "title": "Uncategorized",
             "type": "integer"
           }
         },
@@ -11256,15 +11961,151 @@
           "path",
           "name",
           "total",
+          "uncategorized",
+          "reconciliation_adjustments",
           "pending",
           "agent_pending"
         ],
         "title": "ReviewAccountSummary",
         "type": "object"
       },
+      "ReviewBatch": {
+        "properties": {
+          "remaining": {
+            "title": "Remaining",
+            "type": "integer"
+          },
+          "rows": {
+            "items": {
+              "$ref": "#/components/schemas/ReviewBatchRow"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "total": {
+            "description": "rows that need review (on the account, when given)",
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total",
+          "rows",
+          "remaining"
+        ],
+        "title": "ReviewBatch",
+        "type": "object"
+      },
+      "ReviewBatchRow": {
+        "properties": {
+          "account": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "the account leg (negative = money out)",
+            "title": "Amount"
+          },
+          "category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "the category path; null for a split",
+            "title": "Category"
+          },
+          "date": {
+            "format": "date",
+            "title": "Date",
+            "type": "string"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "memories": {
+            "description": "financial notes linked to the row's account or payee, and global ones",
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Memories",
+            "type": "array"
+          },
+          "payee": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payee"
+          },
+          "reason": {
+            "enum": [
+              "uncategorized",
+              "reconciliation_adjustment"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "date",
+          "account",
+          "payee",
+          "description",
+          "amount",
+          "status",
+          "reason",
+          "category",
+          "memories"
+        ],
+        "title": "ReviewBatchRow",
+        "type": "object"
+      },
       "ReviewSummary": {
         "properties": {
           "accounts": {
+            "description": "per real account; a transfer counts on both, so these must not be summed",
             "items": {
               "$ref": "#/components/schemas/ReviewAccountSummary"
             },
@@ -11272,6 +12113,7 @@
             "type": "array"
           },
           "agent_pending": {
+            "description": "an agent's pending rows: a separate count, not a review reason",
             "title": "Agent Pending",
             "type": "integer"
           },
@@ -11285,19 +12127,34 @@
                 "type": "null"
               }
             ],
+            "description": "the oldest row that needs review",
             "title": "Oldest Date"
           },
           "pending": {
+            "description": "of them, pending rows",
             "title": "Pending",
             "type": "integer"
           },
+          "reconciliation_adjustments": {
+            "description": "of them, reconciliation adjustments nobody has explained or accepted",
+            "title": "Reconciliation Adjustments",
+            "type": "integer"
+          },
           "total": {
+            "description": "rows that need review, each counted once",
             "title": "Total",
+            "type": "integer"
+          },
+          "uncategorized": {
+            "description": "of them, bank-sync rows with no category",
+            "title": "Uncategorized",
             "type": "integer"
           }
         },
         "required": [
           "total",
+          "uncategorized",
+          "reconciliation_adjustments",
           "pending",
           "agent_pending",
           "oldest_date",
@@ -12180,6 +13037,37 @@
             ],
             "title": "Estimate Basis"
           },
+          "later_estimate": {
+            "anyOf": [
+              {
+                "enum": [
+                  "statement_average",
+                  "same_cycle_last_year",
+                  "fixed"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "with payment_amount: how payments after the next are estimated \u2014 statement_average (the average of the last later_window statements), same_cycle_last_year (the statement a year earlier, else the average) or fixed (the schedule's amount)",
+            "title": "Later Estimate"
+          },
+          "later_window": {
+            "anyOf": [
+              {
+                "maximum": 24.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "default 6",
+            "title": "Later Window"
+          },
           "memo": {
             "anyOf": [
               {
@@ -12229,6 +13117,24 @@
             ],
             "description": "who is paid or pays; required for a flat schedule without a memo",
             "title": "Payee"
+          },
+          "payment_amount": {
+            "anyOf": [
+              {
+                "enum": [
+                  "statement_balance",
+                  "minimum_due",
+                  "fixed",
+                  "current_balance"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "a payment to a credit card with a statement closing day (decision 136): how much is paid \u2014 statement_balance (what the statement showed, less credits since), minimum_due (a recorded statement's minimum; else the schedule's amount), fixed (the schedule's amount, never more than the statement) or current_balance (the card's balance now). Null: the estimate basis sizes every payment. Omitted on an estimated payment to a card with a closing day: statement_balance",
+            "title": "Payment Amount"
           },
           "propose": {
             "default": false,
@@ -12353,6 +13259,35 @@
             "title": "Instances",
             "type": "array"
           },
+          "later_estimate": {
+            "anyOf": [
+              {
+                "enum": [
+                  "statement_average",
+                  "same_cycle_last_year",
+                  "fixed"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "with payment_amount: how payments after the next are estimated \u2014 statement_average (the average of the last later_window statements), same_cycle_last_year (the statement a year earlier, else the average) or fixed (the schedule's amount)",
+            "title": "Later Estimate"
+          },
+          "later_window": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "statements later_estimate averages; null = 6",
+            "title": "Later Window"
+          },
           "matched_instances": {
             "description": "Most recent 50 matched occurrences",
             "items": {
@@ -12401,6 +13336,24 @@
             ],
             "description": "who is paid or pays (#534)",
             "title": "Payee"
+          },
+          "payment_amount": {
+            "anyOf": [
+              {
+                "enum": [
+                  "statement_balance",
+                  "minimum_due",
+                  "fixed",
+                  "current_balance"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "a payment to a credit card with a statement closing day (decision 136): how much is paid \u2014 statement_balance (what the statement showed, less credits since), minimum_due (a recorded statement's minimum; else the schedule's amount), fixed (the schedule's amount, never more than the statement) or current_balance (the card's balance now). Null: the estimate basis sizes every payment",
+            "title": "Payment Amount"
           },
           "rrule": {
             "title": "Rrule",
@@ -12532,6 +13485,35 @@
             "title": "Id",
             "type": "string"
           },
+          "later_estimate": {
+            "anyOf": [
+              {
+                "enum": [
+                  "statement_average",
+                  "same_cycle_last_year",
+                  "fixed"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "with payment_amount: how payments after the next are estimated \u2014 statement_average (the average of the last later_window statements), same_cycle_last_year (the statement a year earlier, else the average) or fixed (the schedule's amount)",
+            "title": "Later Estimate"
+          },
+          "later_window": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "statements later_estimate averages; null = 6",
+            "title": "Later Window"
+          },
           "memo": {
             "anyOf": [
               {
@@ -12572,6 +13554,24 @@
             ],
             "description": "who is paid or pays (#534)",
             "title": "Payee"
+          },
+          "payment_amount": {
+            "anyOf": [
+              {
+                "enum": [
+                  "statement_balance",
+                  "minimum_due",
+                  "fixed",
+                  "current_balance"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "a payment to a credit card with a statement closing day (decision 136): how much is paid \u2014 statement_balance (what the statement showed, less credits since), minimum_due (a recorded statement's minimum; else the schedule's amount), fixed (the schedule's amount, never more than the statement) or current_balance (the card's balance now). Null: the estimate basis sizes every payment",
+            "title": "Payment Amount"
           },
           "rrule": {
             "title": "Rrule",
@@ -12719,6 +13719,37 @@
             ],
             "title": "Estimate Basis"
           },
+          "later_estimate": {
+            "anyOf": [
+              {
+                "enum": [
+                  "statement_average",
+                  "same_cycle_last_year",
+                  "fixed"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "with payment_amount: how payments after the next are estimated \u2014 statement_average (the average of the last later_window statements), same_cycle_last_year (the statement a year earlier, else the average) or fixed (the schedule's amount)",
+            "title": "Later Estimate"
+          },
+          "later_window": {
+            "anyOf": [
+              {
+                "maximum": 24.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "default 6",
+            "title": "Later Window"
+          },
           "memo": {
             "anyOf": [
               {
@@ -12756,6 +13787,24 @@
             "description": "\"\" clears it (a memo must remain)",
             "title": "Payee"
           },
+          "payment_amount": {
+            "anyOf": [
+              {
+                "enum": [
+                  "statement_balance",
+                  "minimum_due",
+                  "fixed",
+                  "current_balance"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "a payment to a credit card with a statement closing day (decision 136): how much is paid \u2014 statement_balance (what the statement showed, less credits since), minimum_due (a recorded statement's minimum; else the schedule's amount), fixed (the schedule's amount, never more than the statement) or current_balance (the card's balance now). Null: the estimate basis sizes every payment. Sending payment_amount, later_estimate and later_window all null turns statement-cycle sizing off",
+            "title": "Payment Amount"
+          },
           "rrule": {
             "anyOf": [
               {
@@ -12773,6 +13822,18 @@
       },
       "SearchPage": {
         "properties": {
+          "did_you_mean": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "on a search of one word that matched nothing: the query with that word replaced by a word one typo away that does occur (the search itself stays exact; `word~` asks for typo tolerance)",
+            "title": "Did You Mean"
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/TransactionOut"
@@ -13467,6 +14528,21 @@
             "description": "the statement's payment due date: the card's live payment instance nearest it, within 14 days, takes the balance",
             "title": "Due Date"
           },
+          "minimum_due": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "the statement's minimum payment: a schedule that pays the minimum takes it",
+            "title": "Minimum Due"
+          },
           "statement_balance": {
             "anyOf": [
               {
@@ -13489,7 +14565,7 @@
                 "type": "null"
               }
             ],
-            "description": "the statement's closing date (today or earlier)",
+            "description": "the statement's closing date (today or earlier); checked against the card's statement_close_day",
             "title": "Statement Date"
           },
           "transaction_id": {
@@ -13526,7 +14602,7 @@
             "title": "Amount"
           },
           "basis": {
-            "description": "where the amount comes from: fixed, an estimate basis (last, rolling_avg_3, rolling_avg_12, counterparty_balance = the card's current balance), override (a pinned instance: the amount is yours) or statement (a recorded card statement balance, decision 80)",
+            "description": "where the amount comes from: fixed, an estimate basis (last, rolling_avg_3, rolling_avg_12, counterparty_balance = the card's current balance), override (a pinned instance: the amount is yours), statement (a recorded card statement, decision 80), or a card payment sized from its statement cycle (decision 136): statement_close (the statement has closed; what remains of it), cycle_projection (the next statement, projected to its close), statement_average or same_cycle_last_year (later payments)",
             "enum": [
               "fixed",
               "last",
@@ -13534,7 +14610,11 @@
               "rolling_avg_12",
               "counterparty_balance",
               "override",
-              "statement"
+              "statement",
+              "statement_close",
+              "cycle_projection",
+              "statement_average",
+              "same_cycle_last_year"
             ],
             "title": "Basis",
             "type": "string"
@@ -13549,10 +14629,34 @@
               }
             ]
           },
+          "close_day_hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "set when the statement_date disagrees with the card's statement_close_day: what to set it to. Nothing is changed for you",
+            "title": "Close Day Hint"
+          },
           "date": {
             "format": "date",
             "title": "Date",
             "type": "string"
+          },
+          "minimum_due": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "the recorded statement's minimum payment, when given",
+            "title": "Minimum Due"
           },
           "occurrence_date": {
             "anyOf": [
@@ -13645,6 +14749,91 @@
           "previous_amount"
         ],
         "title": "StatementBalanceOut",
+        "type": "object"
+      },
+      "StatementCycleOut": {
+        "description": "A credit card's statement cycle (#674, decision 136).",
+        "properties": {
+          "account": {
+            "title": "Account",
+            "type": "string"
+          },
+          "statement_close_day": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "the closing day set on the card",
+            "title": "Statement Close Day"
+          },
+          "statements": {
+            "description": "the latest statements on record, newest first (needs a closing day)",
+            "items": {
+              "$ref": "#/components/schemas/StatementOut"
+            },
+            "title": "Statements",
+            "type": "array"
+          },
+          "suggested_close_day": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "the closing day the card's history (or a recorded statement date) suggests; never applied for you \u2014 set statement_close_day with PATCH",
+            "title": "Suggested Close Day"
+          },
+          "suggestion_detail": {
+            "title": "Suggestion Detail",
+            "type": "string"
+          },
+          "suggestion_source": {
+            "enum": [
+              "history",
+              "statement",
+              "none"
+            ],
+            "title": "Suggestion Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account",
+          "statement_close_day",
+          "suggested_close_day",
+          "suggestion_source",
+          "suggestion_detail",
+          "statements"
+        ],
+        "title": "StatementCycleOut",
+        "type": "object"
+      },
+      "StatementOut": {
+        "properties": {
+          "close": {
+            "description": "the statement's closing date",
+            "format": "date",
+            "title": "Close",
+            "type": "string"
+          },
+          "owed": {
+            "description": "the balance owed at the close, posted rows only",
+            "title": "Owed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "close",
+          "owed"
+        ],
+        "title": "StatementOut",
         "type": "object"
       },
       "SubscriptionCreate": {
@@ -14100,6 +15289,58 @@
           "stale"
         ],
         "title": "SymbolPriceOut",
+        "type": "object"
+      },
+      "SymbolSettingIn": {
+        "additionalProperties": false,
+        "description": "One symbol's price settings (#686). ``aliases`` maps a provider to\nthe symbol's ticker there (e.g. ``{\"eodhd\": \"VOD.LSE\"}``); an empty\nalias clears it. Both at their defaults remove the setting.",
+        "properties": {
+          "aliases": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "enum": [
+                "tiingo",
+                "eodhd"
+              ]
+            },
+            "title": "Aliases",
+            "type": "object"
+          },
+          "skip_providers": {
+            "default": false,
+            "title": "Skip Providers",
+            "type": "boolean"
+          }
+        },
+        "title": "SymbolSettingIn",
+        "type": "object"
+      },
+      "SymbolSettingOut": {
+        "properties": {
+          "aliases": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Aliases",
+            "type": "object"
+          },
+          "skip_providers": {
+            "title": "Skip Providers",
+            "type": "boolean"
+          },
+          "symbol": {
+            "title": "Symbol",
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol",
+          "skip_providers",
+          "aliases"
+        ],
+        "title": "SymbolSettingOut",
         "type": "object"
       },
       "SyncOut": {
@@ -14729,18 +15970,6 @@
             ],
             "title": "Description"
           },
-          "escalated_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Escalated At"
-          },
           "has_linked_originals": {
             "default": false,
             "title": "Has Linked Originals",
@@ -14761,7 +15990,7 @@
             "type": "boolean"
           },
           "needs_review": {
-            "description": "true when the row is in the unreviewed set (#175): the same test as GET /transactions?reviewed=false and the review count",
+            "description": "true when the row needs review (decision 141): the same test as GET /transactions?needs_review=true and the review counts",
             "title": "Needs Review",
             "type": "boolean"
           },
@@ -14810,17 +16039,21 @@
             ],
             "title": "Reverses Id"
           },
-          "reviewed_at": {
+          "review_reason": {
             "anyOf": [
               {
-                "format": "date-time",
+                "enum": [
+                  "uncategorized",
+                  "reconciliation_adjustment"
+                ],
                 "type": "string"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Reviewed At"
+            "description": "why the row needs review, null when it does not: uncategorized (a bank-sync row with no category, or a split line with none; clears when it is categorized) or reconciliation_adjustment (the difference a reconcile posted; clears when it is recategorized or split away from expenses.reconciliation_adjustments, or accepted with POST /transactions/{id}/accept-adjustment)",
+            "title": "Review Reason"
           },
           "schedule_id": {
             "anyOf": [
@@ -15051,18 +16284,6 @@
             ],
             "title": "Description"
           },
-          "escalated_at": {
-            "anyOf": [
-              {
-                "format": "date-time",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Escalated At"
-          },
           "has_linked_originals": {
             "default": false,
             "title": "Has Linked Originals",
@@ -15083,7 +16304,7 @@
             "type": "boolean"
           },
           "needs_review": {
-            "description": "true when the row is in the unreviewed set (#175): the same test as GET /transactions?reviewed=false and the review count",
+            "description": "true when the row needs review (decision 141): the same test as GET /transactions?needs_review=true and the review counts",
             "title": "Needs Review",
             "type": "boolean"
           },
@@ -15113,17 +16334,21 @@
             ],
             "title": "Remainder Amount"
           },
-          "reviewed_at": {
+          "review_reason": {
             "anyOf": [
               {
-                "format": "date-time",
+                "enum": [
+                  "uncategorized",
+                  "reconciliation_adjustment"
+                ],
                 "type": "string"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Reviewed At"
+            "description": "why the row needs review, null when it does not: uncategorized (a bank-sync row with no category, or a split line with none; clears when it is categorized) or reconciliation_adjustment (the difference a reconcile posted; clears when it is recategorized or split away from expenses.reconciliation_adjustments, or accepted with POST /transactions/{id}/accept-adjustment)",
+            "title": "Review Reason"
           },
           "schedule_id": {
             "anyOf": [
@@ -16543,7 +17768,7 @@
     },
     "summary": "The privately hosted finance back-end, designed for use by your personal AI Agent.",
     "title": "Purser",
-    "version": "2026.11.6"
+    "version": "2026.11.7"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -17380,7 +18605,7 @@
     },
     "/accounts/{account_id}/holdings/summary": {
       "get": {
-        "description": "The account's newest holdings set, from the feed or tracked by hand,\nwith each line's unrealized gain (amount and percent) and share of the\naccount, a cash line and totals. Lines are largest first. ``cost_basis``\nand ``unrealized_gain`` total only the lines whose gain is known, so a\nline without a basis never counts as all gain. Brokerage accounts only.",
+        "description": "The account's newest holdings set, from SimpleFIN or entered in Purser,\nwith each line's unrealized gain (amount and percent) and share of the\naccount, a cash line and totals. Lines are largest first. ``cost_basis``\nand ``unrealized_gain`` total only the lines whose gain is known, so a\nline without a basis never counts as all gain. Brokerage accounts only.",
         "operationId": "holdings_summary_accounts__account_id__holdings_summary_get",
         "parameters": [
           {
@@ -17481,7 +18706,7 @@
     },
     "/accounts/{account_id}/positions": {
       "get": {
-        "description": "The account's positions, each valued as of today. A feed-sourced\naccount lists the positions recorded while it was tracked by hand, if\nany; they are read-only until it is switched back to manual.",
+        "description": "The account's positions, each valued as of today. A feed-sourced\naccount lists the positions entered while its holdings were entered in Purser, if\nany; they are read-only until it is switched back to manual.",
         "operationId": "list_positions_accounts__account_id__positions_get",
         "parameters": [
           {
@@ -17662,7 +18887,7 @@
     },
     "/accounts/{account_id}/reconcile": {
       "post": {
-        "description": "Reconcile a checking, savings, cash or credit-card account to a statement\nbalance, or explicitly reconcile only a manual brokerage account's cash\nwith ``component=\"cash\"``. Never pass total brokerage value as cash.\nHoldings, awards and prices are unchanged; readbacks identify the component.\n\nA hand-valued asset (type ``property``) reconciles to its value on\n``as_of``: the difference posts against the system account\n``equity.revaluation`` as a change in value (decision 113).\n\nPurser compares the statement figure with its own balance on ``as_of`` in\nthe chosen ``basis`` and posts ONE adjustment for the difference, dated\n``as_of``, to the system category ``expenses.reconciliation_adjustments``.\nThe adjustment lands in the review set so a person sees it. When the ledger\nalready matches, nothing is posted and the clean reconcile is still\nrecorded. Either way ``reconciled_through`` advances and an\n``account.reconciled`` event is emitted.\n\nSafe to retry: the same date, balance and basis returns ``created: false``\nwhile the ledger still matches, and 409 ``reconciliation_moved`` with the\ndifference once a backdated change has moved it. ``GET /accounts/{id}``\nand ``GET /accounts/{id}/reconciliations`` re-check recorded\nreconciliations the same way on every read.",
+        "description": "Reconcile a checking, savings, cash or credit-card account to a statement\nbalance, or explicitly reconcile only a manual brokerage account's cash\nwith ``component=\"cash\"``. Never pass total brokerage value as cash.\nHoldings, awards and prices are unchanged; readbacks identify the component.\n\nA hand-valued asset (type ``property``) reconciles to its value on\n``as_of``: the difference posts against the system account\n``equity.revaluation`` as a change in value (decision 113).\n\nPurser compares the statement figure with its own balance on ``as_of`` in\nthe chosen ``basis`` and posts ONE adjustment for the difference, dated\n``as_of``, to the system category ``expenses.reconciliation_adjustments``.\nThe adjustment needs review until it is recategorized, split or accepted\n(``POST /transactions/{id}/accept-adjustment``), so a person sees it. When the ledger\nalready matches, nothing is posted and the clean reconcile is still\nrecorded. Either way ``reconciled_through`` advances and an\n``account.reconciled`` event is emitted.\n\nSafe to retry: the same date, balance and basis returns ``created: false``\nwhile the ledger still matches, and 409 ``reconciliation_moved`` with the\ndifference once a backdated change has moved it. ``GET /accounts/{id}``\nand ``GET /accounts/{id}/reconciliations`` re-check recorded\nreconciliations the same way on every read.",
         "operationId": "reconcile_account_accounts__account_id__reconcile_post",
         "parameters": [
           {
@@ -17915,6 +19140,72 @@
           }
         },
         "summary": "Set Starting Balance",
+        "tags": [
+          "accounts"
+        ]
+      }
+    },
+    "/accounts/{account_id}/statement-cycle": {
+      "get": {
+        "description": "A credit card's statement cycle: its closing day, a suggested one (the\nday whose closing balance equals most of the card's full payments, or\nthe day of the latest recorded statement), and its latest statements.",
+        "operationId": "statement_cycle_accounts__account_id__statement_cycle_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+            "in": "query",
+            "name": "withhold",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 3,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
+              "title": "Withhold"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatementCycleOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Statement Cycle",
         "tags": [
           "accounts"
         ]
@@ -20702,7 +21993,7 @@
     },
     "/holdings": {
       "get": {
-        "description": "Latest snapshot set per brokerage account (cost basis + market value),\nwhichever source the account's holdings come from: feed snapshots, or the\nprojection of positions tracked by hand (`source` says which).",
+        "description": "Latest snapshot set per brokerage account (cost basis + market value),\nwhichever source the account's holdings come from: feed snapshots, or the\nprojection of positions entered in Purser (`source` says which).",
         "operationId": "list_holdings_holdings_get",
         "parameters": [
           {
@@ -20768,6 +22059,28 @@
           }
         },
         "summary": "List Holdings",
+        "tags": [
+          "holdings"
+        ]
+      }
+    },
+    "/holdings/portfolio": {
+      "get": {
+        "description": "Every open brokerage account's newest holdings set, from SimpleFIN or\nentered in Purser, each account's totals, totals per currency, and counts\nof stale, unpriced and unpriceable lines (#684). A line whose price is a\nclose entered by hand says so (`manual_price`, #689). A line the bank\nvalues carries its implied price (market value / shares).",
+        "operationId": "holdings_portfolio_holdings_portfolio_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortfolioOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Holdings Portfolio",
         "tags": [
           "holdings"
         ]
@@ -22364,7 +23677,7 @@
         ]
       },
       "post": {
-        "description": "Record a `set_quantity`, `buy`, `sell`, `vest`, `transfer_out` or\n`split`.\n\nA `split` takes `split_numerator` and `split_denominator` (2 and 1 for a\n2:1 forward split, 1 and 10 for a 1:10 reverse one): at the start of\n`occurred_on` every share held the day before becomes that ratio of\nshares (six places), each lot keeping its total basis, acquisition date\nand term. With `cash_in_lieu`, the fractional share left leaves in a\n`sell` whose proceeds are that amount (`cash_in_lieu` in the answer),\nreversed with the split. Reversing the split restores the shares, the\nlots and the cash exactly.\n\nOn a position that tracks lots, a `sell` or `transfer_out` names the\nlots it draws on (`lot_method` or `lots`; 422 `allocation_required`\notherwise), a `buy` opens a lot unless `unallocated`, and every write is\nrefused (422 with `detail.code`) that would leave a lot below zero or\nthe lots holding more than the position on any day. The whole history is checked\nafter it: an event that would leave the position below zero on ANY date\n(a backdated sell, say) is refused with 422 naming that date. Any event,\na backdate or not, that would leave this position holding shares on a\nday a CLOSED position in the same symbol held them or sold out is\nrefused with 409 (positions never overlap).\n\nA sale moves its net proceeds to the account's cash unless `proceeds_to`\nis `none`; a buy takes its cost from the cash only with `funded_from`\n`cash`. That cash is one posted system row against `equity.securities`\n(it joins the unreviewed set), or an existing row linked with\n`transaction_id`. When the account already shows a posted one-sided row\nof exactly that amount around the settlement date, the call is refused\nwith 409 naming it, so the cash is never counted twice: link that row,\nor pass `force_cash` when it is a different payment.",
+        "description": "Record a `set_quantity`, `buy`, `sell`, `vest`, `transfer_out` or\n`split`.\n\nA `split` takes `split_numerator` and `split_denominator` (2 and 1 for a\n2:1 forward split, 1 and 10 for a 1:10 reverse one): at the start of\n`occurred_on` every share held the day before becomes that ratio of\nshares (six places), each lot keeping its total basis, acquisition date\nand term. With `cash_in_lieu`, the fractional share left leaves in a\n`sell` whose proceeds are that amount (`cash_in_lieu` in the answer),\nreversed with the split. Reversing the split restores the shares, the\nlots and the cash exactly.\n\nOn a position that tracks lots, a `sell` or `transfer_out` names the\nlots it draws on (`lot_method` or `lots`; 422 `allocation_required`\notherwise), a `buy` opens a lot unless `unallocated`, and every write is\nrefused (422 with `detail.code`) that would leave a lot below zero or\nthe lots holding more than the position on any day. The whole history is checked\nafter it: an event that would leave the position below zero on ANY date\n(a backdated sell, say) is refused with 422 naming that date. Any event,\na backdate or not, that would leave this position holding shares on a\nday a CLOSED position in the same symbol held them or sold out is\nrefused with 409 (positions never overlap).\n\nA sale moves its net proceeds to the account's cash unless `proceeds_to`\nis `none`; a buy takes its cost from the cash only with `funded_from`\n`cash`. That cash is one posted system row against `equity.securities`,\nor an existing row linked with\n`transaction_id`. When the account already shows a posted one-sided row\nof exactly that amount around the settlement date, the call is refused\nwith 409 naming it, so the cash is never counted twice: link that row,\nor pass `force_cash` when it is a different payment.",
         "operationId": "record_position_event_positions__position_id__events_post",
         "parameters": [
           {
@@ -22704,6 +24017,172 @@
           }
         },
         "summary": "Price Status",
+        "tags": [
+          "prices"
+        ]
+      }
+    },
+    "/prices/symbols": {
+      "get": {
+        "description": "Every symbol with price settings: aliases, and whether the providers are skipped (#686).",
+        "operationId": "list_symbol_settings_prices_symbols_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SymbolSettingOut"
+                  },
+                  "title": "Response List Symbol Settings Prices Symbols Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Symbol Settings",
+        "tags": [
+          "prices"
+        ]
+      }
+    },
+    "/prices/symbols/{symbol}": {
+      "delete": {
+        "description": "Remove one symbol's price settings (#686): back to the provider's own\nspelling, and asked of the provider again.",
+        "operationId": "delete_symbol_settings_prices_symbols__symbol__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "symbol",
+            "required": true,
+            "schema": {
+              "maxLength": 15,
+              "minLength": 1,
+              "title": "Symbol",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SymbolSettingOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Symbol Settings",
+        "tags": [
+          "prices"
+        ]
+      },
+      "put": {
+        "description": "Set one symbol's price settings (#686): its ticker per provider, and\nwhether the providers are skipped for it (its closes are entered by hand).\nChanging a provider's alias makes the provider ask the corrected ticker\nagain.\nSettings at their defaults remove the row.",
+        "operationId": "put_symbol_settings_prices_symbols__symbol__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "symbol",
+            "required": true,
+            "schema": {
+              "maxLength": 15,
+              "minLength": 1,
+              "title": "Symbol",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SymbolSettingIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SymbolSettingOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Put Symbol Settings",
+        "tags": [
+          "prices"
+        ]
+      }
+    },
+    "/prices/test": {
+      "post": {
+        "description": "Test a price provider key (admin): ask the provider for a few recent\ncloses of one well-known symbol. Stores nothing.",
+        "operationId": "probe_price_provider_prices_test_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PriceTestIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PriceTestOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Probe Price Provider",
         "tags": [
           "prices"
         ]
@@ -24353,7 +25832,7 @@
             }
           },
           {
-            "description": "search: words all found in payee, description or memo (\"a phrase\", -word excludes; payee:, desc:, memo: scope one; payee:py_... is that payee), plus account:, category:, amount:>100 (magnitude; is:debit or is:credit for direction), amount:10..20, date:2026-10, date:2026-01..2026-03, status:pending,posted, is:unreviewed. A malformed clause is a 422.",
+            "description": "search: words all found in payee, description or memo (\"a phrase\", -word excludes, word~ allows one typo; payee:, desc:, memo: scope one; payee:py_... is that payee), plus account:, category:, amount:>100 (magnitude; is:debit or is:credit for direction), amount:10..20, date:2026-10, date:2026-01..2026-03, status:pending,posted, is:needs-review. A malformed clause is a 422.",
             "in": "query",
             "name": "q",
             "required": false,
@@ -24366,7 +25845,7 @@
                   "type": "null"
                 }
               ],
-              "description": "search: words all found in payee, description or memo (\"a phrase\", -word excludes; payee:, desc:, memo: scope one; payee:py_... is that payee), plus account:, category:, amount:>100 (magnitude; is:debit or is:credit for direction), amount:10..20, date:2026-10, date:2026-01..2026-03, status:pending,posted, is:unreviewed. A malformed clause is a 422.",
+              "description": "search: words all found in payee, description or memo (\"a phrase\", -word excludes, word~ allows one typo; payee:, desc:, memo: scope one; payee:py_... is that payee), plus account:, category:, amount:>100 (magnitude; is:debit or is:credit for direction), amount:10..20, date:2026-10, date:2026-01..2026-03, status:pending,posted, is:needs-review. A malformed clause is a 422.",
               "title": "Q"
             }
           },
@@ -24446,9 +25925,9 @@
             }
           },
           {
-            "description": "false = the unreviewed set (#175); true = its complement",
+            "description": "true = the rows that need review (decision 141: a bank-sync row with no category, an unaccepted reconciliation adjustment); false = every other row",
             "in": "query",
-            "name": "reviewed",
+            "name": "needs_review",
             "required": false,
             "schema": {
               "anyOf": [
@@ -24459,8 +25938,8 @@
                   "type": "null"
                 }
               ],
-              "description": "false = the unreviewed set (#175); true = its complement",
-              "title": "Reviewed"
+              "description": "true = the rows that need review (decision 141: a bank-sync row with no category, an unaccepted reconciliation adjustment); false = every other row",
+              "title": "Needs Review"
             }
           },
           {
@@ -24577,52 +26056,6 @@
         ]
       }
     },
-    "/transactions/mark-reviewed": {
-      "post": {
-        "description": "Bulk, idempotent. A review mark has no draft state, like\nconfirm_transfer and match (#175, decision 47).",
-        "operationId": "mark_reviewed_transactions_mark_reviewed_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/MarkReviewed"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "additionalProperties": {
-                    "type": "integer"
-                  },
-                  "title": "Response Mark Reviewed Transactions Mark Reviewed Post",
-                  "type": "object"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Mark Reviewed",
-        "tags": [
-          "transactions"
-        ]
-      }
-    },
     "/transactions/present": {
       "post": {
         "description": "Show the person transactions without passing their details through\nthe caller (#613; the MCP `present` tool). Returns a link that opens\nthose rows, in full detail and in the order given, for the signed-in\nperson in Purser's web app; an integration replies with the link instead\nof repeating payees, descriptions or amounts. Up to 50 ids; the note (200\ncharacters or fewer) is shown above the rows. The link carries only ids\nand the note. A read: nothing changes.",
@@ -24667,7 +26100,7 @@
     },
     "/transactions/review-batch": {
       "get": {
-        "description": "The same payload the MCP tool serves \u2014 one service function, so REST\nand MCP can never disagree about what a reviewer sees.",
+        "description": "The rows that need review, newest first, with their reason and what it\ntakes to fix them \u2014 the same payload as the MCP tool `review_batch`, from\none service function.",
         "operationId": "review_batch_transactions_review_batch_get",
         "parameters": [
           {
@@ -24699,16 +26132,6 @@
             }
           },
           {
-            "in": "query",
-            "name": "include_guidance",
-            "required": false,
-            "schema": {
-              "default": true,
-              "title": "Include Guidance",
-              "type": "boolean"
-            }
-          },
-          {
             "description": "Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`.",
             "in": "query",
             "name": "withhold",
@@ -24736,9 +26159,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "additionalProperties": true,
-                  "title": "Response Review Batch Transactions Review Batch Get",
-                  "type": "object"
+                  "$ref": "#/components/schemas/ReviewBatch"
                 }
               }
             },
@@ -24763,7 +26184,7 @@
     },
     "/transactions/review-summary": {
       "get": {
-        "description": "Review counts and register destinations. Transfers count once globally,\nbut appear on both accounts; per-account totals must not be summed.",
+        "description": "How many transactions need review, by reason (decision 141: a\nbank-sync row with no category, a reconciliation adjustment nobody has\nexplained or accepted), and on which accounts. Transfers count once\nglobally but appear on both accounts; per-account totals must not be\nsummed.",
         "operationId": "review_summary_transactions_review_summary_get",
         "responses": {
           "200": {
@@ -24989,6 +26410,67 @@
           }
         },
         "summary": "Update Transaction",
+        "tags": [
+          "transactions"
+        ]
+      }
+    },
+    "/transactions/{tx_id}/accept-adjustment": {
+      "post": {
+        "description": "Accept a reconciliation adjustment as it is, so it no longer needs\nreview (decision 141). `tx_id` is the adjustment a reconcile posted, or\nthe row a correction of it left. Idempotent: an accepted adjustment\nanswers `created: false`. Audited `reconciliation.adjustment_accepted`\nwith the optional `note`. To explain the difference instead, recategorize\nor split the row (PATCH / PUT .../split). 404 for an unknown row; 422 for\na row that is no reconciliation adjustment (an asset's value change\nincluded: it never needs review).",
+        "operationId": "accept_adjustment_transactions__tx_id__accept_adjustment_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "tx_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Tx Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/AcceptAdjustmentIn"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptAdjustmentOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Accept Adjustment",
         "tags": [
           "transactions"
         ]

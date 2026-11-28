@@ -37,6 +37,7 @@ EXPECTED_TOOLS = {
     "list_accounts",
     "feed_status",
     "account_balance",
+    "card_statement_cycle",
     "search_transactions",
     "get_transaction",
     "list_categories",
@@ -80,7 +81,7 @@ EXPECTED_TOOLS = {
     "archive_memory",
     # tools_review
     "review_batch",
-    "mark_reviewed",
+    "accept_reconciliation_adjustment",
     # tools_rules
     "list_rules",
     "preview_rule",

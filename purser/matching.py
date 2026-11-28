@@ -19,7 +19,6 @@ from sqlalchemy.orm import Session, aliased, selectinload
 from purser import audit, balances, clock, events, occurrences
 from purser import ledger as ledger_service
 from purser import lineage as bank_lineage
-from purser import review as review_service
 from purser import suggestions as suggestions_service
 from purser.admin import security
 from purser.core import ledger as core
@@ -53,6 +52,10 @@ def _estimate_probe(session: Session, expected: Transaction) -> tuple[Schedule, 
         return None
     schedule = session.get(Schedule, expected.schedule_id)
     if schedule is None or schedule.amount_type != "estimated":
+        return None
+    if schedule.payment_amount is not None:
+        # A card payment sized from its statement cycle (#674) moves to the
+        # next statement after every payment: that is not a price change.
         return None
     from purser import schedules as schedules_service
 
@@ -503,11 +506,7 @@ def _execute_match(
     """Expected superseded (void + link), posted is truth, variance recorded.
 
     ``token`` is whoever decided the match — a confirmed proposal or a manual
-    match — and ``None`` the matcher's own auto-confirm. A token-bearing
-    confirm is a review of the bank row (decision 47, #286): whoever says this
-    row settles that bill has looked at it, so it leaves the unreviewed set
-    ``via='match'``. An auto-confirm is automation touching the row, which
-    never marks it."""
+    match — and ``None`` the matcher's own auto-confirm."""
     decided_by = token.id if token is not None else None
     expected = ledger_service.lock_transaction(session, expected.id, skip_locked=auto)
     # Validate LIVE state — a match decided against rows that have since
@@ -645,8 +644,6 @@ def _execute_match(
         entity_id=match.id,
         payload={"auto": auto, "variance": str(variance), "score": score},
     )
-    review_service.mark_if_in_scope(session, tx=posted, token=token, via=review_service.VIA_MATCH)
-
     expected_input = _match_input(expected)  # payer's view for a two-leg expected
     if expected_input is not None and core_matching.exceeds_variance_threshold(
         expected_input.amount, variance
@@ -2170,12 +2167,6 @@ def confirm_transfer_and_propose(
         remainder_category_ref=remainder_category,
         via_suggestion=via_suggestion,
         accepts_card=True,
-    )
-    # Two bank rows becoming one transfer is precisely the class of automation
-    # a reviewer is asked to sanity-check — but a HUMAN just did it, so the
-    # merged row leaves the unreviewed set (#175).
-    review_service.mark_if_in_scope(
-        session, tx=merged, token=token, via=review_service.VIA_CONFIRM_TRANSFER
     )
     suggestion: Suggestion | None = None
     if remainder_category is None:

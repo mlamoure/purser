@@ -35,7 +35,6 @@ from sqlalchemy.orm import Session, aliased, selectinload
 from purser import audit, balances, events, matching
 from purser import ledger as ledger_service
 from purser import lineage as bank_lineage
-from purser import review as review_service
 from purser import rules as rules_service
 from purser import suggestions as suggestions_service
 from purser.admin import security
@@ -524,7 +523,6 @@ def _rewrite_in_place(
     session.flush()
     session.expire(tx, ["postings"])
     balances.mark_dirty(session, tx.date)
-    review_service.mark_if_in_scope(session, tx=tx, token=token, via=review_service.VIA_UPDATE)
     audit.record(
         session,
         actor_token_id=token.id if token else None,
@@ -546,12 +544,9 @@ def _write(
     token: ApiToken | None,
     action: str,
     audit_extra: dict[str, Any],
-    keep_review_mark: bool = False,
 ) -> Transaction:
     """A posted row through reversal + replacement, a manual pending in
-    place. ``keep_review_mark`` (un-split): the replacement keeps the row's
-    review mark instead of a new one stamped now; in place, a row keeps its
-    mark anyway (``review.mark`` only adds)."""
+    place."""
     if tx.status == core.Status.POSTED.value:
         return ledger_service.reverse_and_replace_with_specs(
             session,
@@ -561,7 +556,6 @@ def _write(
             action=action,
             audit_extra=audit_extra,
             split_account_id=split_account_id,
-            keep_review_mark=keep_review_mark,
         )
     return _rewrite_in_place(
         session,
@@ -771,9 +765,9 @@ def unsplit_transaction(
 ) -> dict[str, Any]:
     """Remove a split (decision 118): the row goes back to one real leg and
     one category — ``category_ref``, else the uncategorized placeholder for
-    its sign — keeping its review mark (decision 130), and every backing row
-    comes back exactly as it was (a clone carrying its prior status, content
-    hash and review mark, as unlink restores a merged original).
+    its sign — and every backing row comes back exactly as it was (a clone
+    carrying its prior status and content hash, as unlink restores a merged
+    original).
     ``token=None`` is a system actor (the account purge)."""
     _require_write(token, "removing a split")
     tx = _load(session, tx_id)
@@ -821,7 +815,6 @@ def unsplit_transaction(
         token=token,
         action="transaction.unsplit",
         audit_extra={"backing_restored": out["backing_restored"]},
-        keep_review_mark=True,
     )
     restored = _restore(session, backers, prior, token)
     events.emit(

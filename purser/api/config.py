@@ -54,6 +54,11 @@ class ConfigValues(BaseModel):
     ai_model: str | None
     ai_base_url: str
     ai_timeout_seconds: int
+    # The AI category floor (#694, decision 141): a guess below it is not
+    # applied. An `[account]` answer needs at least 0.85 as well.
+    ai_min_confidence: float
+    # Bank-sync rows with no category need review (#694, decision 141).
+    review_uncategorized: bool
     grafana_url: str | None
     session_ttl_days: int
     session_idle_hours: int
@@ -65,6 +70,7 @@ class ConfigValues(BaseModel):
     # Manually tracked holdings (#390, decision 89); the provider's API key is
     # write-only (price_api_key_set below).
     price_provider: str
+    price_fallback_provider: str = "none"
     price_stale_days: int
     # Feed freshness (#480): days a bank balance may age before feed.stale.
     feed_stale_days: int
@@ -93,7 +99,7 @@ class AiDisclosureOut(BaseModel):
     """What one AI capability sends to the provider, in plain words
     (``ai_providers.DISCLOSURES``, pinned to the prompt builders by a test)."""
 
-    capability: Literal["categorize", "review"]
+    capability: Literal["categorize"]
     when: str = Field(description="The situation, e.g. 'To categorize a transaction ...'.")
     sends: list[str] = Field(description="Each item sent, as a phrase.")
 
@@ -105,6 +111,7 @@ class ConfigOut(BaseModel):
     ai_disclosure: list[AiDisclosureOut]
     oidc_client_secret_set: bool
     price_api_key_set: bool
+    price_fallback_api_key_set: bool = False
     sync_reschedule_live: bool  # False -> schedule changes apply at worker restart
     encryption: EncryptionStatus
 
@@ -134,6 +141,18 @@ class ConfigUpdate(BaseModel):
         le=AI_TIMEOUT_MAX_SECONDS,
         description="Seconds to wait for one provider answer.",
     )
+    ai_min_confidence: float | None = Field(
+        None,
+        ge=0,
+        le=1,
+        description="An AI category guess below this confidence (0 to 1) is not applied: the "
+        "row stays uncategorized. An [account] answer needs at least 0.85 as well.",
+    )
+    review_uncategorized: bool | None = Field(
+        None,
+        description="Bank-sync transactions with no category need review. Reconciliation "
+        "adjustments need review whatever this says.",
+    )
     grafana_url: str | None = None
     session_ttl_days: int | None = Field(None, ge=1, le=365)
     session_idle_hours: int | None = Field(None, ge=1, le=720)
@@ -142,7 +161,10 @@ class ConfigUpdate(BaseModel):
     oidc_client_id: str | None = None
     oidc_client_secret: str | None = None
     oidc_auto_provision: bool | None = None
-    price_provider: Literal["none", "tiingo"] | None = None
+    price_provider: Literal["none", "tiingo", "eodhd"] | None = None
+    # Asked for what the provider cannot answer (#686, decision 139).
+    price_fallback_provider: Literal["none", "tiingo", "eodhd"] | None = None
+    price_fallback_api_key: str | None = None
     # Write-only: stored Fernet-encrypted, never returned (only its presence).
     price_api_key: str | None = None
     price_stale_days: int | None = Field(None, ge=1, le=365)
@@ -166,7 +188,12 @@ class ConfigUpdate(BaseModel):
         return v
 
     @field_validator(
-        "ai_api_key", "ai_model", "oidc_client_id", "oidc_client_secret", "price_api_key"
+        "ai_api_key",
+        "ai_model",
+        "oidc_client_id",
+        "oidc_client_secret",
+        "price_api_key",
+        "price_fallback_api_key",
     )
     @classmethod
     def _non_blank(cls, v: str | None) -> str | None:
@@ -223,6 +250,8 @@ def _config_out(session: Session) -> ConfigOut:
             ai_model=eff.ai_model,
             ai_base_url=eff.ai_base_url,
             ai_timeout_seconds=eff.ai_timeout_seconds,
+            ai_min_confidence=eff.ai_min_confidence,
+            review_uncategorized=eff.review_uncategorized,
             grafana_url=eff.grafana_url,
             session_ttl_days=eff.session_ttl_days,
             session_idle_hours=eff.session_idle_hours,
@@ -232,11 +261,12 @@ def _config_out(session: Session) -> ConfigOut:
             oidc_enabled=eff.oidc_enabled,
             oidc_auto_provision=eff.oidc_auto_provision,
             price_provider=eff.price_provider,
+            price_fallback_provider=eff.price_fallback_provider,
             price_stale_days=eff.price_stale_days,
             feed_stale_days=eff.feed_stale_days,
             timezone=eff.timezone,
         ),
-        overridden=sorted(persisted),
+        overridden=sorted(k for k in persisted if k not in appsettings.PRICE_KEY_BINDINGS.values()),
         ai_api_key_set=bool(eff.ai_api_key),
         ai_disclosure=[
             AiDisclosureOut(
@@ -245,7 +275,11 @@ def _config_out(session: Session) -> ConfigOut:
             for d in ai_providers.DISCLOSURES
         ],
         oidc_client_secret_set=bool(eff.oidc_client_secret),
-        price_api_key_set=appsettings.price_api_key() is not None,
+        # Set = the selected provider has a key entered for it (#698).
+        price_api_key_set=appsettings.price_key_for(eff.price_provider) is not None,
+        price_fallback_api_key_set=(
+            appsettings.price_key_for(eff.price_fallback_provider) is not None
+        ),
         sync_reschedule_live=scheduler.is_live(),
         encryption=_encryption_status(session),
     )
@@ -360,10 +394,50 @@ def _check_timezone_in_database(session: Session, name: str | None) -> None:
         )
 
 
+_PRICE_KEY_ROLES = (
+    (appsettings.PRICE_API_KEY, "price_provider", "price provider"),
+    (appsettings.PRICE_FALLBACK_API_KEY, "price_fallback_provider", "fallback price provider"),
+)
+
+
+def _bind_price_keys(changes: dict[str, Any]) -> None:
+    """Record, with each price key being saved, the provider it is entered
+    for: its slot's provider once this change applies (#698). The key is
+    then sent to that provider only."""
+    eff = appsettings.effective()
+    for slot, role, label in _PRICE_KEY_ROLES:
+        if slot not in changes:
+            continue
+        provider = changes.get(role) or getattr(eff, role)
+        if provider == "none":
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"choose the {label} before entering its key",
+            )
+        changes[appsettings.PRICE_KEY_BINDINGS[slot]] = provider
+
+
 @router.put("")
 def update_config(body: ConfigUpdate, admin: AdminToken, session: DbSession) -> ConfigOut:
     if "price_api_key" in body.model_fields_set:
         _check_price_api_key(body.price_api_key)
+    if "price_fallback_api_key" in body.model_fields_set:
+        _check_header_key("price_fallback_api_key", body.price_fallback_api_key)
+    if body.model_fields_set & {"price_provider", "price_fallback_provider"}:
+        eff = appsettings.effective()
+        primary = (
+            body.price_provider if "price_provider" in body.model_fields_set else None
+        ) or eff.price_provider
+        fallback = (
+            body.price_fallback_provider
+            if "price_fallback_provider" in body.model_fields_set
+            else None
+        ) or eff.price_fallback_provider
+        if fallback != "none" and fallback == primary:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "the fallback price provider must differ from the provider",
+            )
     if "ai_api_key" in body.model_fields_set:
         _check_header_key("ai_api_key", body.ai_api_key)
     if body.model_fields_set & {"ai_provider", "ai_base_url"}:
@@ -383,6 +457,7 @@ def update_config(body: ConfigUpdate, admin: AdminToken, session: DbSession) -> 
                 f"{key} cannot be null; DELETE /config/{key} resets it to the env default",
             )
         changes[key] = value.model_dump() if isinstance(value, SyncSchedule) else value
+    _bind_price_keys(changes)
     if changes:
         appsettings.set_values(session, changes, actor_token_id=admin.id)
         session.commit()
@@ -396,7 +471,7 @@ def update_config(body: ConfigUpdate, admin: AdminToken, session: DbSession) -> 
 
 @router.delete("/{key}")
 def reset_config(key: str, admin: AdminToken, session: DbSession) -> ConfigOut:
-    if key not in appsettings.ALL_KEYS:
+    if key not in appsettings.ALL_KEYS or key in appsettings.PRICE_KEY_BINDINGS.values():
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"unknown config key: {key}")
     if key in ("ai_provider", "ai_base_url"):
         eff, env = appsettings.effective(), get_settings()
@@ -405,6 +480,10 @@ def reset_config(key: str, admin: AdminToken, session: DbSession) -> ConfigOut:
             env.ai_base_url if key == "ai_base_url" else eff.ai_base_url,
         )
     appsettings.reset_value(session, key, actor_token_id=admin.id)
+    if key in appsettings.PRICE_KEY_BINDINGS:
+        appsettings.reset_value(
+            session, appsettings.PRICE_KEY_BINDINGS[key], actor_token_id=admin.id
+        )
     session.commit()
     appsettings.invalidate()
     if key in (appsettings.SYNC_SCHEDULE_KEY, "timezone"):

@@ -162,14 +162,22 @@ describe("Primary navigation (#542)", () => {
   it.each([
     ["an admin", ADMIN],
     ["a member", MEMBER],
-  ])("offers %s the four work areas, one Settings entry and Log out", async (_who, scopes) => {
+  ])("offers %s the work areas, one Settings entry and Log out", async (_who, scopes) => {
     // /selection without ids reads nothing: the shell alone is under test.
     signedIn(scopes);
     renderWithProviders(<App />, { route: "/selection" });
 
     await screen.findByRole("navigation", { name: "Main" });
     const links = within(mainNav()).getAllByRole("link").map((l) => l.textContent);
-    expect(links).toEqual(["Dashboard", "Accounts", "Scheduled transactions", "Import", "Settings"]);
+    expect(links).toEqual([
+      "Dashboard",
+      "Accounts",
+      "Holdings",
+      "Search",
+      "Scheduled transactions",
+      "Import",
+      "Settings",
+    ]);
     expect(within(mainNav()).getByRole("button", { name: "Log out" })).toBeInTheDocument();
   });
 
@@ -231,9 +239,8 @@ describe("Settings area (#542)", () => {
       "General",
       "Connections",
       "Categories",
-      "Rules",
       "Agent memory",
-      "Prices",
+      "Market data",
       "Agents & API",
       "Security",
       "Users",
@@ -263,9 +270,8 @@ describe("Settings area (#542)", () => {
     expect(sections).toEqual([
       "Connections",
       "Categories",
-      "Rules",
       "Agent memory",
-      "Prices",
+      "Market data",
       "Agents & API",
     ]);
     await waitFor(() => expect(document.title).toBe("Categories · Settings · Purser"));
@@ -300,6 +306,73 @@ describe("Settings area (#542)", () => {
   });
 });
 
+describe("Settings, Categories tabs (#694)", () => {
+  const tabsNav = () => screen.getByRole("navigation", { name: "Categories" });
+  const tabNames = () => within(tabsNav()).getAllByRole("link").map((l) => l.textContent);
+
+  it("opens on the Categories tab, each tab with its own URL", async () => {
+    signedIn(ADMIN, { "GET /categories": ok([]), "GET /config": ok(configOut()) });
+    renderWithProviders(
+      <>
+        <App />
+        <Where />
+      </>,
+      { route: "/settings/categories" },
+    );
+
+    expect(await screen.findByRole("heading", { name: "Transactions that need review" })).toBeInTheDocument();
+    expect(tabNames()).toEqual(["Categories", "Rules", "AI categorization"]);
+    expect(within(tabsNav()).getByRole("link", { name: "Categories" })).toHaveAttribute("aria-current", "page");
+    expect(within(tabsNav()).getByRole("link", { name: "Rules" })).toHaveAttribute("href", "/settings/categories/rules");
+    expect(within(tabsNav()).getByRole("link", { name: "AI categorization" })).toHaveAttribute("href", "/settings/categories/ai");
+    await waitFor(() => expect(document.title).toBe("Categories · Settings · Purser"));
+  });
+
+  it("moves between tabs, keeping Categories current in the section list", async () => {
+    signedIn(ADMIN, { "GET /categories": ok([]), "GET /config": ok(configOut()), "GET /rules": ok([]) });
+    const { user } = renderWithProviders(
+      <>
+        <App />
+        <Where />
+      </>,
+      { route: "/settings/categories" },
+    );
+
+    await user.click(await within(await screen.findByRole("navigation", { name: "Categories" })).findByRole("link", { name: "Rules" }));
+    expect(screen.getByTestId("where")).toHaveTextContent("/settings/categories/rules");
+    expect(await screen.findByText("No active rules yet.")).toBeInTheDocument();
+    expect(within(tabsNav()).getByRole("link", { name: "Rules" })).toHaveAttribute("aria-current", "page");
+    expect(within(tabsNav()).getByRole("link", { name: "Categories" })).not.toHaveAttribute("aria-current");
+    expect(within(settingsNav()).getByRole("link", { name: "Categories" })).toHaveAttribute("aria-current", "page");
+    await waitFor(() => expect(document.title).toBe("Rules · Categories · Settings · Purser"));
+
+    await user.click(within(tabsNav()).getByRole("link", { name: "AI categorization" }));
+    expect(screen.getByTestId("where")).toHaveTextContent("/settings/categories/ai");
+    expect(await screen.findByRole("heading", { name: "Minimum confidence" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Provider")).toHaveValue("none");
+    await waitFor(() => expect(document.title).toBe("AI categorization · Categories · Settings · Purser"));
+  });
+
+  it("offers a member the Categories and Rules tabs, with no review setting", async () => {
+    signedIn(MEMBER, { "GET /categories": ok([]), "GET /rules": ok([]) });
+    renderWithProviders(<App />, { route: "/settings/categories/rules" });
+
+    expect(await screen.findByText("No active rules yet.")).toBeInTheDocument();
+    expect(tabNames()).toEqual(["Categories", "Rules"]);
+    expect(apiMock.GET).not.toHaveBeenCalledWith("/config");
+  });
+
+  it("tells a member who reaches the AI tab directly, without reading the config", async () => {
+    signedIn(MEMBER);
+    renderWithProviders(<App />, { route: "/settings/categories/ai" });
+
+    expect(await screen.findByText(/AI categorization is managed by an administrator/)).toBeInTheDocument();
+    expect(tabNames()).toEqual(["Categories", "Rules"]);
+    // GET /config is unrouted: a call would fail this test.
+    expect(apiMock.GET).not.toHaveBeenCalledWith("/config");
+  });
+});
+
 describe("Moved routes (#542)", () => {
   // Every page an old link can land on, quiet: lists empty, config defaults.
   const quiet = {
@@ -311,6 +384,7 @@ describe("Moved routes (#542)", () => {
     "GET /rules": ok([]),
     "GET /memories": ok([]),
     "GET /prices/status": fail(503, "unavailable"),
+    "GET /prices/symbols": fail(503, "unavailable"),
     "GET /tokens": ok([]),
     "GET /users": ok([]),
     "GET /audit/options": fail(503, "unavailable"),
@@ -327,9 +401,12 @@ describe("Moved routes (#542)", () => {
     ["/config", "/settings/general"],
     ["/config/simplefin", "/settings/connections"],
     ["/config/categories", "/settings/categories"],
-    ["/config/rules", "/settings/rules"],
+    ["/config/rules", "/settings/categories/rules"],
+    ["/settings/rules", "/settings/categories/rules"],
+    ["/settings/rules?from=bookmark", "/settings/categories/rules?from=bookmark"],
     ["/config/memories", "/settings/agent-memory"],
-    ["/config/prices", "/settings/prices"],
+    ["/config/prices", "/settings/market-data"],
+    ["/settings/prices", "/settings/market-data"],
     ["/config/settings", "/settings/general"],
     ["/connections", "/settings/connections"],
     ["/tokens", "/settings/agents"],

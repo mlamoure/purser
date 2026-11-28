@@ -42,6 +42,10 @@ class ReconciliationOut(BaseModel):
     target_balance: Decimal  # the statement figure in ledger sign
     adjustment: Decimal  # what Purser posted to reach the target; 0 = it already matched
     adjustment_tx_id: uuid.UUID | None
+    # Its acceptance (decision 141): until then, while the adjustment still
+    # books to expenses.reconciliation_adjustments, it needs review.
+    adjustment_accepted_at: datetime | None = None
+    adjustment_accepted_by: uuid.UUID | None = None
     created_at: datetime
     # Live check, computed on read:
     ledger_balance: Decimal  # the balance on as_of in this basis NOW
@@ -60,6 +64,8 @@ class ReconciliationOut(BaseModel):
             target_balance=row.target_balance,
             adjustment=row.adjustment,
             adjustment_tx_id=row.adjustment_tx_id,
+            adjustment_accepted_at=row.adjustment_accepted_at,
+            adjustment_accepted_by=row.adjustment_accepted_by,
             created_at=row.created_at,
             ledger_balance=c.ledger_balance,
             difference=c.difference,
@@ -116,6 +122,9 @@ class AccountOut(BaseModel):
     external_id: str | None
     connection_id: uuid.UUID | None
     min_balance: Decimal | None
+    # The day a credit card's statement closes (#674, decision 136); null for
+    # every other account and for a card without one.
+    statement_close_day: int | None = None
     # Lifecycle (DESIGN §3.4): hidden_at drops it from the default listing;
     # closed_at makes it read-only. Both are always null for categories.
     hidden_at: datetime | None
@@ -195,6 +204,7 @@ class AccountOut(BaseModel):
             external_id=None if redacted else a.external_id,
             connection_id=None if redacted else a.connection_id,
             min_balance=a.min_balance,
+            statement_close_day=a.statement_close_day,
             hidden_at=a.hidden_at,
             closed_at=a.closed_at,
             feed_start=a.feed_start,
@@ -301,11 +311,11 @@ class AccountUpdate(BaseModel):
     holdings_source: Literal["feed", "manual"] | None = Field(
         default=None,
         description="Where this brokerage account's holdings come from: `feed` (the "
-        "SimpleFIN snapshots) or `manual` (positions recorded by hand, priced daily, and "
+        "SimpleFIN snapshots) or `manual` (positions entered in Purser, priced daily, and "
         "projected into the same snapshots). Switching to `manual` keeps every feed "
         "snapshot as history; the first manual snapshot is dated the day after the last "
         "feed one. Switching back to `feed` needs a feed mapping (422 without one) and changes "
-        "no snapshot: the hand-tracked holdings stay in effect until the first sync after the "
+        "no snapshot: the holdings entered in Purser stay in effect until the first sync after the "
         "switch, which ends them from its own date (a position the feed does not report ends "
         "there); positions stay, read-only. Admin scope; brokerage accounts only (422 "
         "otherwise).",
@@ -317,10 +327,21 @@ class AccountUpdate(BaseModel):
         description=_MIN_BALANCE_HELP + " An explicit null clears the floor, and the "
         "account leaves the shortfall scan; absent leaves it unchanged. Write scope.",
     )
+    statement_close_day: int | None = Field(
+        default=None,
+        ge=1,
+        le=31,
+        description="A credit card only (422 otherwise): the day of the month its statement "
+        "closes, 1..31 (a day past a month's end means that month's last day). Payments to "
+        "the card whose schedule sets payment_amount are then sized from the statement "
+        "cycle (decision 136) and resized at once. GET /accounts/{id}/statement-cycle "
+        "suggests a day from the card's history. An explicit null clears it; absent leaves "
+        "it unchanged. Write scope.",
+    )
     feed_balance_is_cash: bool | None = Field(
         default=None,
         description="Say that this brokerage account's feed balance is its CASH, as for a "
-        "cash sweep whose positions are tracked by hand (`holdings_source` `manual`; 422 "
+        "cash sweep whose positions are entered in Purser (`holdings_source` `manual`; 422 "
         "otherwise). The post-sync drift check then compares that balance with the "
         "account's transactions, like a checking account's. Off by default because many "
         "brokers report the whole account value instead. Turning it off clears a "
@@ -545,6 +566,49 @@ def get_account(account_id: uuid.UUID, token: ReadToken, session: DbSession) -> 
         **_account_out(session, account, token).model_dump(),
         bank_snapshot=account_snapshot(session, account),
     )
+
+
+class StatementOut(BaseModel):
+    close: date = Field(description="the statement's closing date")
+    owed: Decimal = Field(description="the balance owed at the close, posted rows only")
+
+
+class StatementCycleOut(BaseModel):
+    """A credit card's statement cycle (#674, decision 136)."""
+
+    account: str
+    statement_close_day: int | None = Field(description="the closing day set on the card")
+    suggested_close_day: int | None = Field(
+        description="the closing day the card's history (or a recorded statement date) "
+        "suggests; never applied for you — set statement_close_day with PATCH"
+    )
+    suggestion_source: Literal["history", "statement", "none"]
+    suggestion_detail: str
+    statements: list[StatementOut] = Field(
+        description="the latest statements on record, newest first (needs a closing day)"
+    )
+
+
+@router.get(
+    "/{account_id}/statement-cycle",
+    # The same as MCP card_statement_cycle (#698): a statement's balance is
+    # an amount the caller can ask to leave out.
+    dependencies=[disclose(Emits(amount=("statements[].owed",)))],
+)
+def statement_cycle(
+    account_id: uuid.UUID, token: ReadToken, session: DbSession
+) -> StatementCycleOut:
+    """A credit card's statement cycle: its closing day, a suggested one (the
+    day whose closing balance equals most of the card's full payments, or
+    the day of the latest recorded statement), and its latest statements."""
+    from purser import cycles
+
+    try:
+        account = ledger.get_account(session, account_id)
+        out = cycles.describe_card(session, account)
+    except ledger.LedgerError as exc:
+        raise _handle(exc) from exc
+    return StatementCycleOut(**out)
 
 
 class BalanceAsOf(BaseModel):
@@ -907,6 +971,8 @@ def update_account(
             feed_balance_is_cash=body.feed_balance_is_cash,
             balance_true_up=body.balance_true_up,
             path=body.path,
+            statement_close_day=body.statement_close_day,
+            statement_close_day_set="statement_close_day" in body.model_fields_set,
             actor_token_id=token.id,
         )
         asset_set = {
@@ -1066,7 +1132,8 @@ def reconcile_account(
     Purser compares the statement figure with its own balance on ``as_of`` in
     the chosen ``basis`` and posts ONE adjustment for the difference, dated
     ``as_of``, to the system category ``expenses.reconciliation_adjustments``.
-    The adjustment lands in the review set so a person sees it. When the ledger
+    The adjustment needs review until it is recategorized, split or accepted
+    (``POST /transactions/{id}/accept-adjustment``), so a person sees it. When the ledger
     already matches, nothing is posted and the clean reconcile is still
     recorded. Either way ``reconciled_through`` advances and an
     ``account.reconciled`` event is emitted.

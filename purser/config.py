@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Annotated
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -90,31 +90,35 @@ class Settings(BaseSettings):
     # Seconds to wait for one provider answer. A model on modest hardware can
     # need longer than a hosted service; 30 is the value before #640.
     ai_timeout_seconds: int = 30
-    # Backend review pass (issue #175, DESIGN §11.2). Gated by ai_provider on
-    # top of this: configuring a provider grants nothing by itself.
-    ai_review: bool = False
-    # The unreviewed set must not grow without bound. Matches
-    # audit_retention_days by default, so a review mark never outlives the
-    # audit row that explains it.
-    review_max_age_days: int = 90
+    # The model's confidence floor (#694, decision 141): an AI category guess
+    # below it is not applied, so the row stays uncategorized and needs
+    # review. An `[account]` answer also needs at least 0.85
+    # (categorize.BRACKET_MIN_CONFIDENCE). 0 to 1.
+    ai_min_confidence: float = Field(default=0.7, ge=0, le=1)
+    # Flag bank-sync rows with no category as needing review (#694, decision
+    # 141). Reconciliation adjustments are flagged whatever this says.
+    review_uncategorized: bool = True
     # MCP Apps presentation layer (issue #72): directory holding the built
     # self-contained widget bundles served as ui://purser/* resources. The
     # image build drops them at /app/widgets; dev falls back to
     # frontend/dist-widgets when this dir has nothing to serve.
     widgets_dir: str = "/app/widgets"
     # Manually tracked holdings (#390, decision 89): the daily-close provider
-    # (`none` or `tiingo`) and how many days old a close may be before a
-    # position is reported as priced on a stale close. The provider's API key
-    # is NOT an env setting: it lives only in the encrypted app settings
-    # (Settings, Prices), because Purser is the party that sends it.
+    # (`none`, `tiingo` or `eodhd`), a fallback asked for what it cannot
+    # answer (#686, decision 139; `none` by default), and how many days old
+    # a close may be before a position is reported as priced on a stale
+    # close. The providers' API keys are NOT env settings: they live only in
+    # the encrypted app settings (Settings, Market data), because Purser is
+    # the party that sends them.
     price_provider: str = "none"
+    price_fallback_provider: str = "none"
     price_stale_days: int = 7
     # Feed freshness (#480): a mapped account whose bank balance date is more
     # than this many days old is stale (feed.stale fires once per frozen date).
     feed_stale_days: int = 4
     # The household time zone (#471, decision 105): an IANA name whose
     # calendar date is the ledger day — "today" for schedules, matching,
-    # suggestions, the digest, net worth, review, reconciliation, holdings and
+    # suggestions, the digest, net worth, reconciliation, holdings and
     # feed freshness. Instants (audit, fetches, sessions) stay UTC, and so do
     # the scheduler's job times. UTC by default, so existing installs keep
     # the day they had. Runtime-editable (Config, Settings).
@@ -169,6 +173,11 @@ REMOVED_ENV_VARS = {
     # user setting.
     "PURSER_PRIVACY_PURCHASE": "agents now ask for privacy per call with withhold",
     "PURSER_PRIVACY_AMOUNT": "agents now ask for privacy per call with withhold",
+    # #694: a transaction needs review only for a reason (no category on a
+    # bank-sync row, or a reconciliation adjustment), so nothing ages out and
+    # no server-side pass clears rows.
+    "PURSER_AI_REVIEW": "the server-side review pass was removed",
+    "PURSER_REVIEW_MAX_AGE_DAYS": "rows no longer age out of review",
 }
 
 

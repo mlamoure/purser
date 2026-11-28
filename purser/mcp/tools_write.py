@@ -297,6 +297,9 @@ async def create_schedule(
     counterparty_account: str | None = None,
     note: str | None = None,
     propose: bool = False,
+    payment_amount: str | None = None,
+    later_estimate: str | None = None,
+    later_window: int | None = None,
 ) -> dict[str, Any]:
     """Create a bill/income schedule (e.g. from a parsed statement email).
     It is created active. When you are acting on your own initiative rather
@@ -328,7 +331,18 @@ async def create_schedule(
     itself the signal that links its bank rows (the same two accounts, exactly
     the instance amount, both sides within 3 days of the instance — also when
     the sides post on different days), and the merged transfer settles the
-    instance once."""
+    instance once.
+
+    A payment to a CREDIT CARD that has a statement closing day
+    (update_account statement_close_day) can be sized from the statement
+    cycle: payment_amount = statement_balance (what the statement showed,
+    less credits since), minimum_due (a recorded statement's minimum, else
+    amount), fixed (amount, never more than the statement) or
+    current_balance; later_estimate sizes the payments after the next =
+    statement_average (the average of the last later_window statements,
+    default 6), same_cycle_last_year or fixed (amount). An estimated payment
+    to a card with a closing day defaults to statement_balance and
+    statement_average."""
 
     def op(session: Session) -> dict[str, Any]:
         from purser import schedules as service
@@ -353,6 +367,9 @@ async def create_schedule(
             token=_token_row(session, principal),
             note=note,
             propose=propose,
+            payment_amount=payment_amount,
+            later_estimate=later_estimate,
+            later_window=later_window,
         )
         if isinstance(schedule, Suggestion):
             # propose=true: the draft landed in the inbox (#233).
@@ -386,6 +403,9 @@ async def update_schedule(
     category: str | None = None,
     autopost_policy: str | None = None,
     counterparty_account: str | None = None,
+    payment_amount: str | None = None,
+    later_estimate: str | None = None,
+    later_window: int | None = None,
 ) -> dict[str, Any]:
     """Edit a schedule's rule (write scope); only the fields sent change
     ("" clears payee or memo; a flat schedule keeps at least one).
@@ -396,12 +416,18 @@ async def update_schedule(
     description or payee still equals the old one (`relabeled` counts them);
     labels set by hand stay. category and counterparty_account are mutually
     exclusive: sending one switches the schedule's shape between flat and
-    transfer."""
+    transfer. payment_amount, later_estimate and later_window size a card
+    payment from the statement cycle (see create_schedule);
+    payment_amount=off turns that off."""
 
     def op(session: Session) -> dict[str, Any]:
         from purser import schedules as service
 
         principal = _principal()
+        cycle_off = payment_amount == "off"
+        cycle_sent = cycle_off or any(
+            v is not None for v in (payment_amount, later_estimate, later_window)
+        )
         updated = service.update_schedule(
             session,
             schedule_id=uuid.UUID(schedule_id),
@@ -418,11 +444,17 @@ async def update_schedule(
             memo=memo,
             autopost_policy=autopost_policy,
             counterparty_account_ref=counterparty_account,
+            payment_amount=None if cycle_off else payment_amount,
+            later_estimate=None if cycle_off else later_estimate,
+            later_window=None if cycle_off else later_window,
+            cycle_set=cycle_sent,
         )
         schedule = updated.schedule
         return {
             "id": str(schedule.id),
             "status": schedule.status,
+            "payment_amount": schedule.payment_amount,
+            "later_estimate": schedule.later_estimate,
             "rrule": schedule.rrule,
             "dtstart": schedule.dtstart.isoformat(),
             "next_due": schedule.next_due.isoformat() if schedule.next_due else None,
@@ -580,10 +612,18 @@ async def reset_instance(transaction_id: str) -> dict[str, Any]:
     kind="write",
     entity="transaction",
     scope="write",
-    emits=Emits(narrative=True, amount=("amount", "previous_amount")),
+    emits=Emits(
+        narrative=True,
+        amount=("amount", "previous_amount"),
+        balance=("statement_balance", "minimum_due"),
+    ),
 )
 async def record_statement_balance(
-    statement_balance: str, account: str, due_date: str, statement_date: str | None = None
+    statement_balance: str,
+    account: str,
+    due_date: str,
+    statement_date: str | None = None,
+    minimum_due: str | None = None,
 ) -> dict[str, Any]:
     """Record a credit card's statement balance against the payment it is
     due on (write scope). Use it for a card statement email or notice
@@ -596,8 +636,16 @@ async def record_statement_balance(
     card's current balance, which card-payment schedules estimate from by
     default, no longer moves it. forecast_balance shows that event with
     basis 'statement'. Recording again replaces the figure; reset_instance
-    hands the payment back to the current-balance estimate. Credit cards
-    only: for a loan payment or any other bill, use override_instance."""
+    hands the payment back to the rule's estimate. Credit cards only: for a
+    loan payment or any other bill, use override_instance.
+
+    minimum_due is the statement's minimum payment, when it prints one: a
+    schedule whose payment_amount is minimum_due pays it, and one that pays
+    a fixed sum pays at most the statement. Pass statement_date whenever the
+    statement gives it: when its day differs from the card's
+    statement_close_day, close_day_hint in the result says what to set with
+    update_account; nothing is changed for you. On a card with no closing day
+    the date feeds card_statement_cycle's suggestion."""
 
     def op(session: Session) -> dict[str, Any]:
         from purser import schedules as service
@@ -607,6 +655,10 @@ async def record_statement_balance(
             figure = Decimal(statement_balance)
         except InvalidOperation as exc:
             raise ValueError("statement_balance must be a decimal string") from exc
+        try:
+            minimum = Decimal(minimum_due) if minimum_due is not None else None
+        except InvalidOperation as exc:
+            raise ValueError("minimum_due must be a decimal string") from exc
         recorded = service.record_statement_balance(
             session,
             token=_token_row(session, principal),
@@ -614,9 +666,16 @@ async def record_statement_balance(
             statement_date=date_type.fromisoformat(statement_date) if statement_date else None,
             account_ref=account,
             due_date=date_type.fromisoformat(due_date),
+            minimum_due=minimum,
         )
         tx, row = recorded.tx, recorded.statement
+        extra: dict[str, Any] = {}
+        if row.minimum_due is not None:
+            extra["minimum_due"] = _amount(row.minimum_due)
+        if recorded.close_day_hint is not None:
+            extra["close_day_hint"] = recorded.close_day_hint
         return {
+            **extra,
             "transaction_id": str(tx.id),
             "schedule": recorded.schedule.name,
             "date": tx.date.isoformat(),
@@ -717,6 +776,7 @@ async def update_account(
     secured_by: str | None = None,
     revalue_after_days: int | None = None,
     balance_true_up: bool | None = None,
+    statement_close_day: int | None = None,
 ) -> dict[str, Any]:
     """Rename, re-describe or hide a real account, or set its floor (write
     scope); only the fields sent change. asset_kind sets what a hand-valued
@@ -749,7 +809,15 @@ async def update_account(
     min_balance="" clears the floor and stops the warnings. Checking,
     savings, cash and credit-card accounts only. Categories are renamed in
     the app, not here, and moving an account to another path is done in the
-    app too."""
+    app too.
+    statement_close_day, on a credit card, is the day of the month its
+    statement closes (1..31; a day past a month's end means its last day; 0
+    clears it). With it, payments to the card whose schedule sets
+    payment_amount are sized from the statement cycle and resized at once:
+    what remains of the last statement, then a projection, then the average
+    of past statements. card_statement_cycle suggests the day from the
+    card's history; set it only when the user confirms or a statement says
+    so."""
 
     def op(session: Session) -> dict[str, Any]:
         from purser import ledger as ledger_service
@@ -764,11 +832,12 @@ async def update_account(
             secured_by,
             revalue_after_days,
             balance_true_up,
+            statement_close_day,
         )
         if all(v is None for v in sent):
             raise ValueError(
                 "nothing to change: pass name, description, hidden, min_balance, asset_kind, "
-                "secured_by, revalue_after_days or balance_true_up"
+                "secured_by, revalue_after_days, balance_true_up or statement_close_day"
             )
         if name is not None and not name.strip():
             raise ValueError("name must not be empty")
@@ -794,6 +863,8 @@ async def update_account(
             min_balance=floor,
             min_balance_set=min_balance is not None,
             balance_true_up=balance_true_up,
+            statement_close_day=statement_close_day or None,
+            statement_close_day_set=statement_close_day is not None,
             actor_token_id=principal.token_id,
         )
         from purser import assets as assets_service
@@ -807,6 +878,8 @@ async def update_account(
         }
         if updated.type == "brokerage":
             out["balance_true_up"] = updated.balance_true_up
+        if updated.type == "credit_card":
+            out["statement_close_day"] = updated.statement_close_day
         if asset_kind is not None or revalue_after_days is not None:
             row = assets_service.update_details(
                 session,
@@ -854,8 +927,10 @@ async def reconcile_account(
     every other amount in the answer is ledger sign. basis is posted (default)
     or pending_inclusive (posted plus pending); as_of is YYYY-MM-DD, today or
     earlier. Purser posts ONE adjustment for the difference to a system
-    category, and it lands in the review set; when the ledger already matches
-    nothing is posted and the clean reconcile is still recorded. dry_run=true
+    category; it needs review until it is recategorized or split to what it
+    was, or accepted (accept_reconciliation_adjustment). When the ledger
+    already matches nothing is posted and the clean reconcile is still
+    recorded. dry_run=true
     answers the same without writing. Retrying the same date and balance
     returns created=false while it still holds; once a backdated change has
     moved the balance on that date it fails with the difference.
@@ -932,7 +1007,7 @@ async def set_starting_balance(
     You pass only the account. Purser takes the bank's figure, date, sign and
     basis, and posts ONE entry for the difference against the system account
     equity.opening_balances (neither income nor spending), dated the day
-    before the account's earliest transaction; it lands in the review set.
+    before the account's earliest transaction.
     Afterwards the comparison's difference is zero. Purser keeps the entry in
     step by itself: when older history is imported it gives way by exactly
     those rows, so do not correct it. Mapping a new account in the UI does

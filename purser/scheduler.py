@@ -106,13 +106,18 @@ def _register_builtin_jobs() -> None:
     # Bridge budget. The actual cron comes from config at build time.
     register_job("feed.sync_daily", dict(DEFAULT_SYNC_CRON), sync_all_active)
 
+    from purser.holdings.prices import FETCH_HOUR_UTC, FETCH_MINUTE_UTC
     from purser.holdings.prices import fetch_daily as fetch_prices_daily
 
     # Daily closes for manually tracked positions (#390, decision 89), then a
     # re-projection of every manual account: after the 06:30 sync (its feed
     # snapshots feed the feed-implied prices) and well before the 07:30
     # net-worth materialization.
-    register_job("prices.fetch_daily", {"hour": 6, "minute": 40}, fetch_prices_daily)
+    register_job(
+        "prices.fetch_daily",
+        {"hour": FETCH_HOUR_UTC, "minute": FETCH_MINUTE_UTC},
+        fetch_prices_daily,
+    )
 
     from purser.matching import run_matching_job
 
@@ -152,13 +157,6 @@ def _register_builtin_jobs() -> None:
     # Retention: prune audit rows past audit_retention_days (issue #122).
     # 08:15 stays clear of the 06:30-07:30 job train.
     register_job("audit.prune_daily", {"hour": 8, "minute": 15}, audit.prune_job)
-
-    from purser.review import aged_sweep_job
-
-    # The unreviewed set must not grow without bound (#175). 08:30 keeps it
-    # clear of the 06:30-08:15 train; the sweep FIRING is itself the signal
-    # that review has lapsed, so its count rides into whats_new.
-    register_job("review.aged_sweep", {"hour": 8, "minute": 30}, aged_sweep_job)
 
 
 def _sync_trigger() -> tuple[dict[str, str | int], str]:

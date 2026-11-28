@@ -30,7 +30,7 @@ const STATE_VARIANT: Record<RuleState, "default" | "green" | "amber" | "red"> = 
 };
 
 /**
- * Settings -> Rules. Drafts are banded at the top: a draft never executes, so
+ * Settings -> Categories -> Rules (a section of its own until #694). Drafts are banded at the top: a draft never executes, so
  * the only thing standing between a proposed rule and a live one is this
  * page. Rules are listed in EVALUATION order, so which one wins is visible
  * here rather than deduced after the fact.

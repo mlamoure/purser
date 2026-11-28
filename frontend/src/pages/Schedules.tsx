@@ -53,6 +53,11 @@ function BasisBadge({ instance, currency }: { instance: InstanceOut; currency?: 
   }
   if (instance.pinned) return <Badge variant="amber">pinned</Badge>;
   if (instance.basis === "counterparty_balance") return <Badge>current balance</Badge>;
+  // Statement cycle (#674): a closed statement is known, the rest projected.
+  if (instance.basis === "statement_close") return <Badge variant="green">closed statement</Badge>;
+  if (instance.basis === "cycle_projection") return <Badge>projected statement</Badge>;
+  if (instance.basis === "statement_average" || instance.basis === "same_cycle_last_year")
+    return <Badge>{amountBasisLabel(instance.basis)}</Badge>;
   return null;
 }
 
@@ -70,7 +75,11 @@ export function InstancesPanel({
   const [draft, setDraft] = useState<{ amount: string; date: string }>({ amount: "", date: "" });
   // The card statement form (#351): the balance as printed and its closing date.
   const [stating, setStating] = useState<string | null>(null);
-  const [statement, setStatement] = useState<{ balance: string; closed: string }>({ balance: "", closed: "" });
+  const [statement, setStatement] = useState<{ balance: string; closed: string; minimum: string }>({
+    balance: "",
+    closed: "",
+    minimum: "",
+  });
   const detail = useQuery({
     queryKey: ["schedule", scheduleId],
     queryFn: async () => {
@@ -128,6 +137,7 @@ export function InstancesPanel({
           transaction_id: txId,
           statement_balance: statement.balance.trim(),
           ...(statement.closed ? { statement_date: statement.closed } : {}),
+          ...(statement.minimum.trim() ? { minimum_due: statement.minimum.trim() } : {}),
         },
       });
       if (err) throw new Error(errorDetail(err));
@@ -187,6 +197,13 @@ export function InstancesPanel({
                       onChange={(e) => setStatement({ ...statement, closed: e.target.value })}
                       aria-label="Statement closing date"
                     />
+                    <Input
+                      className="w-28"
+                      value={statement.minimum}
+                      onChange={(e) => setStatement({ ...statement, minimum: e.target.value })}
+                      placeholder="minimum due"
+                      aria-label="Minimum payment due (optional)"
+                    />
                     <Button size="sm" onClick={() => record.mutate(i.transaction_id)}>
                       Save
                     </Button>
@@ -234,7 +251,11 @@ export function InstancesPanel({
                         variant="outline"
                         title="Record the card statement balance this payment pays"
                         onClick={() => {
-                          setStatement({ balance: i.statement_balance ?? "", closed: i.statement_date ?? "" });
+                          setStatement({
+                            balance: i.statement_balance ?? "",
+                            closed: i.statement_date ?? "",
+                            minimum: i.minimum_due ?? "",
+                          });
                           setEditing(null);
                           setStating(i.transaction_id);
                         }}

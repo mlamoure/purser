@@ -49,7 +49,7 @@ reports count `900.00` of taxes and `4000.00` of salary.
 In an account register, open a row's **Split…** action. Pick a category or an
 account for each line (accounts are in the picker's Transfers group), type
 its amount and an optional memo, and add or remove lines. **Left to assign**
-shows how much of the row is not on a line yet; **Save** stays disabled until
+shows how much of the row is not on a line yet; **Save split** stays disabled until
 it reaches zero, and **Put the rest on Uncategorized** adds what is left as a
 line on the uncategorized placeholder, so you can finish it later. A split
 row shows **Split (n)** in the category column; clicking it opens the editor
@@ -125,10 +125,10 @@ and the split now carries the bank's row.
 **Remove split** in the editor, `DELETE /transactions/{id}/split` or MCP
 `unsplit_transaction` turns the row back into one category — the one you
 give, else the uncategorized placeholder — and brings back every row that
-backed an account line exactly as it was, pending or posted. The row keeps
-its review mark, and so does each row that comes back: removing a split does
-not mark anything reviewed again. A split that carries backing rows cannot be
-voided directly; remove the split first.
+backed an account line exactly as it was, pending or posted. A bank row that
+comes back with no category [needs review](../../how-to/review-new-transactions/)
+again, as any bank row with no category does. A split that carries backing
+rows cannot be voided directly; remove the split first.
 
 ## Split like last time
 
@@ -137,7 +137,7 @@ you (or your agent) made, Purser puts a **split** card in the
 [suggestions inbox](../../how-to/suggestions/): the same lines, with the
 amount difference on the largest category line, and an account line backed
 by the one row on that account that exactly matches it, when there is
-exactly one. Accept applies it; **Edit…** opens the editor prefilled and
+exactly one. **Split like this** applies it; **Edit…** opens the editor prefilled and
 saves through the card; reject remembers your answer for that row, or for
 the payee on that account. A payee includes every name a
 [rename rule](../../how-to/rules/#renaming-consolidates-history-not-just-new-rows) merged into it, so a payroll your bank

@@ -37,11 +37,22 @@ class EstimateBasis(StrEnum):
 BASIS_FIXED = "fixed"
 BASIS_OVERRIDE = "override"
 BASIS_STATEMENT = "statement"
+# A card payment sized from its statement cycle (#674, decision 136) adds
+# the close-passed remainder, the next-cycle projection and the two later
+# estimates (``purser.core.cycles``).
+BASIS_STATEMENT_CLOSE = "statement_close"
+BASIS_CYCLE_PROJECTION = "cycle_projection"
+BASIS_STATEMENT_AVERAGE = "statement_average"
+BASIS_SAME_CYCLE_LAST_YEAR = "same_cycle_last_year"
 AMOUNT_BASES: tuple[str, ...] = (
     BASIS_FIXED,
     *(b.value for b in EstimateBasis),
     BASIS_OVERRIDE,
     BASIS_STATEMENT,
+    BASIS_STATEMENT_CLOSE,
+    BASIS_CYCLE_PROJECTION,
+    BASIS_STATEMENT_AVERAGE,
+    BASIS_SAME_CYCLE_LAST_YEAR,
 )
 
 

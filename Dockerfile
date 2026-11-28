@@ -34,6 +34,10 @@ FROM python:3.15-slim
 
 # Refresh distribution security fixes even when the upstream image predates
 # them. Scan the resulting image, not just the Python lockfile.
+# APT_REFRESH is part of this layer's cache key: the deploy build passes the
+# UTC date, so a persistent build cache cannot keep serving packages from
+# before a fix was published (#696). Empty by default (no cache, no change).
+ARG APT_REFRESH=""
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*

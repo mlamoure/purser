@@ -318,13 +318,15 @@ def _suggestions_block(session: Session) -> dict[str, Any]:
 
 
 def _review_block(session: Session) -> dict[str, Any]:
-    """Unreviewed count + how stale the oldest is (#175). `oldest_days` is
-    the leading indicator; the aged sweep is the backstop."""
+    """How many transactions need review, by reason (decision 141): read
+    live, so the brief keeps counting a row until it is fixed."""
     from purser import review
 
+    counts = review.counts(session)
     return {
-        "unreviewed": review.unreviewed_count(session),
-        "oldest_days": review.oldest_unreviewed_days(session),
+        "needs_review": counts["total"],
+        "uncategorized": counts[review.REASON_UNCATEGORIZED],
+        "reconciliation_adjustments": counts[review.REASON_ADJUSTMENT],
     }
 
 

@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
-from purser import ledger, matching, qif_import, review, transfers
+from purser import ledger, matching, qif_import, transfers
 from purser.admin import account_delete
 from purser.admin.account_delete import DeleteRefused
 from purser.core import ledger as core
@@ -29,7 +29,6 @@ from purser.models import (
     RawFetch,
     Suggestion,
     Transaction,
-    TransactionReview,
     User,
 )
 from tests.conftest import today
@@ -264,39 +263,6 @@ def test_delete_unlinks_a_split_loan_payment_and_counterpart_survives(
     assert (
         db_session.execute(
             select(func.count()).select_from(Posting).where(Posting.account_id == interest.id)
-        ).scalar_one()
-        == 0
-    )
-
-
-def test_delete_takes_review_marks_with_the_rows(db_session: Session) -> None:
-    """Migration 0021 backfilled a review mark onto every row that existed
-    then, and its foreign key has no cascade: the guarded delete removes the
-    marks with their rows instead of failing on them (#284)."""
-    token = _commit_token(db_session, "marks")
-    dupe = _account(db_session, token, "Dupe", "assets.dupe")
-    qif_import.import_qif(
-        db_session, content=SINGLE_QIF, account_map={"__default__": str(dupe.id)}, token=token
-    )
-    rows = list(
-        db_session.execute(
-            select(Transaction.id)
-            .join(Posting, Posting.transaction_id == Transaction.id)
-            .where(Posting.account_id == dupe.id)
-        ).scalars()
-    )
-    for tx_id in rows:
-        review.mark(db_session, tx_id=tx_id, token=None, via=review.VIA_BACKFILL)
-
-    account = account_delete.resolve_and_check(db_session, str(dupe.id))
-    summary = account_delete.execute_delete(db_session, account, actor_token_id=token.id)
-    assert summary["transactions_deleted"] == 2
-    assert summary["reviews_deleted"] == 2
-    assert (
-        db_session.execute(
-            select(func.count())
-            .select_from(TransactionReview)
-            .where(TransactionReview.transaction_id.in_(rows))
         ).scalar_one()
         == 0
     )

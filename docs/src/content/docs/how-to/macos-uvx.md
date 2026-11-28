@@ -13,7 +13,7 @@ script installs one, so that you or your AI agent can go straight on with the
 setup:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.6/scripts/install-docker-macos.sh
+curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.7/scripts/install-docker-macos.sh
 bash install-docker-macos.sh
 ```
 

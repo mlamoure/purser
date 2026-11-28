@@ -260,8 +260,9 @@ edit is refused.
 Disable the rule, edit it, and activate it again, so a wider scope goes
 through the same confirmation.
 
-The Rules page reads each rule as words with account and category names — for
-example *Payee contains "acme" on Checking*, then *Category Fitness* — and keeps
+The Rules page (**Settings -> Categories -> Rules**) reads each rule as words
+with account and category names — for
+example *On Checking, payee contains "acme"*, then *Category Fitness* — and keeps
 the stored one-line form, with paths, under **As stored** for matching a rule
 against an audit row.
 
@@ -286,9 +287,13 @@ curl -sX POST https://purser.example.com/rules/$RULE_ID/apply-history \
 ```
 
 The dry run's counts are the real run's results — both walk the same candidate
-list. That list covers all of your history, however long: the preview samples
-the newest 5,000 rows (`scan_capped` says when it stopped there), but
-apply-history examines every live row and reports how many as `scanned`.
+list. That list covers all of your history, however long: apply-history
+examines every live row and reports how many as `scanned`. The preview covers
+all of your history too when the rule matches payee or description text,
+because the server finds the candidates in its in-memory search text; a rule
+with no text (amount or account only), or a preview run while the server is
+still building that search text after a restart, samples the newest 5,000
+rows, and `scan_capped` says when it stopped there.
 By default it touches uncategorized rows and rows automation categorized, and
 leaves anything **you** categorized alone; overriding your own choices is
 opt-in. Posted rows are skipped unless you ask for

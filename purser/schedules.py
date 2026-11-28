@@ -36,9 +36,11 @@ from sqlalchemy import exists, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from purser import audit, clock, crypto, events, occurrences
+from purser import cycles as cycles_service
 from purser import ledger as ledger_service
 from purser import networth as networth_service
 from purser.admin import security
+from purser.core import cycles as core_cycles
 from purser.core import forecasting as core_forecasting
 from purser.core import ledger as core
 from purser.core import matching as core_matching
@@ -113,6 +115,73 @@ def _validate_amount_fields(
     if basis == core_forecasting.EstimateBasis.COUNTERPARTY_BALANCE.value and not has_counterparty:
         raise LedgerError("estimate_basis=counterparty_balance requires a counterparty account")
     return basis
+
+
+@dataclass(frozen=True)
+class CycleFields:
+    """A card-payment schedule's statement-cycle settings (#674, decision
+    136), validated: all None = sized by the estimate basis."""
+
+    payment_amount: str | None = None
+    later_estimate: str | None = None
+    later_window: int | None = None
+
+
+def _validate_cycle_fields(
+    *,
+    counterparty: Account | None,
+    payment_amount: str | None,
+    later_estimate: str | None,
+    later_window: int | None,
+    amount: Decimal | None,
+) -> CycleFields:
+    """Cross-field rules for the statement-cycle settings. Setting either
+    mode sets both (the other takes its default); they apply to a transfer
+    to a credit card only, and take effect once that card has a closing day.
+    A fixed payment or a fixed later estimate pays the schedule's amount, so
+    it needs one."""
+    if payment_amount is None and later_estimate is None and later_window is None:
+        return CycleFields()
+    if counterparty is None or counterparty.type != "credit_card":
+        raise LedgerError(
+            "payment_amount and later_estimate size a payment to a credit card: the schedule "
+            "must be a transfer whose counterparty is the card"
+        )
+    payment = payment_amount or core_cycles.PAYMENT_STATEMENT_BALANCE
+    later = later_estimate or core_cycles.LATER_STATEMENT_AVERAGE
+    if payment not in core_cycles.PAYMENT_AMOUNTS:
+        raise LedgerError(f"payment_amount must be one of {', '.join(core_cycles.PAYMENT_AMOUNTS)}")
+    if later not in core_cycles.LATER_ESTIMATES:
+        raise LedgerError(f"later_estimate must be one of {', '.join(core_cycles.LATER_ESTIMATES)}")
+    if later_window is not None and not 1 <= later_window <= core_cycles.MAX_LATER_WINDOW:
+        raise LedgerError(f"later_window must be 1..{core_cycles.MAX_LATER_WINDOW} statements")
+    if core_cycles.PAYMENT_FIXED in (payment, later) and amount is None:
+        raise LedgerError("a fixed payment or a fixed later estimate pays the schedule's amount")
+    return CycleFields(
+        payment_amount=payment,
+        later_estimate=later,
+        later_window=later_window
+        if later_window is not None and later_window != core_cycles.DEFAULT_LATER_WINDOW
+        else None,
+    )
+
+
+def _default_cycle_fields(counterparty: Account | None, amount_type: str) -> CycleFields:
+    """A new estimated payment to a card that has a closing day defaults to
+    paying the statement balance, with later payments at the average of the
+    last six statements (#674). Fixed schedules stay fixed: their amount was
+    the user's choice."""
+    if (
+        amount_type == "estimated"
+        and counterparty is not None
+        and counterparty.type == "credit_card"
+        and counterparty.statement_close_day is not None
+    ):
+        return CycleFields(
+            payment_amount=core_cycles.PAYMENT_STATEMENT_BALANCE,
+            later_estimate=core_cycles.LATER_STATEMENT_AVERAGE,
+        )
+    return CycleFields()
 
 
 def _resolve_counterparty(
@@ -195,6 +264,9 @@ def create_schedule(
     propose: bool = False,
     date_mode: str = "fixed",
     memo: str | None = None,
+    payment_amount: str | None = None,
+    later_estimate: str | None = None,
+    later_window: int | None = None,
 ) -> Schedule | Suggestion:
     """Create an ACTIVE schedule and materialize it. With ``propose`` the
     caller asks instead (#436): a **suggestion** carrying the validated draft
@@ -234,6 +306,15 @@ def create_schedule(
         estimate_basis=estimate_basis,
         has_counterparty=counterparty is not None,
     )
+    cycle = _validate_cycle_fields(
+        counterparty=counterparty,
+        payment_amount=payment_amount,
+        later_estimate=later_estimate,
+        later_window=later_window,
+        amount=amount,
+    )
+    if cycle.payment_amount is None:
+        cycle = _default_cycle_fields(counterparty, amount_type)
     if category_path is not None:
         category = ledger_service.resolve_account(session, category_path)
         if not category.is_virtual:
@@ -313,6 +394,9 @@ def create_schedule(
         amount_type=amount_type,
         amount=amount,
         estimate_basis=estimate_basis,
+        payment_amount=cycle.payment_amount,
+        later_estimate=cycle.later_estimate,
+        later_window=cycle.later_window,
         currency=account.currency.strip(),
         next_due=upcoming[0] if upcoming else None,
         autopost_policy=autopost_policy,
@@ -334,6 +418,9 @@ def create_schedule(
             "rrule": rrule,
             "dtstart": anchor.isoformat(),
             "counterparty_account_id": str(counterparty.id) if counterparty else None,
+            "payment_amount": cycle.payment_amount,
+            "later_estimate": cycle.later_estimate,
+            "later_window": cycle.later_window,
             "source": source,
             "status": status,
         },
@@ -358,6 +445,9 @@ def _schedule_audit_shape(schedule: Schedule) -> dict[str, Any]:
         "amount_type": schedule.amount_type,
         "amount": str(schedule.amount) if schedule.amount is not None else None,
         "estimate_basis": schedule.estimate_basis,
+        "payment_amount": schedule.payment_amount,
+        "later_estimate": schedule.later_estimate,
+        "later_window": schedule.later_window,
         "category_path": str(schedule.category_path) if schedule.category_path else None,
         "counterparty_account_id": (
             str(schedule.counterparty_account_id) if schedule.counterparty_account_id else None
@@ -460,6 +550,10 @@ def update_schedule(
     counterparty_account_ref: str | None = None,
     date_mode: str | None = None,
     memo: str | None = None,
+    payment_amount: str | None = None,
+    later_estimate: str | None = None,
+    later_window: int | None = None,
+    cycle_set: bool = False,
 ) -> UpdatedSchedule:
     """Edit the rule (write scope). Live, un-pinned instances are resynced:
     slots the new rule no longer produces are voided-and-released, amounts
@@ -467,7 +561,13 @@ def update_schedule(
     their amounts, dates and slots. Changing the shape (category <->
     counterparty) releases every un-pinned instance — their legs are wrong.
     A new name or payee relabels live instances, pinned ones included,
-    whose label still equals the old one (decision 79)."""
+    whose label still equals the old one (decision 79).
+
+    The statement-cycle settings (#674) change only when ``cycle_set``: the
+    sent ``payment_amount`` / ``later_estimate`` / ``later_window`` replace
+    the current ones (an unsent mode keeps its value), and all three None
+    turns statement-cycle sizing off. A schedule that stops being a transfer
+    to a card loses them."""
     _require_write(token, "editing a schedule")
     schedule = get_schedule(session, schedule_id)
     if schedule.status == "ended":
@@ -514,6 +614,42 @@ def update_schedule(
     )
     schedule.amount_type = new_type
     schedule.amount = new_amount
+    counterparty_now = (
+        session.get(Account, schedule.counterparty_account_id)
+        if schedule.counterparty_account_id is not None
+        else None
+    )
+    if cycle_set:
+        cleared = payment_amount is None and later_estimate is None and later_window is None
+        cycle = (
+            CycleFields()
+            if cleared
+            else _validate_cycle_fields(
+                counterparty=counterparty_now,
+                payment_amount=payment_amount or schedule.payment_amount,
+                later_estimate=later_estimate or schedule.later_estimate,
+                later_window=later_window if later_window is not None else schedule.later_window,
+                amount=new_amount,
+            )
+        )
+    elif schedule.payment_amount is not None:
+        # Re-check what is kept against the edited rule: a schedule that is no
+        # longer a transfer to a card, or a fixed mode left with no amount, fails.
+        if counterparty_now is None or counterparty_now.type != "credit_card":
+            cycle = CycleFields()
+        else:
+            cycle = _validate_cycle_fields(
+                counterparty=counterparty_now,
+                payment_amount=schedule.payment_amount,
+                later_estimate=schedule.later_estimate,
+                later_window=schedule.later_window,
+                amount=new_amount,
+            )
+    else:
+        cycle = CycleFields()
+    schedule.payment_amount = cycle.payment_amount
+    schedule.later_estimate = cycle.later_estimate
+    schedule.later_window = cycle.later_window
     if autopost_policy is not None:
         if autopost_policy not in AUTOPOST_POLICIES:
             raise LedgerError("autopost_policy must be auto_post | wait_for_match | reminder_only")
@@ -845,9 +981,55 @@ class ScheduleEstimate:
 
 
 def schedule_estimate(session: Session, schedule: Schedule) -> ScheduleEstimate:
-    """The schedule's estimate: fixed, or estimated from confirmed-match
-    history per its basis — for ``counterparty_balance`` the counterparty's
-    reported balance, with the past payments as its actuals (#247)."""
+    """The schedule's estimate: what its next payment projects. A
+    cycle-sized card payment (#674, decision 136) reports its next unpaid
+    slot's planned amount and basis, with past statement balances as the
+    band's actuals; every other schedule its ``legacy_estimate``."""
+    plan = cycles_service.plan_schedule(session, schedule)
+    if plan is not None:
+        today = clock.ledger_today()
+        upcoming = sorted(s for s in plan.figures if s >= today) or sorted(plan.figures)
+        for slot in upcoming:
+            amount = plan.amount(slot)
+            if amount:
+                basis = plan.basis(slot)
+                assert basis is not None
+                return ScheduleEstimate(amount=amount, basis=basis, actuals=plan.band_actuals())
+        return ScheduleEstimate(
+            amount=Decimal(0),
+            basis=core_cycles.BASIS_STATEMENT_CLOSE,
+            actuals=plan.band_actuals(),
+        )
+    return legacy_estimate(session, schedule)
+
+
+def slot_amount(
+    session: Session,
+    schedule: Schedule,
+    slot: date_type,
+    plan: "cycles_service.SchedulePlan | None" = None,
+) -> Decimal:
+    """The amount the rule writes for one slot (the schedule account's leg):
+    a cycle-sized schedule sizes each slot on its own; any other schedule
+    writes its one estimate for every slot."""
+    if plan is None:
+        plan = cycles_service.plan_schedule(session, schedule, extra_slots=(slot,))
+    if plan is not None:
+        amount = plan.amount(slot)
+        if amount is None:
+            plan = cycles_service.plan_schedule(session, schedule, extra_slots=(slot,))
+            assert plan is not None
+            amount = plan.amount(slot)
+        return amount or Decimal(0)
+    return instance_amount(session, schedule)
+
+
+def legacy_estimate(session: Session, schedule: Schedule) -> ScheduleEstimate:
+    """The schedule's estimate basis at work: fixed, or estimated from
+    confirmed-match history per its basis — for ``counterparty_balance`` the
+    counterparty's reported balance, with the past payments as its actuals
+    (#247). A cycle-sized schedule falls back to it when its card has no
+    usable history."""
     fallback = Decimal(schedule.amount) if schedule.amount is not None else Decimal(0)
     if schedule.amount_type == "fixed":
         return ScheduleEstimate(amount=fallback, basis=core_forecasting.BASIS_FIXED)
@@ -963,7 +1145,8 @@ def _resync_instances(
     """After a rule edit: void-and-release live un-pinned instances whose
     slot the rule no longer produces; re-estimate the survivors."""
     slots = _rule_slots(schedule)
-    amount = _instance_amount(session, schedule)
+    plan = cycles_service.plan_schedule(session, schedule)
+    flat_amount = _instance_amount(session, schedule) if plan is None else Decimal(0)
     for tx in _live_instances(session, schedule):
         if tx.schedule_pinned_at is not None:
             continue
@@ -972,6 +1155,12 @@ def _resync_instances(
                 continue
             _void_and_release(session, tx, actor_token_id=actor_token_id, reason="rule_edit")
             continue
+        assert tx.occurrence_date is not None
+        amount = (
+            slot_amount(session, schedule, tx.occurrence_date, plan)
+            if plan is not None
+            else flat_amount
+        )
         row = occurrences.ensure(session, tx)
         if amount != 0 and not occurrences.held(row, "amount", occurrences.amount_of(tx, schedule)):
             _set_instance_amount(tx, amount, schedule.account_id)
@@ -984,7 +1173,12 @@ def _refresh_estimates(
 ) -> int:
     """Estimated schedules follow their actuals: live, un-pinned instances
     whose amount differs from the current estimate move to it (#231). Fixed
-    schedules never refresh — their amount only changes via update_schedule."""
+    schedules never refresh — their amount only changes via update_schedule.
+    A cycle-sized schedule (#674) refreshes each instance to its own slot's
+    plan (``_refresh_cycle``)."""
+    plan = cycles_service.plan_schedule(session, schedule)
+    if plan is not None:
+        return _refresh_cycle(session, schedule, plan, actor_token_id=actor_token_id)
     if schedule.amount_type != "estimated" or amount == 0:
         return 0
     moved: list[dict[str, str]] = []
@@ -1009,6 +1203,59 @@ def _refresh_estimates(
             entity_type="schedule",
             entity_id=schedule.id,
             after={"estimate": str(amount), "instances": moved},
+        )
+    return len(moved)
+
+
+def _refresh_cycle(
+    session: Session,
+    schedule: Schedule,
+    plan: cycles_service.SchedulePlan,
+    *,
+    actor_token_id: uuid.UUID | None,
+) -> int:
+    """A cycle-sized schedule's nightly refresh (#674, decision 136): each
+    live, un-pinned, un-held instance moves to its slot's plan — exactly once
+    its statement has closed, otherwise only past
+    ``cycles.should_refresh``'s threshold, so a projection that drifts a
+    little with each charge does not write an audit row every night. A slot
+    the plan now sizes at zero keeps its instance (the user skips it)."""
+    moved: list[dict[str, str]] = []
+    for tx in _live_instances(session, schedule):
+        if tx.schedule_pinned_at is not None or tx.occurrence_date is None:
+            continue
+        new = plan.amount(tx.occurrence_date)
+        if not new:
+            continue
+        leg = next((p for p in tx.postings if p.account_id == schedule.account_id), None)
+        if leg is None:
+            continue
+        old = Decimal(leg.amount)
+        closed = plan.basis(tx.occurrence_date) == core_cycles.BASIS_STATEMENT_CLOSE
+        if not cycles_service.should_refresh(old, new, closed=closed):
+            continue
+        row = occurrences.ensure(session, tx)
+        if occurrences.held(row, "amount", old):
+            continue
+        moved.append(
+            {
+                "transaction_id": str(tx.id),
+                "from": str(old),
+                "to": str(new),
+                "basis": plan.basis(tx.occurrence_date) or "",
+            }
+        )
+        _set_instance_amount(tx, new, schedule.account_id)
+        row.amount_overridden = False
+    if moved:
+        session.flush()
+        audit.record(
+            session,
+            actor_token_id=actor_token_id,
+            action="schedule.refresh",
+            entity_type="schedule",
+            entity_id=schedule.id,
+            after={"statement_cycle": True, "instances": moved},
         )
     return len(moved)
 
@@ -1108,7 +1355,11 @@ def reset_instance(session: Session, *, tx_id: uuid.UUID, token: ApiToken) -> Tr
     occurrences.clear(row, "date")
     row.amount_overridden = False
     before = _instance_audit_shape(tx)
-    amount = _instance_amount(session, schedule)
+    amount = (
+        slot_amount(session, schedule, tx.occurrence_date)
+        if tx.occurrence_date is not None
+        else _instance_amount(session, schedule)
+    )
     in_rule = tx.occurrence_date is not None and tx.occurrence_date in _rule_slots(schedule)
     reshaped = not _has_rule_shape(tx, schedule)
     tx.schedule_pinned_at = None
@@ -1167,11 +1418,17 @@ def list_instances(
         else _live_instances(session, schedule)
     )
     statements = statements_for(session, [tx.id for tx in live])
+    plan = None if matched else cycles_service.plan_schedule(session, schedule)
     out: list[dict[str, Any]] = []
     for tx in live:
         leg = next((p for p in tx.postings if p.account_id == schedule.account_id), None)
         statement = statements.get(tx.id)
         detail = occurrences.describe(session, tx)
+        plan_basis = (
+            plan.basis(tx.occurrence_date)
+            if plan is not None and tx.occurrence_date is not None
+            else None
+        )
         out.append(
             {
                 "transaction_id": tx.id,
@@ -1181,12 +1438,19 @@ def list_instances(
                 "certainty": detail,
                 "pinned": tx.schedule_pinned_at is not None,
                 "overdue": tx.date < clock.ledger_today(),
-                "basis": instance_basis(schedule, tx, statement, detail=detail),
+                "basis": instance_basis(
+                    schedule, tx, statement, detail=detail, plan_basis=plan_basis
+                ),
                 "statement_balance": (
                     Decimal(statement.statement_balance) if statement is not None else None
                 ),
                 "statement_date": statement.statement_date if statement is not None else None,
                 "statement_source": statement.source if statement is not None else None,
+                "minimum_due": (
+                    Decimal(statement.minimum_due)
+                    if statement is not None and statement.minimum_due is not None
+                    else None
+                ),
             }
         )
     return out
@@ -1215,6 +1479,7 @@ def instance_basis(
     statement: InstanceStatement | None,
     *,
     detail: dict[str, Any] | None = None,
+    plan_basis: str | None = None,
 ) -> str:
     """Where an expected amount comes from, in the forecast's ``basis``
     vocabulary (``core_forecasting.AMOUNT_BASES``, decision 80):
@@ -1223,7 +1488,10 @@ def instance_basis(
       the instance's legs equals the statement balance);
     - ``override``: the instance is pinned, so the amount is the user's — a
       statement overridden to another amount afterwards lands here too;
-    - otherwise the rule's: ``fixed``, or the schedule's estimate basis.
+    - otherwise the rule's: ``fixed``, or the schedule's estimate basis —
+      for a cycle-sized card payment (#674) the slot's ``plan_basis``
+      (``statement_close``, ``cycle_projection``, ``statement_average``,
+      ``same_cycle_last_year``, ``counterparty_balance`` or ``fixed``).
 
     ``tx=None`` is a projected occurrence (no row yet); ``schedule=None`` an
     expected row no schedule owns, whose typed amount is ``fixed``."""
@@ -1240,22 +1508,45 @@ def instance_basis(
                 else core_forecasting.BASIS_OVERRIDE
             )
         if statement is not None and any(
-            Decimal(p.amount) == Decimal(statement.statement_balance) for p in tx.postings
+            abs(Decimal(p.amount)) == statement_payment(schedule, statement) for p in tx.postings
         ):
             return core_forecasting.BASIS_STATEMENT
         if tx.schedule_pinned_at is not None:
             return core_forecasting.BASIS_OVERRIDE
+    if plan_basis is not None:
+        return plan_basis
     if schedule is None or schedule.amount_type == "fixed":
         return core_forecasting.BASIS_FIXED
     return schedule.estimate_basis or core_forecasting.EstimateBasis.ROLLING_AVG_3.value
 
 
+def statement_payment(schedule: Schedule | None, statement: InstanceStatement) -> Decimal:
+    """What a recorded statement makes the payment (owed, positive; #674):
+    its minimum due when the schedule pays the minimum and the statement
+    says it, at most the schedule's amount when it pays a fixed sum, else
+    the statement balance (decision 80)."""
+    balance = Decimal(statement.statement_balance)
+    payment = schedule.payment_amount if schedule is not None else None
+    if (
+        payment == core_cycles.PAYMENT_MINIMUM_DUE
+        and statement.minimum_due is not None
+        and Decimal(statement.minimum_due) > 0
+    ):
+        return Decimal(statement.minimum_due)
+    if payment == core_cycles.PAYMENT_FIXED and schedule is not None and schedule.amount:
+        return min(balance, abs(Decimal(schedule.amount)))
+    return balance
+
+
 def _statement_audit_shape(row: InstanceStatement) -> dict[str, Any]:
-    return {
+    shape = {
         "statement_balance": str(row.statement_balance),
         "statement_date": row.statement_date.isoformat() if row.statement_date else None,
         "source": row.source,
     }
+    if row.minimum_due is not None:
+        shape["minimum_due"] = str(row.minimum_due)
+    return shape
 
 
 @dataclass(frozen=True)
@@ -1268,6 +1559,9 @@ class RecordedStatement:
     statement: InstanceStatement
     previous_amount: Decimal
     amount: Decimal
+    # When the statement's closing date disagrees with the card's closing day
+    # (or the card has none), what to set it to (#674). Never applied here.
+    close_day_hint: str | None = None
 
 
 def _card_leg(tx: Transaction) -> Posting | None:
@@ -1352,6 +1646,7 @@ def record_statement_balance(
     transaction_id: uuid.UUID | None = None,
     account_ref: str | None = None,
     due_date: date_type | None = None,
+    minimum_due: Decimal | None = None,
 ) -> RecordedStatement:
     """Record a card statement balance against the payment it is due on
     (write scope, decision 80). The instance is addressed by
@@ -1364,7 +1659,13 @@ def record_statement_balance(
     (``ledger.update_transaction`` with the card's leg = the balance, decision
     78), which pins the instance, marks it reviewed and audits
     ``transaction.update``; the statement row is upserted with its
-    provenance and audited ``schedule.statement_balance``."""
+    provenance and audited ``schedule.statement_balance``.
+
+    ``minimum_due`` (#674) is the statement's minimum payment: a schedule
+    that pays the minimum takes it, one that pays a fixed sum takes at most
+    that sum (``statement_payment``). A ``statement_date`` whose day differs
+    from the card's closing day comes back as ``close_day_hint``; the
+    closing day itself is never changed here."""
     _require_write(token, "recording a statement balance")
     if (transaction_id is None) == (account_ref is None):
         raise LedgerError("address the payment by transaction_id, or by account plus due_date")
@@ -1375,6 +1676,16 @@ def record_statement_balance(
             "due_date addresses a payment by account; leave it out with transaction_id"
         )
     figure = _statement_figure(statement_balance)
+    minimum = None
+    if minimum_due is not None:
+        try:
+            if not minimum_due.is_finite() or minimum_due != minimum_due.quantize(core.QUANT):
+                raise LedgerError("minimum_due has more than 4 decimal places")
+        except InvalidOperation as exc:
+            raise LedgerError("minimum_due is out of range") from exc
+        if minimum_due < 0 or minimum_due > figure:
+            raise LedgerError("minimum_due is between 0 and the statement balance")
+        minimum = core.quantize(minimum_due)
     if statement_date is not None and statement_date > clock.ledger_today():
         raise LedgerError(f"statement_date {statement_date.isoformat()} is in the future")
 
@@ -1416,11 +1727,21 @@ def record_statement_balance(
     previous_amount = schedule_leg()
     prior = session.get(InstanceStatement, tx.id)
     before = _statement_audit_shape(prior) if prior is not None else None
+    payment = statement_payment(
+        schedule,
+        InstanceStatement(statement_balance=figure, minimum_due=minimum),
+    )
+    if payment <= 0:
+        raise LedgerError(
+            "this statement asks for no payment (minimum due 0): skip the instance "
+            "(skip_instance) instead"
+        )
     ledger_service.update_transaction(
-        session, tx_id=tx.id, token=token, amount=figure, account_ref=str(card_leg.account_id)
+        session, tx_id=tx.id, token=token, amount=payment, account_ref=str(card_leg.account_id)
     )
     row = prior if prior is not None else InstanceStatement(transaction_id=tx.id)
     row.statement_balance = figure
+    row.minimum_due = minimum
     row.statement_date = statement_date
     row.source = "human" if token.kind == "session" else "agent"
     row.recorded_by = token.id
@@ -1459,6 +1780,35 @@ def record_statement_balance(
         statement=row,
         previous_amount=previous_amount,
         amount=amount,
+        close_day_hint=_close_day_hint(session, card_leg.account_id, statement_date),
+    )
+
+
+def _close_day_hint(
+    session: Session, card_id: uuid.UUID, statement_date: date_type | None
+) -> str | None:
+    """Whether a recorded statement's closing date agrees with the card's
+    closing day (#674): None when it does, when no date was given or when the
+    card has no closing day; else what to set (a month shorter than the
+    closing day closes on its last day)."""
+    if statement_date is None:
+        return None
+    card = session.get(Account, card_id)
+    if card is None:
+        return None
+    if card.statement_close_day is None:
+        # A card without one is not using the statement cycle; the date still
+        # feeds the suggestion (cycles.suggest_close_day).
+        return None
+    expected = core_cycles.close_date(
+        statement_date.year, statement_date.month, card.statement_close_day
+    )
+    if expected == statement_date:
+        return None
+    return (
+        f"this statement closed on {statement_date.isoformat()}, but {card.path}'s "
+        f"statement_close_day is {card.statement_close_day}: set it to {statement_date.day} "
+        "if the issuer moved the cycle"
     )
 
 
@@ -1501,8 +1851,9 @@ def materialize_schedule(
         end=today + timedelta(days=horizon_days),
     )
     payee_name = _rule_payee_name(session, schedule)
-    amount = _instance_amount(session, schedule)
-    _refresh_estimates(session, schedule, amount, actor_token_id=actor_token_id)
+    plan = cycles_service.plan_schedule(session, schedule)
+    flat_amount = _instance_amount(session, schedule) if plan is None else Decimal(0)
+    _refresh_estimates(session, schedule, flat_amount, actor_token_id=actor_token_id)
     taken = {
         row
         for row in session.execute(
@@ -1516,6 +1867,7 @@ def materialize_schedule(
     for due in due_dates:
         if due in taken:
             continue
+        amount = slot_amount(session, schedule, due, plan) if plan is not None else flat_amount
         if amount == 0:
             continue  # estimated schedule with no history and no fallback yet
         if schedule.counterparty_account_id is not None:
@@ -1561,6 +1913,27 @@ def materialize_schedule(
         created += 1
     refresh_next_due(session, schedule)
     return created
+
+
+def resize_card_payments(
+    session: Session, card: Account, *, actor_token_id: uuid.UUID | None
+) -> int:
+    """After a card's closing day changes (#674): every active schedule that
+    pays the card and sizes its payments from the statement cycle refreshes
+    its live instances and materializes, so the forecast moves at once rather
+    than at the next nightly run. Returns the schedules touched."""
+    schedules = list(
+        session.execute(
+            select(Schedule).where(
+                Schedule.status == "active",
+                Schedule.counterparty_account_id == card.id,
+                Schedule.payment_amount.is_not(None),
+            )
+        ).scalars()
+    )
+    for schedule in schedules:
+        materialize_schedule(session, schedule, actor_token_id=actor_token_id)
+    return len(schedules)
 
 
 def materialize_all(session: Session) -> dict[str, int]:
@@ -1880,7 +2253,13 @@ def detect_job() -> None:
 
 # The bases whose amount the rule estimates from history (#247): only these
 # carry a range band. fixed, override and statement amounts are known.
-_ESTIMATED_BASES = frozenset(b.value for b in core_forecasting.EstimateBasis)
+_ESTIMATED_BASES = frozenset(
+    [
+        *(b.value for b in core_forecasting.EstimateBasis),
+        core_cycles.BASIS_STATEMENT_AVERAGE,
+        core_cycles.BASIS_SAME_CYCLE_LAST_YEAR,
+    ]
+)
 
 
 def _cached_estimate(
@@ -1888,6 +2267,16 @@ def _cached_estimate(
 ) -> ScheduleEstimate:
     if schedule.id not in cache:
         cache[schedule.id] = schedule_estimate(session, schedule)
+    return cache[schedule.id]
+
+
+def _cached_plan(
+    session: Session,
+    schedule: Schedule,
+    cache: dict[uuid.UUID, "cycles_service.SchedulePlan | None"],
+) -> "cycles_service.SchedulePlan | None":
+    if schedule.id not in cache:
+        cache[schedule.id] = cycles_service.plan_schedule(session, schedule)
     return cache[schedule.id]
 
 
@@ -1943,18 +2332,12 @@ def _projected_items(
             ).scalars()
         }
         estimate = _cached_estimate(session, schedule, cache)
-        if estimate.amount == 0:
+        plan = cycles_service.plan_schedule(session, schedule, through=end)
+        if plan is None and estimate.amount == 0:
             continue
         # The forecast sees the schedule through THIS account's leg: the
         # counterparty of a transfer schedule receives what the payer sends.
         counterparty_side = schedule.counterparty_account_id == account.id
-        amount = -estimate.amount if counterparty_side else estimate.amount
-        basis = instance_basis(schedule, None, None)
-        band = (
-            _estimate_band(estimate, estimate.amount, counterparty_side=counterparty_side)
-            if basis in _ESTIMATED_BASES
-            else None
-        )
         # Slot evidence (#518) annotates certainty only; amount and basis stay the rule's.
         evidence = occurrences.live_slots(session, schedule.id)
         for slot in core_forecasting.expand_rrule(
@@ -1962,7 +2345,22 @@ def _projected_items(
         ):
             if slot in taken:
                 continue
-            detail = occurrences.projected(schedule, slot, estimate.amount, evidence.get(slot))
+            # A cycle-sized card payment sizes each slot on its own (#674).
+            rule_amount = (
+                slot_amount(session, schedule, slot, plan) if plan is not None else estimate.amount
+            )
+            if rule_amount == 0:
+                continue
+            amount = -rule_amount if counterparty_side else rule_amount
+            basis = instance_basis(
+                schedule, None, None, plan_basis=plan.basis(slot) if plan is not None else None
+            )
+            band = (
+                _estimate_band(estimate, rule_amount, counterparty_side=counterparty_side)
+                if basis in _ESTIMATED_BASES
+                else None
+            )
+            detail = occurrences.projected(schedule, slot, rule_amount, evidence.get(slot))
             items.append(
                 core_forecasting.ExpectedItem(
                     date=slot,
@@ -2047,8 +2445,10 @@ def forecast_account(
         else {}
     )
     statements = statements_for(session, [tx.id for tx in rows])
-    # One estimate per schedule, shared with the projected occurrences (#247).
+    # One estimate per schedule, shared with the projected occurrences (#247),
+    # and one statement-cycle plan per cycle-sized schedule (#674).
     estimates: dict[uuid.UUID, ScheduleEstimate] = {}
+    plans: dict[uuid.UUID, cycles_service.SchedulePlan | None] = {}
     items = []
     for tx in rows:
         leg = next((p for p in tx.postings if p.account_id == account.id), None)
@@ -2060,7 +2460,18 @@ def forecast_account(
             continue
         owner = owners.get(tx.schedule_id) if tx.schedule_id else None
         detail = occurrences.describe(session, tx) if owner is not None else None
-        basis = instance_basis(owner, tx, statements.get(tx.id), detail=detail)
+        plan = _cached_plan(session, owner, plans) if owner is not None else None
+        basis = instance_basis(
+            owner,
+            tx,
+            statements.get(tx.id),
+            detail=detail,
+            plan_basis=(
+                plan.basis(tx.occurrence_date)
+                if plan is not None and tx.occurrence_date is not None
+                else None
+            ),
+        )
         band = None
         if (
             owner is not None

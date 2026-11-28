@@ -438,6 +438,25 @@ def unpriced_holdings(session: Session, *, today: date) -> list[Unpriced]:
     return out
 
 
+def priced_dates(session: Session, *, today: date) -> dict[str, list[date]]:
+    """Per ticker, the dates of the feed rows the overlay values from a
+    stored close (``zero_valued_clause``), at or before ``today``: each needs
+    the close in effect on its own date (decision 92), which the price job
+    asks a provider for (#680). A symbol that can never be a ticker
+    (``normalized`` is None) is left out: no close can value it."""
+    rows = session.execute(
+        select(HoldingsSnapshot.symbol, HoldingsSnapshot.as_of)
+        .where(zero_valued_clause(), HoldingsSnapshot.as_of <= today)
+        .distinct()
+    ).all()
+    out: dict[str, set[date]] = defaultdict(set)
+    for symbol, as_of in rows:
+        ticker = normalized(symbol)
+        if ticker is not None:
+            out[ticker].add(as_of)
+    return {ticker: sorted(days) for ticker, days in out.items()}
+
+
 def overlaid_symbols(session: Session, *, today: date) -> set[str]:
     """The tickers the overlay values from a stored close in an open
     brokerage account's newest set: their close can turn stale like a manual

@@ -43,7 +43,7 @@ function quietDashboard(open: SuggestionOut[] = []) {
       return ok(open.filter((s) => s.kind === query.kind).slice(offset, offset + limit));
     },
     "GET /matching/unmatched": ok([]),
-    "GET /transactions/review-summary": ok({ total: 0, pending: 0, agent_pending: 0, oldest_date: null, accounts: [] }),
+    "GET /transactions/review-summary": ok({ total: 0, uncategorized: 0, reconciliation_adjustments: 0, pending: 0, agent_pending: 0, oldest_date: null, accounts: [] }),
   });
 }
 
@@ -120,8 +120,8 @@ describe("Dashboard — Needs attention", () => {
   it("routes review totals and uncertain expectations to account registers", async () => {
     quietDashboard();
     mockApi({
-      "GET /transactions/review-summary": ok({ total: 5, pending: 2, agent_pending: 0, accounts: [
-        { account_id: "a1", name: "Checking", total: 5, pending: 2, agent_pending: 0 },
+      "GET /transactions/review-summary": ok({ total: 5, uncategorized: 4, reconciliation_adjustments: 1, pending: 2, agent_pending: 0, oldest_date: "2026-10-01", accounts: [
+        { account_id: "a1", path: "assets.checking", name: "Checking", total: 5, uncategorized: 4, reconciliation_adjustments: 1, pending: 2, agent_pending: 0 },
       ] }),
       "GET /matching/unmatched": ok([{ transaction_id: "t1", account_id: "a1", account_name: "Checking", amount: "-20", date: "2026-10-01", aging_days: 2, has_proposed_match: false, amount_estimated: true, schedule_status: "paused", description: "Example utility" }]),
     });
@@ -133,9 +133,26 @@ describe("Dashboard — Needs attention", () => {
     expect(spokenText(line)).toContain("Checking · estimated \u2212$20.00 · expected");
     expect(screen.getByText("Scheduled transaction paused")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Review expectation" })).toHaveAttribute("href", "/accounts/a1?status=expected&start=2026-10-01&end=2026-10-01&transaction=t1");
-    await userEvent.click(screen.getByText("Transaction review"));
-    expect(screen.getByRole("link", { name: "3 posted" })).toHaveAttribute("href", "/accounts/a1?reviewed=false&status=posted");
-    expect(screen.getByRole("link", { name: "2 pending" })).toHaveAttribute("href", "/accounts/a1?reviewed=false&status=pending");
+    const review = screen.getByText(/^Transactions that need review/);
+    // The count says why (decision 141): each reason with rows, none without.
+    expect(review).toHaveTextContent("Transactions that need review 5 · 4 with no category · 1 reconciliation adjustment");
+    await userEvent.click(review);
+    expect(screen.getByRole("link", { name: "5 to review" })).toHaveAttribute("href", "/accounts/a1?needs_review=true");
+    expect(within(screen.getByRole("link", { name: "5 to review" }).closest("li")!).getByText("4 with no category · 1 reconciliation adjustment")).toBeInTheDocument();
+  });
+
+  it("leaves a reason with no rows out of the breakdown", async () => {
+    quietDashboard();
+    mockApi({
+      "GET /transactions/review-summary": ok({ total: 2, uncategorized: 0, reconciliation_adjustments: 2, pending: 0, agent_pending: 0, oldest_date: "2026-10-01", accounts: [
+        { account_id: "a1", path: "assets.checking", name: "Checking", total: 2, uncategorized: 0, reconciliation_adjustments: 2, pending: 0, agent_pending: 0 },
+      ] }),
+    });
+    renderWithProviders(<Dashboard />);
+    const review = await screen.findByText(/^Transactions that need review/);
+    expect(review).toHaveTextContent("Transactions that need review 2 · 2 reconciliation adjustments");
+    expect(review).not.toHaveTextContent("no category");
+    expect(screen.queryByText("All clear.")).not.toBeInTheDocument();
   });
 });
 

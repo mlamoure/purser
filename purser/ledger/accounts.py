@@ -35,6 +35,20 @@ _MONEY_DIGITS = 20  # NUMERIC(20,4)
 _MONEY_PLACES = 4
 
 
+def check_statement_close_day(account: Account, value: int | None) -> None:
+    """A credit card's statement closing day (#674): 1..31, cards only. A day
+    past a month's end means that month's last day."""
+    if value is None:
+        return
+    if account.type != "credit_card":
+        raise LedgerError(
+            f"{account.path} is a {account.type} account; statement_close_day applies only to "
+            "credit cards"
+        )
+    if isinstance(value, bool) or not 1 <= value <= 31:
+        raise LedgerError("statement_close_day must be a day of the month, 1..31")
+
+
 def check_min_balance(account_type: str, value: Decimal | None) -> None:
     """Validate a floor for an account of ``account_type`` (create and update
     share it, #466). None (no floor, or clearing one) is always valid. A
@@ -152,9 +166,9 @@ def securities_trade_refusal(account: Account) -> str | None:
         )
     if account.holdings_source != "feed":
         return (
-            f"{account.path} tracks its holdings by hand: record the trade (record_sale, or a "
-            "buy or sell position event) and pass this row as its transaction_id, so the "
-            "shares and the cash move together"
+            f"{account.path} has its holdings entered in Purser: record the trade "
+            "(record_sale, or a buy or sell position event) and pass this row as its "
+            "transaction_id, so the shares and the cash move together"
         )
     return None
 
@@ -628,6 +642,8 @@ def update_account(
     feed_balance_is_cash: bool | None = None,
     balance_true_up: bool | None = None,
     path: str | None = None,
+    statement_close_day: int | None = None,
+    statement_close_day_set: bool = False,
     actor_token_id: uuid.UUID | None,
 ) -> Account:
     """Rename / re-describe / hide / move a REAL account (DESIGN §3.4);
@@ -652,7 +668,11 @@ def update_account(
     when ``min_balance_set`` (None clears it, like ``feed_start``) and passes
     ``check_min_balance``. ``balance_true_up`` (decision 119; None =
     unchanged) switches the post-sync balance true-up of a brokerage account
-    whose holdings come from the feed; past adjustments stay."""
+    whose holdings come from the feed; past adjustments stay.
+    ``statement_close_day`` (§3.4, #674, decision 136; applies only when
+    ``statement_close_day_set``, None clears it) is the day of the month a
+    credit card's statement closes, 1..31; payments to the card whose
+    schedule sizes them from the statement cycle are resized at once."""
     account = get_account(session, account_id)
     if is_system_account(account):
         raise LedgerError(f"{account.path} is a system account; Purser keeps it as it is")
@@ -660,6 +680,8 @@ def update_account(
         raise LedgerError(f"{account.path} is a category; use PATCH /categories")
     if min_balance_set:
         check_min_balance(account.type, min_balance)
+    if statement_close_day_set:
+        check_statement_close_day(account, statement_close_day)
     if holdings_source is not None or feed_balance_is_cash is not None:
         # Function-local: purser.holdings imports the ledger package.
         from purser.holdings import projection as holdings_projection
@@ -685,7 +707,7 @@ def update_account(
     if feed_balance_is_cash and (account.type != "brokerage" or resulting_source != "manual"):
         raise LedgerError(
             f"{account.path}: feed_balance_is_cash applies only to a brokerage account "
-            "whose holdings are tracked by hand (holdings_source 'manual'); other "
+            "whose holdings are entered in Purser (holdings_source 'manual'); other "
             "accounts' feed balances are already compared as cash, or are market value"
         )
     if balance_true_up and (account.type != "brokerage" or resulting_source != "feed"):
@@ -705,7 +727,8 @@ def update_account(
             raise LedgerError(
                 f"{account.path} is a {account.type} account; the drift check (and its basis "
                 f"pin) runs only on {', '.join(sorted(drift.ELIGIBLE_TYPES))} accounts, and on "
-                "a brokerage account tracked by hand whose feed_balance_is_cash is on"
+                "a brokerage account whose holdings are entered in Purser and whose "
+                "feed_balance_is_cash is on"
             )
     if path is not None:
         move_account(session, account_id=account.id, path=path, actor_token_id=actor_token_id)
@@ -720,6 +743,7 @@ def update_account(
         "min_balance": _money(account.min_balance),
         "feed_balance_is_cash": account.feed_balance_is_cash,
         "balance_true_up": account.balance_true_up,
+        "statement_close_day": account.statement_close_day,
     }
     if name is not None:
         account.name = name
@@ -739,6 +763,11 @@ def update_account(
         account.drift_basis_override = drift_basis_override
     if min_balance_set:
         account.min_balance = min_balance
+    close_day_changed = (
+        statement_close_day_set and account.statement_close_day != statement_close_day
+    )
+    if statement_close_day_set:
+        account.statement_close_day = statement_close_day
     if balance_true_up is not None and holdings_source is None:
         account.balance_true_up = balance_true_up
     session.flush()
@@ -778,9 +807,15 @@ def update_account(
             "min_balance": _money(account.min_balance),
             "feed_balance_is_cash": account.feed_balance_is_cash,
             "balance_true_up": account.balance_true_up,
+            "statement_close_day": account.statement_close_day,
             **switched,
         },
     )
+    if close_day_changed:
+        # Function-local: purser.schedules imports the ledger package.
+        from purser import schedules as schedules_service
+
+        schedules_service.resize_card_payments(session, account, actor_token_id=actor_token_id)
     return account
 
 

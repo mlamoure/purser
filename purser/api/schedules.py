@@ -37,12 +37,32 @@ AmountBasisLiteral = Literal[
     "counterparty_balance",
     "override",
     "statement",
+    "statement_close",
+    "cycle_projection",
+    "statement_average",
+    "same_cycle_last_year",
 ]
 _BASIS_DESCRIPTION = (
     "where the amount comes from: fixed, an estimate basis (last, rolling_avg_3, "
     "rolling_avg_12, counterparty_balance = the card's current balance), override (a "
-    "pinned instance: the amount is yours) or statement (a recorded card statement "
-    "balance, decision 80)"
+    "pinned instance: the amount is yours), statement (a recorded card statement, decision "
+    "80), or a card payment sized from its statement cycle (decision 136): statement_close "
+    "(the statement has closed; what remains of it), cycle_projection (the next statement, "
+    "projected to its close), statement_average or same_cycle_last_year (later payments)"
+)
+PaymentAmountLiteral = Literal["statement_balance", "minimum_due", "fixed", "current_balance"]
+LaterEstimateLiteral = Literal["statement_average", "same_cycle_last_year", "fixed"]
+_PAYMENT_AMOUNT_DESCRIPTION = (
+    "a payment to a credit card with a statement closing day (decision 136): how much is "
+    "paid — statement_balance (what the statement showed, less credits since), minimum_due "
+    "(a recorded statement's minimum; else the schedule's amount), fixed (the schedule's "
+    "amount, never more than the statement) or current_balance (the card's balance now). "
+    "Null: the estimate basis sizes every payment"
+)
+_LATER_ESTIMATE_DESCRIPTION = (
+    "with payment_amount: how payments after the next are estimated — statement_average "
+    "(the average of the last later_window statements), same_cycle_last_year (the "
+    "statement a year earlier, else the average) or fixed (the schedule's amount)"
 )
 AutopostLiteral = Literal["auto_post", "wait_for_match", "reminder_only"]
 
@@ -66,6 +86,15 @@ class ScheduleOut(BaseModel):
     amount_type: str
     amount: Decimal | None
     estimate_basis: str | None
+    payment_amount: PaymentAmountLiteral | None = Field(
+        default=None, description=_PAYMENT_AMOUNT_DESCRIPTION
+    )
+    later_estimate: LaterEstimateLiteral | None = Field(
+        default=None, description=_LATER_ESTIMATE_DESCRIPTION
+    )
+    later_window: int | None = Field(
+        default=None, description="statements later_estimate averages; null = 6"
+    )
     currency: str
     next_due: date_value_type | None
     autopost_policy: str
@@ -89,6 +118,9 @@ class ScheduleOut(BaseModel):
             amount_type=s.amount_type,
             amount=s.amount,
             estimate_basis=s.estimate_basis,
+            payment_amount=s.payment_amount,
+            later_estimate=s.later_estimate,
+            later_window=s.later_window,
             currency=s.currency.strip(),
             next_due=s.next_due,
             autopost_policy=s.autopost_policy,
@@ -143,6 +175,9 @@ class InstanceOut(BaseModel):
     statement_source: Literal["human", "agent"] | None = Field(
         default=None, description="who recorded the statement"
     )
+    minimum_due: Decimal | None = Field(
+        default=None, description="the recorded statement's minimum payment, when given"
+    )
 
 
 class ScheduleDetail(ScheduleOut):
@@ -177,6 +212,15 @@ class ScheduleCreate(BaseModel):
         description="the other real account of a recurring transfer (exclusive with category)",
     )
     estimate_basis: EstimateBasisLiteral | None = None
+    payment_amount: PaymentAmountLiteral | None = Field(
+        default=None,
+        description=_PAYMENT_AMOUNT_DESCRIPTION
+        + ". Omitted on an estimated payment to a card with a closing day: statement_balance",
+    )
+    later_estimate: LaterEstimateLiteral | None = Field(
+        default=None, description=_LATER_ESTIMATE_DESCRIPTION
+    )
+    later_window: int | None = Field(default=None, ge=1, le=24, description="default 6")
     autopost_policy: AutopostLiteral = "wait_for_match"
     note: str | None = Field(
         default=None,
@@ -208,6 +252,16 @@ class ScheduleUpdate(BaseModel):
     category: str | None = None
     counterparty_account: str | None = None
     estimate_basis: EstimateBasisLiteral | None = None
+    payment_amount: PaymentAmountLiteral | None = Field(
+        default=None,
+        description=_PAYMENT_AMOUNT_DESCRIPTION
+        + ". Sending payment_amount, later_estimate and later_window all null turns "
+        "statement-cycle sizing off",
+    )
+    later_estimate: LaterEstimateLiteral | None = Field(
+        default=None, description=_LATER_ESTIMATE_DESCRIPTION
+    )
+    later_window: int | None = Field(default=None, ge=1, le=24, description="default 6")
     autopost_policy: AutopostLiteral | None = None
 
 
@@ -331,6 +385,9 @@ def create_schedule(
             counterparty_account_ref=body.counterparty_account,
             note=body.note,
             propose=body.propose,
+            payment_amount=body.payment_amount,
+            later_estimate=body.later_estimate,
+            later_window=body.later_window,
         )
     except LedgerError as exc:
         raise _handle(exc) from exc
@@ -405,7 +462,12 @@ def _detail(session: Session, schedule: Schedule) -> ScheduleDetail:
                     "matched_instances[].certainty.actual.amount",
                     "matched_instances[].certainty.actual.variance.amount",
                 ),
-                balance=("instances[].statement_balance", "matched_instances[].statement_balance"),
+                balance=(
+                    "instances[].statement_balance",
+                    "matched_instances[].statement_balance",
+                    "instances[].minimum_due",
+                    "matched_instances[].minimum_due",
+                ),
             )
         )
     ],
@@ -445,6 +507,12 @@ def update_schedule(
             memo=body.memo,
             autopost_policy=body.autopost_policy,
             counterparty_account_ref=body.counterparty_account,
+            payment_amount=body.payment_amount,
+            later_estimate=body.later_estimate,
+            later_window=body.later_window,
+            cycle_set=bool(
+                {"payment_amount", "later_estimate", "later_window"} & body.model_fields_set
+            ),
         )
     except LedgerError as exc:
         raise _handle(exc) from exc
@@ -533,7 +601,15 @@ class StatementBalanceIn(BaseModel):
         description="as the statement prints it: the amount owed, positive",
     )
     statement_date: date_value_type | None = Field(
-        default=None, description="the statement's closing date (today or earlier)"
+        default=None,
+        description="the statement's closing date (today or earlier); checked against the "
+        "card's statement_close_day",
+    )
+    minimum_due: Decimal | None = Field(
+        default=None,
+        decimal_places=4,
+        max_digits=20,
+        description="the statement's minimum payment: a schedule that pays the minimum takes it",
     )
     transaction_id: uuid.UUID | None = Field(
         default=None, description="the payment instance (exclusive with account + due_date)"
@@ -552,6 +628,11 @@ class StatementBalanceOut(InstanceOut):
     schedule_id: uuid.UUID
     previous_amount: Decimal = Field(
         description="the schedule account's leg before the statement was recorded"
+    )
+    close_day_hint: str | None = Field(
+        default=None,
+        description="set when the statement_date disagrees with the card's statement_close_day: "
+        "what to set it to. Nothing is changed for you",
     )
 
 
@@ -575,6 +656,7 @@ def record_statement_balance(
             transaction_id=body.transaction_id,
             account_ref=body.account,
             due_date=body.due_date,
+            minimum_due=body.minimum_due,
         )
     except LedgerError as exc:
         raise _handle(exc) from exc
@@ -585,7 +667,10 @@ def record_statement_balance(
         if r["transaction_id"] == recorded.tx.id
     ]
     return StatementBalanceOut(
-        **row, schedule_id=recorded.schedule.id, previous_amount=recorded.previous_amount
+        **row,
+        schedule_id=recorded.schedule.id,
+        previous_amount=recorded.previous_amount,
+        close_day_hint=recorded.close_day_hint,
     )
 
 

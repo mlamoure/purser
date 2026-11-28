@@ -878,21 +878,6 @@ def sync_all_active() -> None:
             session.rollback()
             log.exception("post-sync categorization failed")
 
-        # Backend review (#175, DESIGN §11.2): a no-op unless a provider is
-        # configured AND ai_review is on — configuring a provider grants
-        # nothing by itself. Isolated the same way: a failing provider must
-        # never break a sync, it just leaves rows unreviewed.
-        try:
-            from purser import review
-
-            review_stats = review.ai_review_pass(session)
-            session.commit()
-            if any(review_stats.values()):
-                log.info("post-sync review", **review_stats)
-        except Exception:
-            session.rollback()
-            log.exception("post-sync review failed")
-
     # Backdated feed rows dirty net_worth_daily; consume the watermark inline
     # (this is the scheduled job — there is no request to background off of).
     from purser import networth

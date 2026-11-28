@@ -288,7 +288,7 @@ describe("AccountRegister manual holdings (#390)", () => {
     return view;
   };
 
-  it("shows a Positions tab only for a brokerage account tracked by hand", async () => {
+  it("shows a Positions tab only for a brokerage account whose holdings are entered in Purser", async () => {
     registerRoutes(
       accountOut({ id: "acct-b", type: "brokerage", path: "assets.broker", holdings_source: "manual" }),
     );
@@ -333,6 +333,49 @@ describe("AccountRegister manual holdings (#390)", () => {
     render(false);
     expect(await screen.findByPlaceholderText("Search payee, description, memo…")).toBeInTheDocument();
     expect(screen.queryByLabelText("Holdings source")).not.toBeInTheDocument();
+  });
+});
+
+describe("AccountRegister statement closing day (#674)", () => {
+  const card = accountOut({ type: "credit_card", path: "liabilities.card" });
+  const routes = () =>
+    mockApi({
+      "GET /accounts/{account_id}": ok(card),
+      "GET /accounts/{account_id}/balance/history": ok(balanceHistoryOut()),
+      "GET /accounts/{account_id}/holdings/summary": ok(holdingsSummaryOut()),
+      "GET /accounts/{account_id}/statement-cycle": ok({
+        account: "liabilities.card",
+        statement_close_day: null,
+        suggested_close_day: 19,
+        suggestion_source: "history",
+        suggestion_detail: "the balance on day 19 equals 5 of 6 payments",
+        statements: [],
+      }),
+      "GET /transactions": ok({ items: [], total: 0, limit: 50, offset: 0 }),
+      "GET /matching/transfer-candidates": ok([]),
+      "GET /matching/proposed": ok([]),
+      "PATCH /accounts/{account_id}": ok(card),
+    });
+
+  it("offers the suggested day and saves the one chosen", async () => {
+    routes();
+    const { user } = renderWithProviders(
+      <Routes>
+        <Route path="/accounts/:accountId" element={<AccountRegister />} />
+      </Routes>,
+      { route: "/accounts/a-1" },
+    );
+    expect(await screen.findByText("No closing day")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Set closing day…" }));
+    await user.click(await screen.findByRole("button", { name: "Use suggested day 19" }));
+    expect(screen.getByLabelText("Statement closing day")).toHaveValue("19");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(apiMock.PATCH).toHaveBeenCalledWith("/accounts/{account_id}", {
+        params: { path: { account_id: "a-1" } },
+        body: { statement_close_day: 19 },
+      }),
+    );
   });
 });
 
@@ -602,7 +645,7 @@ describe("AccountRegister securities trades (#390 phase 1b)", () => {
     expect(screen.queryByText("Sale of 1 XYZ")).not.toBeInTheDocument();
   });
 
-  it("lets an admin say a hand-tracked account's feed balance is its cash", async () => {
+  it("lets an admin say the feed balance of an account with holdings entered in Purser is its cash", async () => {
     const account = accountOut({
       id: "acct-b",
       type: "brokerage",
@@ -637,35 +680,157 @@ describe("AccountRegister securities trades (#390 phase 1b)", () => {
 });
 
 
-describe("Account register guided review", () => {
-  it("honors attention links and confirms only the selected posted rows", async () => {
+describe("Account register: transactions that need review (#694)", () => {
+  const bankRow = (over: Partial<TransactionOut> = {}) =>
+    instanceRow({
+      status: "posted",
+      origin: "import",
+      schedule_id: null,
+      transfer_account_path: null,
+      is_transfer: false,
+      ...over,
+    });
+  const uncategorized = bankRow({
+    id: "tx-unc",
+    payee: "Example shop",
+    category_path: "expenses.uncategorized",
+    needs_review: true,
+    review_reason: "uncategorized",
+  });
+  const adjustment = bankRow({
+    id: "tx-adj",
+    origin: "system",
+    description: "Reconciliation adjustment",
+    amount: "-12.3400",
+    category_path: "expenses.reconciliation_adjustments",
+    needs_review: true,
+    review_reason: "reconciliation_adjustment",
+  });
+
+  function registerAt(route: string, rows: () => TransactionOut[], extra: Parameters<typeof mockApi>[0] = {}) {
     mockApi({
       "GET /categories": ok([]),
       "GET /accounts": ok([]),
       "GET /accounts/{account_id}": ok(accountOut()),
       "GET /accounts/{account_id}/balance/history": ok(balanceHistoryOut()),
       "GET /accounts/{account_id}/holdings/summary": ok(holdingsSummaryOut()),
-      "GET /transactions": ok({ items: [
-        instanceRow({ id: "posted", status: "posted", origin: "import", needs_review: true, schedule_id: null, payee: "Example shop" }),
-        instanceRow({ id: "pending", status: "pending", origin: "import", needs_review: true, schedule_id: null, payee: "Pending shop" }),
-      ], total: 2, limit: 50, offset: 0 }),
+      "GET /transactions": () => ok({ items: rows(), total: rows().length, limit: 50, offset: 0 }),
       "GET /matching/transfer-candidates": ok([]),
       "GET /matching/proposed": ok([]),
-      "GET /auth/me": ok({ scopes: ["read", "write", "admin"] }),
-      "POST /transactions/mark-reviewed": ok({ reviewed: 1 }),
+      ...extra,
     });
-    const { user } = renderWithProviders(<Routes><Route path="/accounts/:accountId" element={<AccountRegister />} /></Routes>, { route: "/accounts/a1?reviewed=false&status=posted" });
+    return renderWithProviders(
+      <Routes>
+        <Route path="/accounts/:accountId" element={<AccountRegister />} />
+      </Routes>,
+      { route },
+    );
+  }
+
+  it("opens a Dashboard link on the rows that need review, and lets the filter go", async () => {
+    const { user } = registerAt("/accounts/a1?needs_review=true", () => [uncategorized]);
     await screen.findByText("Example shop");
-    expect(apiMock.GET).toHaveBeenCalledWith("/transactions", expect.objectContaining({ params: { query: expect.objectContaining({ account: "a1", reviewed: false, status: ["posted"] }) } }));
-    expect(screen.queryByLabelText(/Select Pending shop/)).not.toBeInTheDocument();
-    await user.click(screen.getByLabelText("Select all posted transactions awaiting review on this page"));
-    await user.click(screen.getByRole("button", { name: "Review selected (1)" }));
-    const preview = screen.getByRole("region", { name: "Confirm transaction review" });
-    expect(within(preview).getByText(/Example shop/)).toBeInTheDocument();
-    expect(within(preview).queryByText(/Pending shop/)).not.toBeInTheDocument();
+    expect(apiMock.GET).toHaveBeenCalledWith("/transactions", {
+      params: { query: expect.objectContaining({ account: "a1", needs_review: true, status: ["pending", "posted"] }) },
+    });
+    const only = screen.getByRole("checkbox", { name: "Needs review only" });
+    expect(only).toBeChecked();
+
+    await user.click(only);
+    const registerQueries = () =>
+      apiMock.GET.mock.calls
+        .filter(([path]) => path === "/transactions")
+        .map(([, init]) => (init as { params: { query: Record<string, unknown> } }).params.query);
+    await waitFor(() => expect(registerQueries().at(-1)).not.toHaveProperty("needs_review"));
+  });
+
+  it("says why each row needs review, with nothing to select or mark", async () => {
+    registerAt("/accounts/a1", () => [uncategorized, adjustment, bankRow({ id: "tx-ok", payee: "Filed shop" })]);
+    await screen.findByText("Example shop");
+
+    const table = within(screen.getByRole("table"));
+    expect(table.getAllByText("needs review")).toHaveLength(2);
+    expect(table.getByText("no category")).toBeInTheDocument();
+    // The reason is wrapping text under the pill, not part of it, so a long
+    // one cannot widen the Status column (#700).
+    const reason = table.getByText("reconciliation adjustment");
+    expect(reason.tagName).toBe("SPAN");
+    expect(reason).not.toHaveClass("whitespace-nowrap");
+    expect(reason.closest("[title]")).toHaveAttribute("title", expect.stringContaining("reconcile"));
+    // Review marks, escalation and the bulk review are gone.
+    expect(screen.queryByText("flagged")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Review selected/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("checkbox", { name: /Select/ })).not.toBeInTheDocument();
+    // Only the adjustment can be accepted.
+    expect(screen.getAllByRole("button", { name: "Accept…" })).toHaveLength(1);
+    const row = screen.getByText("Reconciliation adjustment").closest("tr")!;
+    expect(within(row).getByRole("button", { name: "Accept…" })).toBeInTheDocument();
+  });
+
+  it("accepts a reconciliation adjustment with a note, and the flag clears", async () => {
+    let accepted = false;
+    const { user } = registerAt(
+      "/accounts/a1",
+      () => [accepted ? { ...adjustment, needs_review: false, review_reason: null } : adjustment],
+      {
+        "POST /transactions/{tx_id}/accept-adjustment": () => {
+          accepted = true;
+          return ok({
+            reconciliation_id: "rec-1",
+            account_id: "a1",
+            adjustment_tx_id: "tx-adj",
+            accepted_at: "2026-11-20T12:00:00Z",
+            accepted_by: "tok-1",
+            created: true,
+          });
+        },
+      },
+    );
+    await user.click(await screen.findByRole("button", { name: "Accept…" }));
+    const form = screen.getByRole("form", { name: "Accept the reconciliation adjustment" });
+    expect(form).toHaveTextContent("Accept this adjustment of");
+    await user.type(within(form).getByLabelText("Why the adjustment is right (optional)"), "bank fee, statement p.2");
     expect(apiMock.POST).not.toHaveBeenCalled();
-    await user.click(within(preview).getByRole("button", { name: "Confirm review" }));
-    await waitFor(() => expect(apiMock.POST).toHaveBeenCalledWith("/transactions/mark-reviewed", { body: { transaction_ids: ["posted"], escalate: false } }));
+    await user.click(within(form).getByRole("button", { name: "Accept adjustment" }));
+
+    await waitFor(() =>
+      expect(apiMock.POST).toHaveBeenCalledWith("/transactions/{tx_id}/accept-adjustment", {
+        params: { path: { tx_id: "tx-adj" } },
+        body: { note: "bank fee, statement p.2" },
+      }),
+    );
+    await waitFor(() =>
+      expect(within(screen.getByRole("table")).queryByText(/needs review/)).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByRole("form", { name: "Accept the reconciliation adjustment" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Accept…" })).not.toBeInTheDocument();
+  });
+
+  it("accepts without a note, and shows a refusal without closing the form", async () => {
+    mockApi({
+      "GET /categories": ok([]),
+      "GET /accounts": ok([]),
+      "POST /transactions/{tx_id}/accept-adjustment": fail(422, "not a reconciliation adjustment"),
+    });
+    const { user } = renderWithProviders(
+      <table>
+        <tbody>
+          <RegisterRow t={adjustment} accountPath="assets.checking" candidates={[]} proposed={[]} />
+        </tbody>
+      </table>,
+    );
+    await user.click(screen.getByRole("button", { name: "Accept…" }));
+    await user.click(screen.getByRole("button", { name: "Accept adjustment" }));
+
+    expect(await screen.findByText("not a reconciliation adjustment")).toBeInTheDocument();
+    expect(apiMock.POST).toHaveBeenCalledWith("/transactions/{tx_id}/accept-adjustment", {
+      params: { path: { tx_id: "tx-adj" } },
+    });
+    expect(screen.getByRole("form", { name: "Accept the reconciliation adjustment" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByText("not a reconciliation adjustment")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Accept…" })).toBeInTheDocument();
   });
 });
 
@@ -910,7 +1075,7 @@ describe("Account register: securities trades on a brokerage account (#591)", ()
     );
   });
 
-  it("shows no true-up switch on a hand-tracked brokerage account", async () => {
+  it("shows no true-up switch on a brokerage account whose holdings are entered in Purser", async () => {
     renderRegister([], { ...broker, holdings_source: "manual" });
     await screen.findByText("No transactions match.");
     expect(screen.queryByLabelText("Keep cash in step with the broker's balance")).not.toBeInTheDocument();

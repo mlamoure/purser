@@ -18,7 +18,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from purser import crypto, qif_import, review
+from purser import crypto, qif_import
 from purser.admin import feed_repair
 from purser.admin.feed_repair import RepairRefused
 from purser.db import get_sessionmaker
@@ -137,73 +137,6 @@ class TestPurge:
         assert summary["transactions_deleted"] == 1
         remaining = {t["description"] for t in _tx_rows(harness.client, "assets.checking")}
         assert remaining == {"Grocery Store"}
-
-    def test_purge_takes_review_marks_with_the_rows(self, harness: FeedHarness) -> None:
-        """A reviewed feed row purges: its mark goes with it (#284) — every
-        row migration 0021 found carries one, so without this the foreign
-        key refused the whole purge."""
-        rows = [{"id": "t1", "posted": _recent_epoch(3), "amount": "-10.00", "description": "x"}]
-        harness.use_payload(payload_of(rows))
-        cid = harness.connect()
-        harness.map_new(cid, "Demo Checking", "assets.checking")
-        assert harness.sync(cid)["imported"] == 1
-        with get_sessionmaker()() as session:
-            account = feed_repair.resolve_purge_account(session, "assets.checking")
-            (tx_id,) = feed_repair._doomed_feed_tx_ids(session, account.id, None)
-            review.mark(session, tx_id=tx_id, token=None, via=review.VIA_BACKFILL)
-            session.commit()
-            summary = feed_repair.execute_purge(session, account, since=None, actor_token_id=None)
-            session.commit()
-        assert summary["transactions_deleted"] == 1
-        assert summary["reviews_deleted"] == 1
-        assert _tx_rows(harness.client, "assets.checking") == []
-
-    def test_purging_a_carried_marks_source_keeps_the_copy(self, harness: FeedHarness) -> None:
-        """Decision 82: a mark carried from a pending names it in
-        ``carried_from``, ON DELETE SET NULL — purging the pending keeps
-        the successor's mark and drops only the link."""
-        hold = {
-            "id": "hold",
-            "posted": _recent_epoch(0),
-            "amount": "-31.00",
-            "description": "Harbor Market hold",
-            "pending": True,
-        }
-        harness.use_payload(payload_of([hold]))
-        cid = harness.connect()
-        harness.map_new(cid, "Demo Checking", "assets.checking")
-        harness.sync(cid)
-        (pending,) = harness.client.get("/transactions", params={"status": "pending"}).json()[
-            "items"
-        ]
-        resp = harness.client.post(
-            "/transactions/mark-reviewed", json={"transaction_ids": [pending["id"]]}
-        )
-        assert resp.status_code == 200, resp.text
-        # The bank posts it dated three days earlier, under a new description.
-        posted = {"id": "p", "posted": _recent_epoch(3), "amount": "-31.00", "description": "HM"}
-        harness.use_payload(payload_of([posted]))
-        assert harness.sync(cid)["voided_pendings"] == 1
-        successor_id = harness.client.get(f"/transactions/{pending['id']}").json()["superseded_by"]
-
-        with get_sessionmaker()() as session:
-            account = feed_repair.resolve_purge_account(session, "assets.checking")
-            summary = feed_repair.execute_purge(
-                session,
-                account,
-                since=date.fromisoformat(pending["date"]),
-                actor_token_id=None,
-            )
-            session.commit()
-        assert summary["transactions_deleted"] == 1
-
-        with get_sessionmaker()() as session:
-            from purser.models import TransactionReview
-
-            kept = session.get(TransactionReview, uuid.UUID(successor_id))
-            assert kept is not None
-            assert (kept.via, kept.carried_from) == ("explicit", None)
-            assert session.get(Transaction, uuid.UUID(pending["id"])) is None
 
     @staticmethod
     def _linked_sale(harness: FeedHarness, *, quantity: str = "10") -> dict[str, str]:

@@ -6,9 +6,10 @@ description: Every PURSER_* environment variable, and which settings are runtime
 Purser is configured through `PURSER_*` environment variables (a `.env` file
 next to the process also works). A subset can be **overridden at runtime** in
 the admin UI (under **Settings**: **General**, **Security**, **Connections**,
-**Prices**, **Categories** and **Agents & API**) or via the admin-scoped
+**Market data** and **Categories**) or via the admin-scoped
 `/config` REST API; overrides persist in the database and win over the environment.
-**Settings -> Categories** holds the AI categorization card, whose **Test
+**Settings -> Categories** has three tabs: **Categories** (with the review
+setting), **Rules**, and, for an admin, **AI categorization**, whose **Test
 connection** (`POST /config/ai/test`) checks a provider setup before you save it.
 
 ## Required
@@ -19,7 +20,7 @@ connection** (`POST /config/ai/test`) checks a provider setup before you save it
 
 ## Environment-only
 
-Infrastructure identity — never runtime-editable.
+Infrastructure identity and a few server behaviours — never runtime-editable.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -66,37 +67,39 @@ Docker Compose, see
 
 ## Runtime-editable
 
-Environment value is the bootstrap default; the admin UI can override each of
-these live. Secrets (`ai_api_key`, `oidc_client_secret`, `price_api_key`) are
+Environment value is the bootstrap default; the admin UI or `PUT /config` can
+override each of these live. Secrets (`ai_api_key`, `oidc_client_secret`, `price_api_key`) are
 write-only and encrypted at rest.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PURSER_SESSION_TTL_DAYS` | `7` | Absolute browser-session lifetime. |
 | `PURSER_SESSION_IDLE_HOURS` | `8` | Sliding idle timeout for browser sessions. |
-| `PURSER_AUDIT_RETENTION_DAYS` | `90` | Audit call/change rows older than this are pruned nightly (floor 7). |
+| `PURSER_AUDIT_RETENTION_DAYS` | `90` | Audit call/change rows older than this are pruned nightly (floor 7). Runtime-editable through `PUT /config` (`audit_retention_days`) only: the audit log shows the retention, and no admin-UI control changes it. |
 | `PURSER_TRANSFER_AUTO_LINK` | `true` | Deterministic transfer auto-linking at import. Off = every candidate is confirm-first. |
-| `PURSER_AI_PROVIDER` | `none` | AI categorization provider: `none`; `local`, a model you run behind an OpenAI-compatible API (Ollama, LM Studio, vLLM, a llama.cpp server, a LiteLLM gateway); `openai`, a hosted OpenAI-compatible service; or `anthropic`. `local` and `openai` send the same requests; `local` needs its own `PURSER_AI_BASE_URL` and never uses the hosted default. See [Use a local model](../../how-to/local-model/) and [what Purser sends](../../explanation/privacy-and-agents/#what-purser-itself-sends-to-a-model-provider). Runtime-editable in **Settings -> Categories** (AI categorization) or `PUT /config` (`ai_provider`). |
+| `PURSER_AI_PROVIDER` | `none` | AI categorization provider: `none`; `local`, a model you run behind an OpenAI-compatible API (Ollama, LM Studio, vLLM, a llama.cpp server, a LiteLLM gateway); `openai`, a hosted OpenAI-compatible service; or `anthropic`. `local` and `openai` send the same requests; `local` needs its own `PURSER_AI_BASE_URL` and never uses the hosted default. See [Use a local model](../../how-to/local-model/) and [what Purser sends](../../explanation/privacy-and-agents/#what-purser-itself-sends-to-a-model-provider). Runtime-editable in **Settings -> Categories -> AI categorization** or `PUT /config` (`ai_provider`). |
 | `PURSER_AI_BASE_URL` | `https://api.openai.com/v1` | The OpenAI-compatible address for `local` or `openai`, usually ending in `/v1` (`http://host.docker.internal:11434/v1` for Ollama on the Docker host). The default serves `openai` only: saving `local` without an address of its own is refused with 422. Ignored for `anthropic`. |
 | `PURSER_AI_API_KEY` | unset | Provider API key (write-only secret), optional for `local`. **Clear key** on the settings card (`PUT /config` with `"ai_api_key": null`) stores "no key", which also overrides this variable; `DELETE /config/ai_api_key` returns to it. |
 | `PURSER_AI_MODEL` | unset | Model name. The settings card's **Find models** lists the server's models (`POST /config/ai/models`). |
 | `PURSER_AI_TIMEOUT_SECONDS` | `30` | Seconds to wait for one provider answer. A model on modest hardware can need 120 or more. 5 to 600 through the settings card or `PUT /config` (`ai_timeout_seconds`). |
-| `PURSER_AI_REVIEW` | `false` | Run the review pass server-side instead of waiting for a connected agent. Requires a configured provider on top of this — turning a provider on grants nothing by itself. |
-| `PURSER_REVIEW_MAX_AGE_DAYS` | `90` | Unreviewed transactions older than this are auto-marked `aged` by a nightly sweep, so the set cannot grow without bound. The count is reported rather than cleared silently. |
+| `PURSER_AI_MIN_CONFIDENCE` | `0.7` | The AI categorizer's confidence floor, 0 to 1: a category guess below it is not applied, so the row stays uncategorized (and a bank-sync row then [needs review](../../how-to/review-new-transactions/)). A guess that names one of your accounts (`[account]`, a transfer) needs at least 0.85 whatever this says. Runtime-editable in **Settings -> Categories -> AI categorization** (**Minimum confidence**, as a percentage) or `PUT /config` (`ai_min_confidence`). |
+| `PURSER_REVIEW_UNCATEGORIZED` | `true` | Flag bank-sync transactions with no category as [needing review](../../how-to/review-new-transactions/). Reconciliation adjustments are flagged whatever this says. Runtime-editable on the **Categories** tab of **Settings -> Categories** or `PUT /config` (`review_uncategorized`). |
 | `PURSER_OIDC_ISSUER` | unset | OpenID Provider issuer URL (e.g. an Authentik instance). SSO enables when issuer, client id, and secret are all set; password login always remains as fallback. |
 | `PURSER_OIDC_CLIENT_ID` | unset | OIDC client id. |
 | `PURSER_OIDC_CLIENT_SECRET` | unset | OIDC client secret (write-only secret). |
 | `PURSER_OIDC_AUTO_PROVISION` | `false` | Auto-create a member account for an SSO identity whose email matches no account, ignoring letter case (requires the provider to assert `email_verified`). Off by default: such sign-ins get "account not provisioned" — pre-create users in the admin UI (**Settings -> Users**) instead. |
 | `PURSER_GRAFANA_URL` | unset | Grafana base URL for deep links on tool responses; links omitted when unset. |
-| `PURSER_PRICE_PROVIDER` | `none` | Daily closes for hand-tracked positions: `none` (record closes by hand) or `tiingo`. The provider sees ticker symbols only. See [Track holdings by hand](../../how-to/manual-holdings/). |
-| `PURSER_PRICE_STALE_DAYS` | `7` | A hand-tracked position whose newest close is older than this many days is flagged `stale` (and `price.stale` fires once). 1 to 365. |
+| `PURSER_PRICE_PROVIDER` | `none` | Daily closes for holdings entered in Purser (and SimpleFIN holdings reported with no value): `none` (no provider; enter closes by hand), `tiingo` (US stocks, ETFs and mutual funds) or `eodhd` (exchanges worldwide and US mutual funds). The provider sees ticker symbols only. See [Enter holdings in Purser](../../how-to/manual-holdings/). |
+| `PURSER_PRICE_FALLBACK_PROVIDER` | `none` | A second provider asked for what the provider does not carry or fails to answer: `none`, `tiingo` or `eodhd`, never the same as `PURSER_PRICE_PROVIDER`. Runtime-editable through **Settings -> Market data** or `PUT /config` (`price_fallback_provider`). |
+| `PURSER_PRICE_STALE_DAYS` | `7` | A position entered in Purser whose newest close is older than this many days is flagged `stale` (and `price.stale` fires once). 1 to 365. |
 | `PURSER_FEED_STALE_DAYS` | `4` | A mapped SimpleFIN account whose bank balance date is more than this many days old is stale: `feed.stale` fires once per frozen date and `whats_new` lists it until the bank updates. 1 to 90. Runtime-editable through `PUT /config` (`feed_stale_days`). See [Connect a bank with SimpleFIN](../../how-to/simplefin/). |
-| `PURSER_TIMEZONE` | `UTC` | The household time zone, an IANA name such as `America/New_York`. Its calendar date is "today" everywhere Purser reasons about days: due and overdue bills, matching's late bills, snoozes, the digest's week ahead, net worth and balance defaults, review age, reconciliation's "no future dates", price and feed staleness, and the Grafana forecast view. Timestamps (audit log, fetches, sessions) are stored in UTC and shown in the household time zone by the admin app; the scheduled job times stay UTC (06:45 matching and the rest), except the daily SimpleFIN sync, whose time (**Settings -> Connections**) is a clock time in the household time zone and keeps it across daylight-saving changes; changing the zone keeps that clock time in the new zone. The default keeps an existing install on the day it already had. Runtime-editable through **Settings -> General** or `PUT /config` (`timezone`); an unknown zone is refused with 422, and an unknown `PURSER_TIMEZONE` stops startup. Any token with read scope gets the current ledger day and zone from `GET /clock`, for a client that dates its own writes. |
+| `PURSER_TIMEZONE` | `UTC` | The household time zone, an IANA name such as `America/New_York`. Its calendar date is "today" everywhere Purser reasons about days: due and overdue bills, matching's late bills, snoozes, the digest's week ahead, net worth and balance defaults, reconciliation's "no future dates", price and feed staleness, and the Grafana forecast view. Timestamps (audit log, fetches, sessions) are stored in UTC and shown in the household time zone by the admin app; the scheduled job times stay UTC (06:45 matching and the rest), except the daily SimpleFIN sync, whose time (**Settings -> Connections**) is a clock time in the household time zone and keeps it across daylight-saving changes; changing the zone keeps that clock time in the new zone. The default keeps an existing install on the day it already had. Runtime-editable through **Settings -> General** or `PUT /config` (`timezone`); an unknown zone is refused with 422, and an unknown `PURSER_TIMEZONE` stops startup. Any token with read scope gets the current ledger day and zone from `GET /clock`, for a client that dates its own writes. |
 
-The price provider's **API key** has no environment variable on purpose: Purser
-is the party that sends it, so it lives only in Purser's encrypted settings
-(**Settings -> Prices**, or `PUT /config` with `price_api_key`). It is write-only:
-responses report only `price_api_key_set`.
+The price providers' **API keys** have no environment variables on purpose:
+Purser is the party that sends them, so they live only in Purser's encrypted
+settings (**Settings -> Market data**, or `PUT /config` with `price_api_key`
+and `price_fallback_api_key`). They are write-only: responses report only
+`price_api_key_set` and `price_fallback_api_key_set`.
 
 The SimpleFIN **sync schedule** (daily / every 12h / every 6h / hourly) is
 runtime-only — set it in **Settings -> Connections**.
@@ -147,6 +150,8 @@ Purser ignores these and logs a warning at startup while one is still set.
 | --- | --- |
 | `PURSER_PRIVACY_PURCHASE` | Agents ask for privacy per call with `withhold`; see [Privacy and agents](../../explanation/privacy-and-agents/). |
 | `PURSER_PRIVACY_AMOUNT` | Agents ask for privacy per call with `withhold`; see [Privacy and agents](../../explanation/privacy-and-agents/). |
+| `PURSER_AI_REVIEW` | Nothing: Purser no longer clears rows with a model after a sync. A transaction needs review only for a reason; see [Transactions that need review](../../how-to/review-new-transactions/). |
+| `PURSER_REVIEW_MAX_AGE_DAYS` | Nothing: rows no longer age out of review. The flag clears when the row is fixed; see [Transactions that need review](../../how-to/review-new-transactions/). |
 
 ## Docker host binding
 

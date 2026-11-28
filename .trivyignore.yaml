@@ -1,9 +1,10 @@
-# Reviewed 2026-11-16. Debian has no fixed version for these exact packages.
+# Reviewed 2026-11-16; re-reviewed 2026-11-27 for 2026.11.7 (same package versions, Debian has
+# no fixed version, and nothing new in Purser reaches them).
 # Re-review reachability on code/image changes; never extend dates automatically.
 # Raw scan artifacts retain all findings. New versions and new IDs fail closed.
 vulnerabilities:
   - id: CVE-2026-124709
-    expired_at: 2026-12-01
+    expired_at: 2026-12-31
     statement: >-
       Reviewed 2026-11-21. OpenSSL's QUIC stack is reachable only through its QUIC API. Purser serves HTTP/1.1 over TCP (uvicorn), its clients use TLS over TCP (httpx), the image has no web server binary and no QUIC or HTTP/3 library, and Python's ssl module exposes no QUIC. Debian's 3.5.9-1~deb13u1 still carries it.
     purls:
@@ -13,8 +14,19 @@ vulnerabilities:
       - pkg:deb/debian/libssl3t64@3.5.9-1~deb13u1
       - pkg:deb/debian/openssl@3.5.9-1~deb13u1
       - pkg:deb/debian/openssl-provider-legacy@3.5.9-1~deb13u1
+  - id: CVE-2026-107494
+    expired_at: 2026-12-31
+    statement: >-
+      Reviewed 2026-11-24. Unbounded RETIRE_CONNECTION_ID queueing from retransmitted NEW_CONNECTION_ID frames in OpenSSL's QUIC stack, reachable only through its QUIC API. Purser serves HTTP/1.1 over TCP (uvicorn), its clients use TLS over TCP (httpx), the image has no web server binary and no QUIC or HTTP/3 library, and Python's ssl module exposes no QUIC. Debian has no fixed version; its 3.5.9-1~deb13u1 still carries it (re-reviewed 2026-11-24, #692).
+    purls:
+      - pkg:deb/debian/libssl3t64@3.5.7-1~deb13u3
+      - pkg:deb/debian/openssl@3.5.7-1~deb13u3
+      - pkg:deb/debian/openssl-provider-legacy@3.5.7-1~deb13u3
+      - pkg:deb/debian/libssl3t64@3.5.9-1~deb13u1
+      - pkg:deb/debian/openssl@3.5.9-1~deb13u1
+      - pkg:deb/debian/openssl-provider-legacy@3.5.9-1~deb13u1
   - id: CVE-2025-69720
-    expired_at: 2026-12-01
+    expired_at: 2026-12-31
     statement: >-
       Purser serves HTTP and runs a background worker; it does not use curses or parse untrusted terminal definitions.
     purls:
@@ -23,38 +35,38 @@ vulnerabilities:
       - pkg:deb/debian/ncurses-base@6.5%2B20250216-2
       - pkg:deb/debian/ncurses-bin@6.5%2B20250216-2
   - id: CVE-2026-119373
-    expired_at: 2026-12-01
+    expired_at: 2026-12-31
     statement: >-
       Purser uses PostgreSQL only, with no SQLite database, FTS5, changeset ingestion, or sqlite3 imports. SQLite remains a Python base-image library.
     purls:
       - pkg:deb/debian/libsqlite3-0@3.46.1-7%2Bdeb13u2
   - id: CVE-2026-119374
-    expired_at: 2026-12-01
+    expired_at: 2026-12-31
     statement: >-
       Purser uses PostgreSQL only, with no SQLite database, FTS5, changeset ingestion, or sqlite3 imports. SQLite remains a Python base-image library.
     purls:
       - pkg:deb/debian/libsqlite3-0@3.46.1-7%2Bdeb13u2
   - id: CVE-2026-119379
-    expired_at: 2026-12-01
+    expired_at: 2026-12-31
     statement: >-
       Purser uses PostgreSQL only, with no SQLite database, FTS5, changeset ingestion, or sqlite3 imports. SQLite remains a Python base-image library.
     purls:
       - pkg:deb/debian/libsqlite3-0@3.46.1-7%2Bdeb13u2
   - id: CVE-2026-16742
-    expired_at: 2026-12-01
+    expired_at: 2026-12-31
     statement: >-
       systemd-homed is absent from the runtime image; Purser is the entrypoint, with no systemd service manager.
     purls:
       - pkg:deb/debian/libsystemd0@257.13-1~deb13u1
       - pkg:deb/debian/libudev1@257.13-1~deb13u1
   - id: CVE-2026-54369
-    expired_at: 2026-12-01
+    expired_at: 2026-12-31
     statement: >-
       No ACL manipulation or untrusted filesystem extraction in Purser. The application runs as UID 999, without privileged mounts; Compose and Helm disable privilege escalation.
     purls:
       - pkg:deb/debian/libacl1@2.3.2-2%2Bb1
   - id: CVE-2026-76642
-    expired_at: 2026-12-01
+    expired_at: 2026-12-31
     statement: >-
       No mount or nsenter invocation, mount helpers, or user-controlled mount options in Purser. UID 999 with all capabilities dropped and no-new-privileges in Compose/Helm prevents the required privileged execution.
     purls:
@@ -68,7 +80,7 @@ vulnerabilities:
       - pkg:deb/debian/mount@2.41.5-0%2Bdeb13u1
       - pkg:deb/debian/util-linux@2.41.5-0%2Bdeb13u1
   - id: CVE-2026-78408
-    expired_at: 2026-12-01
+    expired_at: 2026-12-31
     statement: >-
       No mount or nsenter invocation, mount helpers, or user-controlled mount options in Purser. UID 999 with all capabilities dropped and no-new-privileges in Compose/Helm prevents the required privileged execution.
     purls:
@@ -82,7 +94,7 @@ vulnerabilities:
       - pkg:deb/debian/mount@2.41.5-0%2Bdeb13u1
       - pkg:deb/debian/util-linux@2.41.5-0%2Bdeb13u1
   - id: CVE-2026-78409
-    expired_at: 2026-12-01
+    expired_at: 2026-12-31
     statement: >-
       No mount or nsenter invocation, mount helpers, or user-controlled mount options in Purser. UID 999 with all capabilities dropped and no-new-privileges in Compose/Helm prevents the required privileged execution.
     purls:
@@ -96,7 +108,7 @@ vulnerabilities:
       - pkg:deb/debian/mount@2.41.5-0%2Bdeb13u1
       - pkg:deb/debian/util-linux@2.41.5-0%2Bdeb13u1
   - id: CVE-2026-78410
-    expired_at: 2026-12-01
+    expired_at: 2026-12-31
     statement: >-
       No mount or nsenter invocation, mount helpers, or user-controlled mount options in Purser. UID 999 with all capabilities dropped and no-new-privileges in Compose/Helm prevents the required privileged execution.
     purls:
@@ -110,7 +122,7 @@ vulnerabilities:
       - pkg:deb/debian/mount@2.41.5-0%2Bdeb13u1
       - pkg:deb/debian/util-linux@2.41.5-0%2Bdeb13u1
   - id: CVE-2026-9538
-    expired_at: 2026-12-01
+    expired_at: 2026-12-31
     statement: >-
       Archive::Tar is absent from perl-base in this image (perl -MArchive::Tar fails). Purser does not invoke Perl.
     purls:

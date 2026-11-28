@@ -50,8 +50,8 @@ bank's balance and the account's ledger:
   owed) with 75.00 of charges in the feed starts at `-325.00`.
 - **Counting every recorded transaction**, including rows a bank dates a day
   ahead, so there is nothing to wait for.
-- **Shown for review.** Purser made the entry, so it joins the review set
-  (flag `starting_balance`) for a person to see.
+- **Labelled in the register.** Purser made the entry, and the register
+  shows it as **Starting balance**. It never needs review.
 
 Afterwards `account_balance` reports `bank_snapshot.comparison.difference` of
 zero.

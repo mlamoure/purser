@@ -49,7 +49,6 @@ from sqlalchemy.orm import Session, aliased, selectinload
 from purser import appsettings, audit, balances, clock, events, matching
 from purser import ledger as ledger_service
 from purser import lineage as bank_lineage
-from purser import review as review_service
 from purser import suggestions as suggestions_service
 from purser.admin import security
 from purser.core import ledger as core
@@ -1872,8 +1871,8 @@ def resurrect_original(
 ) -> tuple[Transaction, str | None]:
     """Bring one voided original back as a fresh clone carrying ``status``
     (its status before it was merged): same postings, date, payee, text,
-    origin and source fetch, its ``content_hash`` MOVED onto the clone and
-    its review mark copied. Shared by unlink and un-split (decision 118).
+    origin and source fetch, its ``content_hash`` MOVED onto the clone.
+    Shared by unlink and un-split (decision 118).
     Returns the clone and the hash it took over."""
     moved_hash = child.content_hash
     child.content_hash = None
@@ -1897,9 +1896,6 @@ def resurrect_original(
     # one) — and the original no longer reads as merged into what it backed.
     child.superseded_by = clone.id
     session.flush()
-    # Review state moves with the row identity: the clone IS that bank line,
-    # so it inherits that line's review state (#175, decision 29).
-    review_service.copy_to_clone(session, void_id=child.id, clone_id=clone.id)
     return clone, moved_hash
 
 

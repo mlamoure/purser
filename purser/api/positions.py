@@ -14,8 +14,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path, Query, status
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from purser import appsettings, clock, ledger, networth
@@ -488,7 +488,7 @@ class HoldingsSummaryOut(BaseModel):
 def holdings_summary(
     account_id: uuid.UUID, token: ReadToken, session: DbSession
 ) -> HoldingsSummaryOut:
-    """The account's newest holdings set, from the feed or tracked by hand,
+    """The account's newest holdings set, from SimpleFIN or entered in Purser,
     with each line's unrealized gain (amount and percent) and share of the
     account, a cash line and totals. Lines are largest first. ``cost_basis``
     and ``unrealized_gain`` total only the lines whose gain is known, so a
@@ -520,7 +520,7 @@ def list_positions(
     include_closed: Annotated[bool, Query()] = False,
 ) -> list[PositionOut]:
     """The account's positions, each valued as of today. A feed-sourced
-    account lists the positions recorded while it was tracked by hand, if
+    account lists the positions entered while its holdings were entered in Purser, if
     any; they are read-only until it is switched back to manual."""
     try:
         account = ledger.get_account(session, account_id)
@@ -679,8 +679,8 @@ def record_position_event(
 
     A sale moves its net proceeds to the account's cash unless `proceeds_to`
     is `none`; a buy takes its cost from the cash only with `funded_from`
-    `cash`. That cash is one posted system row against `equity.securities`
-    (it joins the unreviewed set), or an existing row linked with
+    `cash`. That cash is one posted system row against `equity.securities`,
+    or an existing row linked with
     `transaction_id`. When the account already shows a posted one-sided row
     of exactly that amount around the settlement date, the call is refused
     with 409 naming it, so the cash is never counted twice: link that row,
@@ -888,9 +888,14 @@ class FetchFailureOut(BaseModel):
 
 class PriceStatusOut(BaseModel):
     provider: str
+    fallback_provider: str = "none"  # asked for what the provider cannot answer (#686)
     stale_days: int
     last_fetched_at: datetime | None  # newest provider close stored
-    symbols: list[SymbolPriceOut]  # every symbol an open manual position holds
+    last_run_at: datetime | None = None  # the daily job's (or a fetch-now's) last run
+    next_run_at: datetime | None = None  # the daily job's next run
+    # Every symbol an open manual position holds, and every symbol a feed
+    # row is valued from a stored close (decision 92).
+    symbols: list[SymbolPriceOut]
     last_failure: FetchFailureOut | None
 
 
@@ -908,12 +913,17 @@ class StaleOut(BaseModel):
 class FetchOut(BaseModel):
     provider: str
     skipped: str | None  # why nothing was fetched, when nothing was
+    fallback: str = "none"  # the fallback provider (#686)
+    fallback_skipped: str | None = None  # why the selected fallback was not asked
     symbols: int
     fetched: int  # closes stored
     failed: list[FetchFailedOut]
     accounts_projected: int
     accounts_failed: int
     stale: list[StaleOut]
+    # Tickers only zero-valued feed rows need that the provider does not
+    # know (#680): record their closes by hand; never a failure.
+    not_covered: list[str] = []
 
 
 @prices_router.get("", dependencies=[disclose(NOTHING)])
@@ -971,8 +981,11 @@ def price_status(token: ReadToken, session: DbSession) -> PriceStatusOut:
     failure = report["last_failure"]
     return PriceStatusOut(
         provider=report["provider"],
+        fallback_provider=report["fallback_provider"],
         stale_days=report["stale_days"],
         last_fetched_at=report["last_fetched_at"],
+        last_run_at=report["last_run_at"],
+        next_run_at=report["next_run_at"],
         symbols=[
             SymbolPriceOut(
                 symbol=s.symbol,
@@ -987,6 +1000,115 @@ def price_status(token: ReadToken, session: DbSession) -> PriceStatusOut:
     )
 
 
+class PriceTestIn(BaseModel):
+    """A provider key test (#682). Both fields are optional: absent, the
+    configured provider and the stored key are tested. The key is used for
+    this one request and never stored, logged or echoed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["tiingo", "eodhd"] | None = None
+    api_key: str | None = None
+
+
+class PriceTestOut(BaseModel):
+    ok: bool
+    provider: str
+    status: int | None = None  # the provider's HTTP status, when it answered
+    # A fixed phrase (e.g. `refused`, `not found`, `no API key is set`, or
+    # a transport failure's class name); never request data.
+    reason: str | None = None
+
+
+@prices_router.post("/test")
+def probe_price_provider(body: PriceTestIn, token: AdminToken) -> PriceTestOut:
+    """Test a price provider key (admin): ask the provider for a few recent
+    closes of one well-known symbol. Stores nothing."""
+    from purser.api.config import _check_price_api_key
+
+    _check_price_api_key(body.api_key)
+    result = price_service.probe_provider(body.provider, body.api_key or None)
+    return PriceTestOut(
+        ok=result.ok, provider=result.provider, status=result.status, reason=result.reason
+    )
+
+
+class SymbolSettingIn(BaseModel):
+    """One symbol's price settings (#686). ``aliases`` maps a provider to
+    the symbol's ticker there (e.g. ``{"eodhd": "VOD.LSE"}``); an empty
+    alias clears it. Both at their defaults remove the setting."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    skip_providers: bool = False
+    aliases: dict[Literal["tiingo", "eodhd"], str] = Field(default_factory=dict)
+
+
+class SymbolSettingOut(BaseModel):
+    symbol: str
+    # Never sent to a provider: its closes are entered by hand.
+    skip_providers: bool
+    aliases: dict[str, str]  # provider -> the symbol's ticker there
+
+
+@prices_router.get("/symbols", dependencies=[disclose(NOTHING)])
+def list_symbol_settings(token: ReadToken, session: DbSession) -> list[SymbolSettingOut]:
+    """Every symbol with price settings: aliases, and whether the providers are skipped (#686)."""
+    rows = price_service.symbol_settings(session)
+    return [
+        SymbolSettingOut(symbol=s, skip_providers=r.price_by_hand, aliases=dict(r.aliases or {}))
+        for s, r in sorted(rows.items())
+    ]
+
+
+@prices_router.put("/symbols/{symbol}")
+def put_symbol_settings(
+    symbol: Annotated[str, Path(min_length=1, max_length=15)],
+    body: SymbolSettingIn,
+    token: WriteToken,
+    session: DbSession,
+) -> SymbolSettingOut:
+    """Set one symbol's price settings (#686): its ticker per provider, and
+    whether the providers are skipped for it (its closes are entered by hand).
+    Changing a provider's alias makes the provider ask the corrected ticker
+    again.
+    Settings at their defaults remove the row."""
+    try:
+        row = price_service.set_symbol_settings(
+            session,
+            symbol=symbol,
+            skip_providers=body.skip_providers,
+            aliases={str(k): v for k, v in body.aliases.items()},
+            token=token,
+        )
+    except ledger.LedgerError as exc:
+        raise _handle(exc) from exc
+    session.commit()
+    if row is None:
+        return SymbolSettingOut(symbol=service.symbol_of(symbol), skip_providers=False, aliases={})
+    return SymbolSettingOut(
+        symbol=row.symbol, skip_providers=row.price_by_hand, aliases=dict(row.aliases)
+    )
+
+
+@prices_router.delete("/symbols/{symbol}")
+def delete_symbol_settings(
+    symbol: Annotated[str, Path(min_length=1, max_length=15)],
+    token: WriteToken,
+    session: DbSession,
+) -> SymbolSettingOut:
+    """Remove one symbol's price settings (#686): back to the provider's own
+    spelling, and asked of the provider again."""
+    try:
+        price_service.set_symbol_settings(
+            session, symbol=symbol, skip_providers=False, aliases={}, token=token
+        )
+    except ledger.LedgerError as exc:
+        raise _handle(exc) from exc
+    session.commit()
+    return SymbolSettingOut(symbol=service.symbol_of(symbol), skip_providers=False, aliases={})
+
+
 @prices_router.post("/fetch")
 def fetch_prices(token: AdminToken, background_tasks: BackgroundTasks) -> FetchOut:
     """Fetch now: the daily price job's body, on demand (admin). Fetches new
@@ -997,10 +1119,13 @@ def fetch_prices(token: AdminToken, background_tasks: BackgroundTasks) -> FetchO
     return FetchOut(
         provider=result.provider,
         skipped=result.skipped,
+        fallback=result.fallback,
+        fallback_skipped=result.fallback_skipped,
         symbols=result.symbols,
         fetched=result.fetched,
         failed=[FetchFailedOut(**f) for f in result.failed],
         accounts_projected=result.accounts_projected,
         accounts_failed=result.accounts_failed,
         stale=[StaleOut(**s) for s in result.stale],
+        not_covered=result.not_covered,
     )

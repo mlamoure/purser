@@ -91,10 +91,15 @@ amount is `fixed`, or the estimate it follows — `last`, `rolling_avg_3`,
 card's current balance. An amount someone supplied is `override` (you pinned
 the instance with a different amount or date) or `statement` (a recorded
 [card statement balance](../../how-to/schedules-and-bills/#card-statement-balances)).
+A card payment sized from its
+[statement cycle](../../how-to/schedules-and-bills/#card-payments-from-the-statement-cycle)
+is `statement_close` (the statement has closed), `cycle_projection` (the next
+statement, projected to its close), or `statement_average` /
+`same_cycle_last_year` (a later month).
 The REST forecast and the full daily series carry `basis` on every event;
-`forecast_balance` names it only for `statement` and `override`, the amounts
-an agent should be able to explain, and leaves it off the rest to stay
-inside its budget.
+`forecast_balance` names it only for `statement`, `override`,
+`statement_close` and `cycle_projection`, the amounts an agent should be
+able to explain, and leaves it off the rest to stay inside its budget.
 
 ## Estimate range
 
@@ -104,7 +109,9 @@ amount, or a card payment's current balance — also carries a `range`: the
 lowest and highest of the schedule's six newest settled amounts together
 with the event's own amount, so the point always sits inside. A card
 payment's range is its past payments together with the card's current
-balance (not the balance's swing from zero to its peak over a cycle). It
+balance (not the balance's swing from zero to its peak over a cycle). A
+later month of a card payment sized from its statement cycle ranges over the
+past statements it averages. It
 needs at least two settled amounts that differ; a fixed amount, an amount
 you overrode, and a recorded card statement have no range, because nothing
 about them is uncertain.

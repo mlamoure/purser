@@ -248,7 +248,10 @@ _FORECAST_BUDGET_CHARS = 1900
 # agent supplied. An estimate's basis is the schedule's, one list_schedules
 # away, and every key costs the fitted events; REST and the resource always
 # carry basis.
-_SUPPLIED_BASES = frozenset({"statement", "override"})
+# A card payment sized from its statement cycle (decision 136) also names
+# where it sits in the cycle, which differs slot by slot: what remains of a
+# closed statement, or the next statement projected to its close.
+_SUPPLIED_BASES = frozenset({"statement", "override", "statement_close", "cycle_projection"})
 
 
 def _cents(value: Decimal | None) -> str | None:
@@ -374,10 +377,14 @@ async def forecast_balance(
     An event with basis
     'statement' carries a card statement balance someone recorded
     (record_statement_balance) and one with 'override' an amount the user
-    set; without basis the amount is the schedule's own (fixed or an
-    estimate — a card payment's default is the card's current balance,
-    not its statement). An estimated event may carry range {low, high}: the
-    min and max of its schedule's newest six settled amounts and its own;
+    set; 'statement_close' is a card payment whose statement has closed
+    (what remains of it after credits since) and 'cycle_projection' the next
+    statement projected to its close (a card with a statement_close_day
+    whose payment schedule sets payment_amount). Without basis the amount is
+    the schedule's own (fixed or an estimate — later card payments sized
+    from the cycle are the average of past statements). An estimated event
+    may carry range {low, high}: the min and max of its schedule's newest
+    six settled amounts and its own;
     low.range {low, high, low_date} is the projected low with every ranged
     event at its worst and at its best, and the headline names what could
     take the account under its floor. days is 1..365. events lists
@@ -634,7 +641,7 @@ async def whats_new(
     (unpriced_holdings; record_price under the ticker values one, except
     one marked unpriceable: its feed symbol is no ticker, so no close can
     value it), brokerage accounts switched back to the feed whose
-    hand-tracked set still counts because no fetch has arrived since
+    holdings entered in Purser still count because no fetch has arrived since
     (open_manual_periods: check the connection or the account mapping),
     the week's expected bills, sync failures, and bank feed problems open
     now (feed: logins that need the user to log in again at the bank,
@@ -691,7 +698,7 @@ async def whats_new(
             )
         for period in payload["open_manual_periods"]:
             parts.append(
-                f"{period['account']} still shows its hand-tracked holdings: no feed fetch "
+                f"{period['account']} still shows the holdings entered in Purser: no feed fetch "
                 f"since the switch back on {period['since']}"
             )
         upcoming = payload["upcoming"]
@@ -712,10 +719,18 @@ async def whats_new(
                 f"({stale['days']} days)"
             )
         review_block = payload.get("review") or {}
-        if review_block.get("unreviewed"):
-            aged = review_block.get("oldest_days")
-            stale = f", oldest {aged}d" if aged else ""
-            parts.append(f"{review_block['unreviewed']} transaction(s) awaiting review{stale}")
+        if review_block.get("needs_review"):
+            from purser import review
+
+            line = review.headline(
+                {
+                    "total": review_block["needs_review"],
+                    review.REASON_UNCATEGORIZED: review_block.get("uncategorized", 0),
+                    review.REASON_ADJUSTMENT: review_block.get("reconciliation_adjustments", 0),
+                }
+            )
+            if line:
+                parts.append(line)
         headline = ("; ".join(parts) + ".") if parts else "Quiet since your last check."
         return presentation.three_tier(headline, payload, widget="digest")
 

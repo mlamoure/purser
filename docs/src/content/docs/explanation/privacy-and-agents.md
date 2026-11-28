@@ -156,11 +156,10 @@ not what the agent or provider did with it.
 
 ## What Purser itself sends to a model provider
 
-Purser has optional AI features of its own, off by default: categorizing new
-transactions, and a review pass that checks them after a sync. They run on
-the server, separately from any agent, and send data to the provider you
-choose in **Settings -> Categories -> AI categorization**. Each request
-carries one transaction.
+Purser has an optional AI feature of its own, off by default: categorizing
+new transactions. It runs on the server, separately from any agent, and sends
+data to the provider you choose in **Settings -> Categories -> AI
+categorization**. Each request carries one transaction.
 
 To categorize a transaction that no rule or earlier choice covers, Purser
 sends:
@@ -169,15 +168,6 @@ sends:
 - your categories and their descriptions
 - the names and paths of your open accounts, offered as transfer targets
 - your financial notes that apply everywhere, and the ones linked to its account or payee
-
-With the review pass on (`PURSER_AI_REVIEW`), to review a transaction, Purser
-sends:
-
-- its Purser id, date, account, payee, description, amount, status and origin
-- its category, what set it, and the other account of a transfer
-- its review flags, and the ids of a trade that holds it
-- your financial notes that apply everywhere, and the ones linked to its account or payee
-- your reviewer checklist
 
 Nothing else is sent: no balances, no other transactions, and never your bank
 login or Purser's encryption key. The settings card shows the same list, and

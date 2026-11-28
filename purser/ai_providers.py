@@ -1,4 +1,4 @@
-"""BYO model providers for categorization and review (DESIGN §11).
+"""BYO model providers for categorization (DESIGN §11).
 
 Two code paths only: any OpenAI-compatible endpoint and native Anthropic.
 Two provider choices share the OpenAI-compatible path (decision 133):
@@ -49,16 +49,11 @@ class Sent:
 
 @dataclass(frozen=True)
 class Disclosure:
-    capability: Literal["categorize", "review"]
+    capability: Literal["categorize"]
     when: str
     sends: tuple[Sent, ...]
 
 
-# Memories (§3.6) are "financial notes" in the user docs.
-_NOTES_SENT = Sent(
-    "your financial notes that apply everywhere, and the ones linked to its account or payee",
-    ("memories",),
-)
 DISCLOSURES = (
     Disclosure(
         capability="categorize",
@@ -73,27 +68,12 @@ DISCLOSURES = (
                 "the names and paths of your open accounts, offered as transfer targets",
                 ("categories", "category_descriptions"),
             ),
-            _NOTES_SENT,
-        ),
-    ),
-    Disclosure(
-        capability="review",
-        when="With the review pass on, to review a transaction",
-        sends=(
+            # Memories (§3.6) are "financial notes" in the user docs.
             Sent(
-                "its Purser id, date, account, payee, description, amount, status and origin",
-                ("id", "date", "account", "payee", "description", "amount", "status", "origin"),
+                "your financial notes that apply everywhere, and the ones linked to its "
+                "account or payee",
+                ("memories",),
             ),
-            Sent(
-                "its category, what set it, and the other account of a transfer",
-                ("category", "automation", "transfer_to"),
-            ),
-            Sent(
-                "its review flags, and the ids of a trade that holds it",
-                ("flags", "escalated", "locked"),
-            ),
-            _NOTES_SENT,
-            Sent("your reviewer checklist", ("guidance",)),
         ),
     ),
 )
@@ -330,9 +310,8 @@ def _timeout(settings: Settings) -> float:
 
 
 def _complete(settings: Settings, prompt: str, client: httpx.Client | None) -> str:
-    """One prompt in, raw reply text out. Shared by the categorizer, the
-    backend reviewer and the connection test so all three inherit the same
-    sanitized-error handling."""
+    """One prompt in, raw reply text out. Shared by the categorizer and the
+    connection test so both inherit the same sanitized-error handling."""
     if settings.ai_provider in OPENAI_COMPATIBLE:
         return _openai_text(settings, prompt, client=client)
     if settings.ai_provider == "anthropic":
@@ -385,55 +364,6 @@ def _anthropic_text(settings: Settings, prompt: str, *, client: httpx.Client | N
         _timeout(settings),
     )
     return _envelope_text(resp, ("content", 0, "text"))
-
-
-@dataclass(frozen=True)
-class ReviewVerdict:
-    """What the backend reviewer decided about one row (issue #175)."""
-
-    escalate: bool
-    note: str | None
-    model: str
-
-
-def _review_prompt(row: dict[str, Any], guidance: list[str]) -> str:
-    checklist = "\n".join(f"- {line}" for line in guidance)
-    return (
-        "You are reviewing one personal-finance transaction that landed "
-        "without human eyes. Decide whether it looks correct as recorded.\n"
-        f"Checklist:\n{checklist}\n"
-        f"Transaction: {json.dumps(row, default=str)}\n"
-        'Reply with ONLY a JSON object: {"ok": true|false, "note": "<one short '
-        'sentence, or null>"}. Use ok=false when a human should look — an '
-        "ambiguous transfer pair, a category that contradicts the payee, "
-        "anything you cannot settle from what you were given."
-    )
-
-
-def _parse_review(text: str, model: str) -> ReviewVerdict | None:
-    try:
-        start, end = text.index("{"), text.rindex("}") + 1
-        data = json.loads(text[start:end])
-        ok = bool(data["ok"])
-    except (ValueError, KeyError, TypeError):
-        return None
-    note = data.get("note")
-    return ReviewVerdict(escalate=not ok, note=str(note) if note else None, model=model)
-
-
-def review_row(
-    settings: Settings,
-    *,
-    row: dict[str, Any],
-    guidance: list[str],
-    client: httpx.Client | None = None,
-) -> ReviewVerdict | None:
-    """One reviewer verdict, through the same provider plumbing and the same
-    sanitized-error handling the categorizer uses."""
-    if settings.ai_provider == "none" or not settings.ai_model:
-        return None
-    text = _complete(settings, _review_prompt(row, guidance), client)
-    return _parse_review(text, str(settings.ai_model))
 
 
 # --------------------------------------------------------------------------

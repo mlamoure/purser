@@ -223,13 +223,8 @@ def update_transaction(
     # outside the balance set. min() covers a date moved in either direction.
     if tx.status == core.Status.PENDING.value:
         balances.mark_dirty(session, min(old_date, tx.date))
-    # A token-bearing edit is a real, visible decision about the row, so it
-    # leaves the unreviewed set (#175): a pending edit is still a human or
-    # agent looking.
-    from purser import review as review_service
     from purser import schedules as schedules_service
 
-    review_service.mark_if_in_scope(session, tx=tx, token=token, via=review_service.VIA_UPDATE)
     # A token-bearing amount/date/category edit of a schedule instance is the
     # user's override: pin it so the rule's refresh/resync never undoes it
     # (#231). Description and payee are labels, not overrides: they leave the
@@ -415,7 +410,6 @@ def reverse_and_replace_with_specs(
     action: str = "transaction.correct",
     audit_extra: dict[str, Any] | None = None,
     split_account_id: uuid.UUID | None = None,
-    keep_review_mark: bool = False,
 ) -> Transaction:
     """The correction pair for a posted row, with the replacement's postings
     supplied by the caller — shared by flat recategorization, transfer
@@ -425,10 +419,7 @@ def reverse_and_replace_with_specs(
     ``split_account_id`` is the replacement's split marker (decision 118):
     set when the replacement is a split, None for every other shape. The
     reversal always carries the original's marker, so the reversal of a
-    split is classified as what it negates — never as a transfer.
-
-    ``keep_review_mark``: the replacement keeps the original's review mark
-    whole even for a token-bearing actor (un-split, ``review.inherit``)."""
+    split is classified as what it negates — never as a transfer."""
     # The row is locked and reloaded first, so a merge or another correction
     # that committed meanwhile is seen: a correction of a row voided into a
     # transfer, or corrected twice, would leave two live copies (#386 review).
@@ -465,19 +456,6 @@ def reverse_and_replace_with_specs(
     # The funnel marked the pair's (possibly NEW) date; a date moved FORWARD
     # still demotes the original at its OLD date, so cover that too.
     balances.mark_dirty(session, tx.date)
-    # Correction-chain review inheritance (#175, DESIGN §4): a token-bearing
-    # actor's replacement is reviewed (the correction IS the review); a
-    # system/rule actor's carries the original's state, so automation neither
-    # grants nor revokes it.
-    from purser import review as review_service
-
-    review_service.inherit(
-        session,
-        original_id=tx.id,
-        replacement_id=replacement.id,
-        token=token,
-        keep_mark=keep_review_mark,
-    )
     audit.record(
         session,
         actor_token_id=token.id if token else None,
@@ -607,11 +585,6 @@ def transition_status(
             reason="pending_voided",
         )
     if new_status == core.Status.POSTED:
-        # Posting a row is a token-bearing human/agent decision about it
-        # (#175): it leaves the unreviewed set.
-        from purser import review as review_service
-
-        review_service.mark_if_in_scope(session, tx=tx, token=token, via=review_service.VIA_POST)
         events.emit(
             session,
             type_="transaction.posted",

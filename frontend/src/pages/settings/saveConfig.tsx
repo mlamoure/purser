@@ -22,6 +22,11 @@ export function useSaveConfig(onError: (message: string) => void) {
       // The household time zone decides the ledger day and how every
       // timestamp is shown (GET /clock).
       if (body.timezone !== undefined) qc.invalidateQueries({ queryKey: ["clock"] });
+      // Which rows need review follows review_uncategorized (decision 141):
+      // the registers' badges, the Dashboard's counts and search.
+      if (body.review_uncategorized !== undefined)
+        for (const key of ["needs-review", "register", "search"])
+          qc.invalidateQueries({ queryKey: [key] });
     },
     onError: (e) => onError(e.message),
   });

@@ -27,9 +27,12 @@ each includes `bank_snapshot`. Permissions currently apply across the instance;
 there are no per-account or per-tenant access lists.
 
 Connection discovery is a configuration surface and remains admin-only, as do
-credentials, setup and mapping. Reading an account's bank balances does not
-require that access. The bank snapshot never includes credentials, bank account
-numbers or provider identifiers, even for an administrator.
+credentials and setup. Mapping a delivered bank account needs write scope
+(MCP `map_feed_accounts`, `POST /connections/map-accounts`); replacing the
+feed of an account that already has one needs admin. Reading an account's
+bank balances does not require that access. The bank snapshot never includes
+credentials, bank account numbers or provider identifiers, even for an
+administrator.
 
 ## Undo, not pre-approval
 
@@ -48,8 +51,11 @@ draft unless you asked the agent to remember something, because an active
 note can be served as context in future sessions.
 
 Every endpoint and tool declares the scope it requires; no route is open by
-default. The few that answer without a token are deliberate: first-run setup
-(until the first administrator exists), `/healthz` and `/llms.txt`.
+default. The few that answer without a token are deliberate: sign-in
+(`POST /auth/login`, `GET /auth/methods`, and the single sign-on login and
+callback), first-run setup (until the first administrator exists) and its
+status probe `GET /auth/setup/status`, `/healthz`, `/llms.txt`, `/source`, and
+the API description (`/openapi.json`, `/docs` and `/redoc`).
 
 ## What an agent sees
 

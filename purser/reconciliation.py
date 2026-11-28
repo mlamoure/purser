@@ -29,7 +29,7 @@ What makes the marker trustworthy:
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
@@ -41,7 +41,7 @@ from purser.admin import security
 from purser.assets import ASSET_TYPES
 from purser.core import ledger as core
 from purser.feed.drift import ELIGIBLE_TYPES as _DRIFT_TYPES
-from purser.models import Account, AccountReconciliation, ApiToken
+from purser.models import Account, AccountReconciliation, ApiToken, Transaction
 
 BASIS_POSTED = "posted"
 BASIS_PENDING_INCLUSIVE = "pending_inclusive"
@@ -491,7 +491,7 @@ def _record(
     note = note.strip() if note and note.strip() else None
     if outcome.adjustment != 0 and account.type in ASSET_TYPES:
         # A change in the asset's value (decision 113): Purser's own entry
-        # against equity.revaluation, origin system so it joins the review set.
+        # against equity.revaluation. It never needs review (decision 141).
         tx = ledger.create_flat_transaction(
             session,
             account_ref=str(account.id),
@@ -514,9 +514,10 @@ def _record(
         adjustment_tx_id = tx.id
     elif outcome.adjustment != 0:
         category = _category(session, actor_token_id=token.id)
-        # origin=system: Purser computed this row, so it joins the review set
-        # (§4) and a human sees it, whoever asked for the reconcile. The
-        # matcher excludes it explicitly — it is not bank reality (§5).
+        # origin=system: Purser computed this row. It needs review until it is
+        # recategorized, split or accepted (§4, decision 141), so a person sees
+        # every plug whoever asked for the reconcile. The matcher excludes it
+        # explicitly — it is not bank reality (§5).
         tx = ledger.create_flat_transaction(
             session,
             account_ref=str(account.id),
@@ -586,4 +587,93 @@ def _record(
     )
     return replace(
         outcome, created=True, reconciliation_id=row.id, adjustment_tx_id=adjustment_tx_id
+    )
+
+
+ACCEPT_NOTE_MAX = 200
+
+
+@dataclass(frozen=True)
+class Acceptance:
+    """A reconciliation adjustment's acceptance (decision 141)."""
+
+    reconciliation_id: uuid.UUID
+    account_id: uuid.UUID
+    adjustment_tx_id: uuid.UUID
+    accepted_at: datetime
+    accepted_by: uuid.UUID | None
+    created: bool  # this call recorded it; False = it was already accepted
+
+
+def accept_adjustment(
+    session: Session, *, tx_id: uuid.UUID, token: ApiToken, note: str | None = None
+) -> Acceptance:
+    """Accept the adjustment a reconcile posted, so it no longer needs review
+    (§4, decision 141). ``tx_id`` is any row of the adjustment's lineage: the
+    adjustment itself or the row a correction of it left (``lineage.ancestry``
+    walks back to it). Idempotent: an accepted adjustment answers with its
+    acceptance and ``created=False``. ``note`` (why it is right) goes on the
+    audit row.
+
+    Raises ``ledger.NotFoundError`` for an unknown row and
+    ``ledger.LedgerError`` for a row that is no reconciliation adjustment —
+    an asset's value change (decision 113) included: it never needs review."""
+    from purser import lineage
+
+    if not security.can_write(token.scopes):
+        raise ledger.LedgerError("accepting a reconciliation adjustment requires write scope")
+    note = note.strip() if note and note.strip() else None
+    if note is not None and len(note) > ACCEPT_NOTE_MAX:
+        raise ledger.LedgerError(f"note must be {ACCEPT_NOTE_MAX} characters or fewer")
+    if session.get(Transaction, tx_id) is None:
+        raise ledger.NotFoundError(f"transaction {tx_id} not found")
+    rows = [tx_id, *lineage.ancestry(session, [tx_id])[tx_id]]
+    row = session.execute(
+        select(AccountReconciliation)
+        .where(AccountReconciliation.adjustment_tx_id.in_(rows))
+        .with_for_update()
+    ).scalar_one_or_none()
+    account = session.get(Account, row.account_id) if row is not None else None
+    if row is None or row.adjustment_tx_id is None or account is None:
+        raise ledger.LedgerError(f"transaction {tx_id} is not a reconciliation adjustment")
+    if account.type in ASSET_TYPES:
+        raise ledger.LedgerError(
+            f"transaction {tx_id} is a change in {account.path}'s value, which needs no review"
+        )
+    if row.adjustment_accepted_at is not None:
+        return Acceptance(
+            reconciliation_id=row.id,
+            account_id=row.account_id,
+            adjustment_tx_id=row.adjustment_tx_id,
+            accepted_at=row.adjustment_accepted_at,
+            accepted_by=row.adjustment_accepted_by,
+            created=False,
+        )
+    row.adjustment_accepted_at = datetime.now(UTC)
+    row.adjustment_accepted_by = token.id
+    session.flush()
+    audit.record(
+        session,
+        actor_token_id=token.id,
+        action="reconciliation.adjustment_accepted",
+        entity_type="account",
+        entity_id=row.account_id,
+        before={"adjustment_accepted_at": None},
+        after={
+            "reconciliation_id": str(row.id),
+            "as_of": row.as_of.isoformat(),
+            "adjustment": str(row.adjustment),
+            "adjustment_tx_id": str(row.adjustment_tx_id),
+            "transaction_id": str(tx_id),
+            "adjustment_accepted_at": row.adjustment_accepted_at.isoformat(),
+            **({"note": note} if note else {}),
+        },
+    )
+    return Acceptance(
+        reconciliation_id=row.id,
+        account_id=row.account_id,
+        adjustment_tx_id=row.adjustment_tx_id,
+        accepted_at=row.adjustment_accepted_at,
+        accepted_by=token.id,
+        created=True,
     )

@@ -13,7 +13,7 @@ const EXAMPLES: [string, string][] = [
   ["is:debit", "money out (is:credit for money in)"],
   ["date:2026-10", "a year, month or day; also 2026-01..2026-03"],
   ["status:pending", "pending, posted, expected or void"],
-  ["is:unreviewed", "not yet reviewed (is:reviewed)"],
+  ["is:needs-review", "needs review: no category, or a reconciliation adjustment"],
 ];
 
 export function SearchHelp() {

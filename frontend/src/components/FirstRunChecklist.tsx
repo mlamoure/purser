@@ -120,7 +120,7 @@ function names(accounts: WaitingFeedAccount[]): string {
  * An item whose read fails is left out rather than guessed. Rendered for
  * admins only (Dashboard); the reads are admin-scoped. */
 export function useFirstRunChecklist(): { items: ChecklistItem[]; loading: boolean } {
-  // The shared configQuery (Config -> Settings, Prices and SimpleFIN use it
+  // The shared configQuery (Config -> Settings, Market data and SimpleFIN use it
   // too), so this shares their cache and their invalidations.
   const config = useQuery(configQuery);
   const feed = useFeedMapping();

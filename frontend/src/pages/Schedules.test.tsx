@@ -409,6 +409,46 @@ describe("Scheduled transactions page (#535)", () => {
   });
 });
 
+describe("Card payments sized from the statement cycle (#674)", () => {
+  it("sets the card payment and later-payment options on an edit", async () => {
+    mockApi({
+      ...pageRoutes([listed({ amount_type: "estimated", amount: null })]),
+      "PATCH /schedules/{schedule_id}": ok(listed({})),
+    });
+    const { user } = renderWithProviders(<Schedules />);
+
+    const checking = within(await screen.findByRole("region", { name: "Checking" })).getByRole("table");
+    await user.click(within(checking).getByRole("button", { name: "Edit" }));
+    await user.selectOptions(screen.getByLabelText("Card payment"), "statement_balance");
+    expect(screen.getByLabelText("Later payments")).toHaveValue("statement_average");
+    expect(
+      screen.getByText("Set the card's statement closing day for this to take effect."),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    const patch = apiMock.PATCH.mock.calls.find(([path]) => path === "/schedules/{schedule_id}");
+    expect((patch?.[1] as { body: Record<string, unknown> }).body).toMatchObject({
+      payment_amount: "statement_balance",
+      later_estimate: "statement_average",
+      later_window: 6,
+    });
+  });
+
+  it("badges a closed statement and a projected one", async () => {
+    mockApi({
+      "GET /schedules/{schedule_id}": ok(
+        schedule([
+          instance({ basis: "statement_close" }),
+          instance({ transaction_id: "tx-2", date: "2026-12-05", basis: "cycle_projection" }),
+        ]),
+      ),
+    });
+    renderWithProviders(<InstancesPanel scheduleId="s-1" cardPayment />);
+    expect(await screen.findByText("closed statement")).toBeInTheDocument();
+    expect(screen.getByText("projected statement")).toBeInTheDocument();
+  });
+});
+
 describe("Estimated amounts (#556)", () => {
   const power = listed({
     id: "s-3",

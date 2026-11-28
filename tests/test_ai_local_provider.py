@@ -20,7 +20,7 @@ from typing import Any
 import httpx
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, select, text
+from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
 import purser.config
@@ -168,10 +168,12 @@ class TestLocalProvider:
 class TestTimeout:
     def test_the_timeout_is_configurable_and_holds_per_request(self) -> None:
         server = FakeOpenAIServer()
-        ai_providers.review_row(
+        ai_providers.suggest(
             _settings(ai_timeout_seconds=90),
-            row={"id": "r1"},
-            guidance=["check it"],
+            payee="Synthetic Payee",
+            description=None,
+            amount=Decimal("-1.00"),
+            categories=["expenses.dining"],
             client=server.client(),
         )
         assert server.requests[0].extensions["timeout"] == {
@@ -432,46 +434,6 @@ class TestDisclosure:
             "MEMORY-SENTINEL",
         ):
             assert sentinel in prompt
-
-    def test_review_wording_covers_the_row_and_the_checklist(
-        self, admin_client: TestClient, db_session: Session
-    ) -> None:
-        from purser import review
-        from purser.models import Transaction
-
-        assert set(inspect.signature(ai_providers._review_prompt).parameters) == {"row", "guidance"}
-        admin_client.post(
-            "/accounts", json={"name": "Checking", "type": "checking", "path": "assets.checking"}
-        )
-        admin_client.post(
-            "/categories",
-            json={
-                "name": "Uncategorized",
-                "type": "category_expense",
-                "path": "expenses.uncategorized",
-            },
-        )
-        resp = admin_client.post(
-            "/transactions",
-            json={
-                "account": "assets.checking",
-                "category": "expenses.uncategorized",
-                "amount": "-25.00",
-                "date": ROW_DATE.isoformat(),
-                "payee": "Corner Market",
-                "status": "pending",
-            },
-        )
-        assert resp.status_code == 201, resp.text
-        tx = db_session.execute(select(Transaction)).scalar_one()
-        plain = set(review._row_payload(db_session, tx))
-        flagged = set(review._row_payload(db_session, tx, flagged=True))
-        declared = _fields("review")
-        # Everything a row can carry is named...
-        assert plain | flagged | {"guidance"} <= declared
-        # ...and nothing is named that a row cannot carry (`locked` appears
-        # only on a row a recorded trade holds).
-        assert declared <= plain | flagged | {"guidance", "locked"}
 
     def test_the_docs_state_the_same_wording(self) -> None:
         page = PRIVACY_PAGE.read_text()

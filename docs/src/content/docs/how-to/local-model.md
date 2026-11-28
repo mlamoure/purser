@@ -70,7 +70,7 @@ runs:
 
 ## Set it up in Purser
 
-1. Open **Settings -> Categories** and find **AI categorization**.
+1. Open **Settings -> Categories** and its **AI categorization** tab.
 2. Choose the provider **Local model (OpenAI-compatible)**.
 3. Enter the **Base URL** from above. There is no default: Purser never
    fills in a cloud address for a local model, and refuses to save one
@@ -124,8 +124,11 @@ left. Each answer is recorded with the model's name and confidence and can be
 changed like any category. A failing server never breaks a sync: Purser stops
 asking it for the rest of that pass and leaves those rows uncategorized.
 
-The review pass, which lets the model mark new rows reviewed or flag them for
-you, stays off until you also set `PURSER_AI_REVIEW=true`.
+An answer below the confidence floor (`ai_min_confidence`, 0.7 by default;
+**Minimum confidence** on the same tab, as a percentage) is not applied
+either: the row stays uncategorized and, for a bank row,
+[needs review](../../how-to/review-new-transactions/). Raise the floor when
+a small model guesses too freely.
 
 ## Configure it with environment variables
 

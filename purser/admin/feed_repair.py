@@ -344,7 +344,7 @@ def execute_purge(
     chains = _correction_chains(session, doomed)
     corrections = sorted({t.id for members in chains.values() for t in members} - set(doomed))
 
-    # 2-4. Matches, review marks, lineage pointers on survivors (position
+    # 2-4. Matches, lineage pointers on survivors (position
     # events included), postings and the transactions themselves — the
     # shared guarded delete.
     deleted = guarded_delete(session, doomed + corrections)

@@ -271,7 +271,7 @@ class TestRules:
         assert self._rule(admin_client, None).status_code == 422
         assert self._rule(admin_client, [broker["assets.checking"]]).status_code == 422
         resp = self._rule(admin_client, [broker[BROKER], broker["assets.plan"]])
-        assert resp.status_code == 422 and "by hand" in resp.text
+        assert resp.status_code == 422 and "entered in Purser" in resp.text
         resp = self._rule(admin_client, [broker[BROKER]])
         assert resp.status_code == 201, resp.text
         out = resp.json()
@@ -1126,11 +1126,8 @@ class TestAfterASync:
                 ).scalars()
             ]
         assert audits[-1] == [{"account_id": fb["id"], "status": trueup.IN_STEP}]
-        # Review sees it as Purser's balance adjustment, not a trade to undo.
-        batch = client.get("/transactions/review-batch").json()
-        flagged = [r for r in batch["rows"] if r["id"] == label["id"]]
-        assert flagged and "balance_adjustment" in flagged[0]["flags"]
-        assert "locked" not in flagged[0]
+        # Purser's own true-up never needs review (decision 141).
+        assert client.get(f"/transactions/{label['id']}").json()["needs_review"] is False
 
     def test_an_account_mapped_mid_day_is_adjusted_at_the_next_sync(
         self,

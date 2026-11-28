@@ -122,7 +122,7 @@ The id_token from the token endpoint must then pass:
 | `exp` | Required; the token is refused once it has expired, with no grace period. |
 | `iat`, `nbf` | `iat` is required. Up to 60 seconds of clock difference with the provider is tolerated for a token stamped slightly in the future. |
 | `sub`, `nonce` | `sub` is a non-empty string; `nonce` matches this sign-in. |
-| `email` | Required, a string. |
+| `email` | Required, a non-empty string. Checked after the others: a token without one gets `502`, not `401`. |
 
 Unknown header parameters are ignored unless the token lists them in `crit`.
 
@@ -136,7 +136,7 @@ code or token:
 | `400` | The state did not match (an expired, missing or foreign sign-in attempt), the callback had no code, or the provider reported an error such as a cancelled sign-in. Start again from the login page. |
 | `401` | The id_token failed one of the checks above. The log line `oidc.id_token_rejected` names which. |
 | `403` | The token was valid but Purser refused the account (see "Who gets in"). |
-| `502` | The provider could not be reached, or answered something unusable: discovery, the JWKS or the token exchange failed (log line `oidc.provider_error`, with the step). A wrong client secret shows up here. |
+| `502` | The provider could not be reached, or answered something unusable: discovery, the JWKS or the token exchange failed (log line `oidc.provider_error`, with the step), or the id_token had no `email` claim ("OIDC id_token missing email claim"). A wrong client secret shows up here. |
 
 ## It can never lock you out
 

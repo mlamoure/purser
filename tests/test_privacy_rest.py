@@ -455,6 +455,10 @@ def _urls(
             f"/transactions/{tx}/split/candidates?account=liabilities.card"
         ),
         "/accounts/{account_id}/balance/series": f"/accounts/{checking}/balance/series",
+        # The card's statement cycle (#698): its statements' balances owed.
+        "/accounts/{account_id}/statement-cycle": (
+            f"/accounts/{accounts['liabilities.card']}/statement-cycle"
+        ),
         "/matching/proposed": "/matching/proposed",
         "/matching/unmatched": "/matching/unmatched",
         "/matching/transfer-candidates": "/matching/transfer-candidates",

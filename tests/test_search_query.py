@@ -9,6 +9,9 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from purser.core.search_query import (
+    MAX_FUZZY,
+    MAX_QUERY_CHARS,
+    MAX_TERMS,
     AmountRange,
     QueryError,
     Text,
@@ -179,12 +182,16 @@ class TestStatusAndIs:
             parse("status:cleared")
 
     def test_is(self) -> None:
-        q = parse("is:unreviewed is:debit")
-        assert (q.reviewed, q.direction) == (False, "debit")
-        assert parse("is:reviewed is:unreviewed").never
+        q = parse("is:needs-review is:debit")
+        assert (q.needs_review, q.direction) == (True, "debit")
+        assert parse("IS:Needs-Review").needs_review is True
         assert parse("is:debit is:credit").never
         with pytest.raises(QueryError, match="not supported"):
             parse("is:transfer")
+        # The review-mark terms were removed (#694).
+        for removed in ("unreviewed", "reviewed"):
+            with pytest.raises(QueryError, match="needs-review"):
+                parse(f"is:{removed}")
 
     @pytest.mark.parametrize("q", ["-amount:5", "-date:2026", "-status:void", "-is:debit"])
     def test_structured_clauses_take_no_minus(self, q: str) -> None:
@@ -213,3 +220,57 @@ class TestTextMatches:
         assert text_matches(parse("memo:lunch desc:pos payee:cup").text, **row)
         assert not text_matches(parse("-team").text, **row)
         assert not text_matches(parse('"cup pos"').text, **row)  # never across fields
+
+
+class TestBounds:
+    """A query and a typo-tolerant word are bounded (#698): finding the
+    spellings one edit away grows with the word's length squared."""
+
+    def test_a_long_query_is_refused_saying_so(self) -> None:
+        with pytest.raises(QueryError, match=str(MAX_QUERY_CHARS)):
+            parse("a" * (MAX_QUERY_CHARS + 1))
+        parse("a" * MAX_QUERY_CHARS)
+
+    def test_too_many_terms_are_refused_saying_so(self) -> None:
+        with pytest.raises(QueryError, match=str(MAX_TERMS)):
+            parse(" ".join(["ab"] * (MAX_TERMS + 1)))
+        assert len(parse(" ".join(["ab"] * MAX_TERMS)).text) == MAX_TERMS
+
+    def test_a_tilde_on_a_very_long_word_is_exact(self) -> None:
+        (longest,) = parse("a" * MAX_FUZZY + "~").text
+        assert longest.fuzzy
+        (longer,) = parse("a" * (MAX_FUZZY + 1) + "~").text
+        assert not longer.fuzzy
+
+
+class TestTypoTolerance:
+    def test_a_tilde_asks_for_one_typo(self) -> None:
+        (clause,) = parse("starbuks~").text
+        assert (clause.text, clause.fuzzy) == ("starbuks", True)
+        (scoped,) = parse("payee:Costko~").text
+        assert (scoped.field, scoped.text, scoped.fuzzy, scoped.raw) == (
+            "payee",
+            "costko",
+            True,
+            "Costko",
+        )
+
+    @pytest.mark.parametrize("q", ['"starbuks~"', "ab~", "7-eleven~", "store12~", "~"])
+    def test_only_one_word_of_three_letters_without_digits(self, q: str) -> None:
+        assert not any(c.fuzzy for c in parse(q).text)
+
+    def test_matching(self) -> None:
+        clauses = parse("starbuks~").text
+        row = {"payee": "", "memos": []}
+        assert text_matches(clauses, description="starbucks 12", **row)
+        assert text_matches(clauses, description="pos starbuk", **row)
+        assert not text_matches(clauses, description="sbarbukx x", **row)  # two edits
+        assert not text_matches(clauses, description="starbuck5", **row)  # digits: no typo
+        assert not text_matches(parse("starbuks").text, description="starbucks", **row)
+
+    @given(st.text(alphabet="abc", max_size=6), st.text(alphabet="abc", max_size=6))
+    def test_one_edit_is_the_edit_distance(self, a: str, b: str) -> None:
+        from purser.core.search_query import _distance, one_edit_away, within_one_edit
+
+        assert within_one_edit(a, b) == (_distance(a, b) <= 1)
+        assert (b in one_edit_away(a, "abc")) == (_distance(a, b) == 1)

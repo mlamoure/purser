@@ -32,8 +32,8 @@ function TimeZoneCard({ initial }: { initial: ConfigOut }) {
       <CardTitle>Time zone</CardTitle>
       <p className="mb-4 text-sm text-muted-foreground">
         The household's time zone decides what "today" is: when a bill is due or late, the
-        week of upcoming bills, net worth for today, and how old an unreviewed or stale item
-        is. This admin app also shows times (sign-ins, fetches, the audit log) in it. Scheduled
+        week of upcoming bills, net worth for today, and when a price or a bank feed is stale.
+        This admin app also shows times (sign-ins, fetches, the audit log) in it. Scheduled
         jobs keep running at their UTC times, and timestamps are stored in UTC.
       </p>
       <div className="flex flex-wrap items-end gap-2">

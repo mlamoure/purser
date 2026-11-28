@@ -66,6 +66,11 @@ describe("SuggestionCard — transfer_link (#271)", () => {
     // Accepting created a draft and nothing more.
     expect(screen.getByText(/Rule created as a/)).toBeInTheDocument();
     expect(apiMock.POST).toHaveBeenCalledTimes(1);
+    // Rules is a tab of Settings, Categories (#694).
+    expect(screen.getByRole("link", { name: "review on the Rules page" })).toHaveAttribute(
+      "href",
+      "/settings/categories/rules",
+    );
 
     await user.click(activate);
     expect(apiMock.POST).toHaveBeenLastCalledWith("/rules/{rule_id}/state", {

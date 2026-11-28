@@ -48,4 +48,38 @@ Privatize the (purchase|amount)
 privacy (defaults|settings)
 (purchase|amount)[- ]privacy
 \bprivacy_(purchase|amount)\b
+disclosure settings?
 Privacy with agents
+
+# Settings, Prices — renamed Settings, Market data (#678)
+settings(,| ->| →) prices
+
+# "Tracked by hand" for an account whose holdings are entered in Purser, and
+# "priced by hand only" for a symbol the providers skip — renamed in #689:
+# holdings come "from SimpleFIN" or are "entered in Purser", and only a
+# price entered by hand is called manual.
+hand[- ]tracked
+tracked by hand
+track(ing)? holdings by hand
+priced by hand only
+price_by_hand
+
+# Review marks, the aged sweep, the server-side AI review pass, escalation and
+# the reviewer checklist — removed in #694 (decision 141): a transaction needs
+# review only for a reason (a bank-sync row with no category, or a
+# reconciliation adjustment), read from the row. The setting names are matched
+# as whole words so the "Removed variables" table may still name
+# PURSER_AI_REVIEW and PURSER_REVIEW_MAX_AGE_DAYS.
+mark_reviewed
+mark-reviewed
+\breview_max_age_days\b
+\bai_review\b
+is:unreviewed
+is:reviewed
+unreviewed set
+reviewed_at
+escalated_at
+review_guidance
+reviewer checklist
+aged sweep
+review pass

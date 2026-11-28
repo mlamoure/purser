@@ -80,6 +80,11 @@ export const AMOUNT_BASIS_LABELS: Record<string, string> = {
   counterparty_balance: "current balance",
   override: "your amount",
   statement: "statement balance",
+  // A card payment sized from its statement cycle (#674, decision 136).
+  statement_close: "closed statement",
+  cycle_projection: "next statement (projected)",
+  statement_average: "average statement",
+  same_cycle_last_year: "same statement last year",
 };
 
 export const amountBasisLabel = (basis: string | null | undefined) =>

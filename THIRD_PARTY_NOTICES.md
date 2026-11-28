@@ -19,7 +19,7 @@ HTML comment.
 | Licence | Components |
 | --- | --- |
 | MIT | 74 |
-| BSD-3-Clause | 16 |
+| BSD-3-Clause | 15 |
 | Apache-2.0 | 14 |
 | ISC | 6 |
 | LGPL-3.0-only | 2 |
@@ -68,28 +68,27 @@ Native code bundled inside these wheels:
 | argon2-cffi | 25.1.0 | MIT | https://github.com/hynek/argon2-cffi |
 | argon2-cffi-bindings | 26.2.0 | MIT | https://github.com/hynek/argon2-cffi-bindings |
 | attrs | 26.1.0 | MIT | https://github.com/python-attrs/attrs |
-| authlib | 1.9.10 | BSD-3-Clause | https://github.com/authlib/authlib |
 | beartype | 0.23.1 | MIT | https://github.com/beartype/beartype |
-| cachetools | 8.0.2 | MIT | https://github.com/tkem/cachetools/ |
+| cachetools | 8.0.3 | MIT | https://github.com/tkem/cachetools/ |
 | caio | 0.12.10 | Apache-2.0 | https://github.com/mosquito/caio/ |
 | certifi | 2026.11.20 | MPL-2.0 | https://github.com/certifi/python-certifi |
 | cffi | 2.1.1 | MIT-0 | https://github.com/python-cffi/cffi |
 | click | 8.5.1 | BSD-3-Clause | https://github.com/pallets/click/ |
 | cryptography | 50.0.2 | Apache-2.0 OR BSD-3-Clause | https://github.com/pyca/cryptography/ |
-| cyclopts | 5.5.2 | Apache-2.0 | https://github.com/BrianPugh/cyclopts |
+| cyclopts | 5.5.3 | Apache-2.0 | https://github.com/BrianPugh/cyclopts |
 | dnspython | 2.9.2 | ISC | https://github.com/rthalley/dnspython |
 | docstring-parser | 0.18.0 | MIT | https://github.com/rr-/docstring_parser |
 | email-validator | 2.4.0 | Unlicense | https://github.com/JoshData/python-email-validator |
 | exceptiongroup | 1.3.2 | MIT | https://github.com/agronholm/exceptiongroup |
 | fastapi | 0.165.0 | MIT | https://github.com/fastapi/fastapi |
-| fastmcp | 4.2.4 | Apache-2.0 | https://github.com/PrefectHQ/fastmcp |
-| fastmcp-slim | 4.2.4 | Apache-2.0 | https://github.com/PrefectHQ/fastmcp |
+| fastmcp | 4.2.6 | Apache-2.0 | https://github.com/PrefectHQ/fastmcp |
+| fastmcp-slim | 4.2.6 | Apache-2.0 | https://github.com/PrefectHQ/fastmcp |
 | griffelib | 2.4.1 | ISC | https://github.com/mkdocstrings/griffe |
 | h11 | 0.16.0 | MIT | https://github.com/python-hyper/h11 |
 | httpcore | 1.0.9 | BSD-3-Clause | https://github.com/encode/httpcore |
 | httpcore2 | 2.16.2 | BSD-3-Clause | https://github.com/pydantic/httpx2/blob/main/src/httpcore2 |
 | httptools | 0.9.0 | MIT | https://github.com/MagicStack/httptools |
-| httpx | 0.28.1 | BSD-3-Clause | https://github.com/encode/httpx |
+| httpx | 0.29.0 | BSD-3-Clause | https://github.com/encode/httpx |
 | httpx2 | 2.16.2 | BSD-3-Clause | https://github.com/pydantic/httpx2 |
 | idna | 3.20 | BSD-3-Clause | https://github.com/kjd/idna |
 | joserfc | 1.8.0 | BSD-3-Clause | https://github.com/authlib/joserfc |
@@ -105,9 +104,9 @@ Native code bundled inside these wheels:
 | mdurl | 0.1.2 | MIT | https://github.com/executablebooks/mdurl |
 | openapi-pydantic | 0.6.0 | MIT | https://github.com/mike-oakley/openapi-pydantic |
 | opentelemetry-api | 1.45.2 | Apache-2.0 | https://github.com/open-telemetry/opentelemetry-python |
-| packaging | 26.3 | Apache-2.0 OR BSD-2-Clause | https://github.com/pypa/packaging |
+| packaging | 26.4 | Apache-2.0 OR BSD-2-Clause | https://github.com/pypa/packaging |
 | pathable | 0.6.0 | Apache-2.0 | https://github.com/p1c2u/pathable |
-| platformdirs | 4.14.8 | MIT | https://github.com/tox-dev/platformdirs |
+| platformdirs | 4.14.9 | MIT | https://github.com/tox-dev/platformdirs |
 | psycopg | 3.3.9 | LGPL-3.0-only | https://github.com/psycopg/psycopg |
 | psycopg-binary | 3.3.9 | LGPL-3.0-only | https://github.com/psycopg/psycopg |
 | py-key-value-aio | 0.5.0 | Apache-2.0 | https://pypi.org/project/py-key-value-aio/ |
@@ -132,7 +131,7 @@ Native code bundled inside these wheels:
 | starlette | 1.10.0 | BSD-3-Clause | https://github.com/Kludex/starlette |
 | structlog | 26.1.0 | MIT OR Apache-2.0 | https://github.com/hynek/structlog |
 | truststore | 0.10.5 | MIT | https://github.com/sethmlarson/truststore |
-| typer | 0.29.2 | MIT | https://github.com/fastapi/typer |
+| typer | 0.29.3 | MIT | https://github.com/fastapi/typer |
 | typing-extensions | 4.16.0 | PSF-2.0 | https://github.com/python/typing_extensions |
 | typing-inspection | 0.4.5 | MIT | https://github.com/pydantic/typing-inspection |
 | tzdata | 2026.6 | Apache-2.0 | https://github.com/python/tzdata |
@@ -158,8 +157,8 @@ because the lockfile marks them as production dependencies.
 | @modelcontextprotocol/core | 2.4.0 | Apache-2.0 | https://github.com/modelcontextprotocol/typescript-sdk |
 | @modelcontextprotocol/ext-apps | 2.0.4 | MIT | https://github.com/modelcontextprotocol/ext-apps |
 | @standard-schema/spec | 1.1.0 | MIT | https://github.com/standard-schema/standard-schema |
-| @tanstack/query-core | 5.108.3 | MIT | https://github.com/TanStack/query |
-| @tanstack/react-query | 5.108.3 | MIT | https://github.com/TanStack/query |
+| @tanstack/query-core | 5.108.4 | MIT | https://github.com/TanStack/query |
+| @tanstack/react-query | 5.108.4 | MIT | https://github.com/TanStack/query |
 | class-variance-authority | 0.7.1 | Apache-2.0 | https://github.com/joe-bell/cva |
 | clsx | 2.1.1 | MIT | https://github.com/lukeed/clsx |
 | cookie | 1.1.1 | MIT | https://github.com/jshttp/cookie |
@@ -168,15 +167,15 @@ because the lockfile marks them as production dependencies.
 | eventsource-parser | 3.1.1 | MIT | https://github.com/rexxars/eventsource-parser |
 | isexe | 2.0.0 | ISC | https://github.com/isaacs/isexe |
 | jose | 6.2.18 | MIT | https://github.com/panva/jose |
-| lucide-react | 1.77.0 | ISC | https://github.com/lucide-icons/lucide |
+| lucide-react | 1.82.0 | ISC | https://github.com/lucide-icons/lucide |
 | openapi-fetch | 0.17.0 | MIT | https://github.com/openapi-ts/openapi-typescript |
 | openapi-typescript-helpers | 0.1.0 | MIT | https://github.com/openapi-ts/openapi-typescript |
 | path-key | 3.1.1 | MIT | https://github.com/sindresorhus/path-key |
 | pkce-challenge | 5.0.2 | MIT | https://github.com/crouchcd/pkce-challenge |
 | react | 19.3.1 | MIT | https://github.com/react/react |
 | react-dom | 19.3.1 | MIT | https://github.com/react/react |
-| react-router | 7.18.6 | MIT | https://github.com/remix-run/react-router |
-| react-router-dom | 7.18.6 | MIT | https://github.com/remix-run/react-router |
+| react-router | 7.18.7 | MIT | https://github.com/remix-run/react-router |
+| react-router-dom | 7.18.7 | MIT | https://github.com/remix-run/react-router |
 | scheduler | 0.28.0 | MIT | https://github.com/react/react |
 | set-cookie-parser | 2.7.3 | MIT | https://github.com/nfriedly/set-cookie-parser |
 | shebang-command | 2.0.0 | MIT | https://github.com/kevva/shebang-command |
@@ -233,7 +232,7 @@ descriptions are not Plaid's: Purser wrote its own, for its classifier.
 ## Licence and notice texts
 
 These packages publish no licence file in the artifact Purser installs:
-@pagefind/default-ui 1.6.0, fastmcp-slim 4.2.4. Their licence is the one in the
+@pagefind/default-ui 1.6.0, fastmcp-slim 4.2.6. Their licence is the one in the
 tables above; the full text with its copyright lines is in the upstream source
 repository linked there.
 
@@ -540,9 +539,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### @tanstack/query-core 5.108.3 (LICENSE)
+### @tanstack/query-core 5.108.4 (LICENSE)
 
-Also: @tanstack/react-query 5.108.3 (LICENSE).
+Also: @tanstack/react-query 5.108.4 (LICENSE).
 
 ```text
 MIT License
@@ -1036,40 +1035,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### authlib 1.9.10 (LICENSE)
-
-```text
-BSD 3-Clause License
-
-Copyright (c) 2017, Hsiaoming Yang
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
-* Redistributions of source code must retain the above copyright notice, this
-  list of conditions and the following disclaimer.
-
-* Redistributions in binary form must reproduce the above copyright notice,
-  this list of conditions and the following disclaimer in the documentation
-  and/or other materials provided with the distribution.
-
-* Neither the name of the copyright holder nor the names of its
-  contributors may be used to endorse or promote products derived from
-  this software without specific prior written permission.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-```
-
 ### beartype 0.23.1 (LICENSE)
 
 ```text
@@ -1096,7 +1061,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### cachetools 8.0.2 (LICENSE)
+### cachetools 8.0.3 (LICENSE)
 
 ```text
 The MIT License (MIT)
@@ -1922,7 +1887,7 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### cyclopts 5.5.2 (LICENSE)
+### cyclopts 5.5.3 (LICENSE)
 
 ```text
                                  Apache License
@@ -2383,7 +2348,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### fastmcp 4.2.4 (LICENSE)
+### fastmcp 4.2.6 (LICENSE)
 
 Also: jsonschema-path 0.5.0 (LICENSE); opentelemetry-api 1.45.2 (LICENSE); pathable 0.6.0 (LICENSE); python-multipart 0.0.34 (LICENSE.txt); tzdata 2026.6 (LICENSE_APACHE).
 
@@ -2780,7 +2745,7 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 IN THE SOFTWARE.
 ```
 
-### httpx 0.28.1 (LICENSE.md)
+### httpx 0.29.0 (LICENSE.md)
 
 ```text
 Copyright © 2019, [Encode OSS Ltd](https://www.encode.io/).
@@ -3008,7 +2973,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### lucide-react 1.77.0 (LICENSE)
+### lucide-react 1.82.0 (LICENSE)
 
 ```text
 ISC License
@@ -3318,7 +3283,7 @@ copies or substantial portions of the Software.
 License URL: https://github.com/kuimono/openapi-schema-pydantic/blob/master/LICENSE
 ```
 
-### packaging 26.3 (LICENSE)
+### packaging 26.4 (LICENSE)
 
 ```text
 This software is made available under the terms of *either* of the licenses
@@ -3326,7 +3291,7 @@ found in LICENSE.APACHE or LICENSE.BSD. Contributions to this software is made
 under the terms of *both* these licenses.
 ```
 
-### packaging 26.3 (LICENSE.APACHE)
+### packaging 26.4 (LICENSE.APACHE)
 
 Also: structlog 26.1.0 (LICENSE-APACHE).
 
@@ -3510,7 +3475,7 @@ Also: structlog 26.1.0 (LICENSE-APACHE).
    END OF TERMS AND CONDITIONS
 ```
 
-### packaging 26.3 (LICENSE.BSD)
+### packaging 26.4 (LICENSE.BSD)
 
 ```text
 Copyright (c) Donald Stufft and individual contributors.
@@ -3619,7 +3584,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### platformdirs 4.14.8 (LICENSE)
+### platformdirs 4.14.9 (LICENSE)
 
 ```text
 MIT License
@@ -4887,9 +4852,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-### react-router 7.18.6 (LICENSE.md)
+### react-router 7.18.7 (LICENSE.md)
 
-Also: react-router-dom 7.18.6 (LICENSE.md).
+Also: react-router-dom 7.18.7 (LICENSE.md).
 
 ```text
 MIT License
@@ -5520,7 +5485,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 ```
 
-### typer 0.29.2 (LICENSE)
+### typer 0.29.3 (LICENSE)
 
 ```text
 The MIT License (MIT)

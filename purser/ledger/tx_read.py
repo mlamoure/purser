@@ -68,7 +68,7 @@ def search_transactions(
     end: date_type | None = None,
     statuses: list[str] | None = None,
     include_collapsed: bool = False,
-    reviewed: bool | None = None,
+    needs_review: bool | None = None,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[Transaction], int]:
@@ -93,10 +93,10 @@ def search_transactions(
             statuses = sorted(wanted)
         start = _later(start, query.start)
         end = _earlier(end, query.end)
-        if query.reviewed is not None:
-            if reviewed is not None and reviewed != query.reviewed:
+        if query.needs_review is not None:
+            if needs_review is not None and needs_review != query.needs_review:
                 return [], 0
-            reviewed = query.reviewed
+            needs_review = query.needs_review
 
     stmt: Select[Transaction] = select(Transaction).where(
         Transaction.status.in_(statuses or ["pending", "posted"])
@@ -136,16 +136,16 @@ def search_transactions(
         stmt = stmt.where(Transaction.date >= start)
     if end is not None:
         stmt = stmt.where(Transaction.date <= end)
-    if reviewed is not None:
+    if needs_review is not None:
         # ONE predicate serves the register filter, the per-row needs_review
-        # flag, the count and the review batch — this is a view over the
-        # registers, not a second row source (#175, #248, decision 47). Its
-        # exact complement is reviewed=true, so with include_collapsed the
-        # superseded links of a correction chain land there, never in false.
-        from purser.review import unreviewed_clause
+        # flag, the counts and the review batch — a view over the registers,
+        # not a second row source (#248, decision 141). Its exact complement
+        # is needs_review=false, so with include_collapsed the superseded rows
+        # of a correction chain land there, never in true.
+        from purser.review import needs_review_clause
 
-        unreviewed = unreviewed_clause()
-        stmt = stmt.where(not_(unreviewed) if reviewed else unreviewed)
+        flagged = needs_review_clause()
+        stmt = stmt.where(flagged if needs_review else not_(flagged))
 
     store = None
     if query is not None:
@@ -414,3 +414,34 @@ def _page_of(
     ).scalars()
     by_id = {t.id: t for t in loaded}
     return [by_id[i] for i in page_ids], page[0].total
+
+
+def did_you_mean(session: Session, q: str) -> str | None:
+    """For a search of one word that is found nowhere (the caller checks
+    that it answered nothing): the query with that word replaced by the
+    vocabulary word one edit away found in the most rows. Only from the
+    search text cache; the search itself stays exact (decision 135)."""
+    from purser.search import textcache
+
+    store = textcache.ready()
+    if store is None:
+        return None
+    try:
+        query = search_query.parse(q)
+    except search_query.QueryError:
+        return None
+    if len(query.text) != 1:
+        return None
+    (clause,) = query.text
+    if (
+        clause.negated
+        or clause.fuzzy
+        or " " in clause.text
+        or not search_query.MIN_FUZZY <= len(clause.text) <= search_query.MAX_FUZZY
+        or not search_query.is_word(clause.text)
+        or not clause.raw
+        or clause.raw not in q
+    ):
+        return None
+    suggestion = store.suggest(session, clause)
+    return None if suggestion is None else q.replace(clause.raw, suggestion, 1)

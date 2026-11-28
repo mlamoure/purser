@@ -153,6 +153,20 @@ def seed() -> None:
             },
         )
     session.json("POST", "/schedules/detect")
+    # One reconciliation adjustment (#694, decision 141): the demo's rows are
+    # typed in, not from bank sync, so this is what the Dashboard's review
+    # summary and the register's review badge show.
+    checking = next(a for a in accounts if a["path"] == "assets.checking")
+    account = session.json("GET", f"/accounts/{checking['id']}")
+    assert isinstance(account, dict)
+    session.json(
+        "POST",
+        f"/accounts/{checking['id']}/reconcile",
+        {
+            "as_of": today["ledger_today"],
+            "statement_balance": str(Decimal(account["balance"]) - Decimal("4.17")),
+        },
+    )
     seed_investments_and_property(session, Day.fromisoformat(today["ledger_today"]))
     minted = session.json("POST", "/tokens", {"name": "Budget Assistant", "scopes": ["read"]})
     session.json("POST", "/tokens", {"name": "Household dashboard", "scopes": ["read"]})
@@ -340,7 +354,7 @@ def shoot(page: Page, out: Path, quantized: bool) -> list[Path]:
         dismiss.click()
     page.get_by_role("button", name="Scheduled transactions", exact=False).first.click()
     expect(page.get_by_text("Example Music", exact=False).first).to_be_visible()
-    page.get_by_text("Transaction review", exact=False).first.click()
+    page.get_by_text("Transactions that need review", exact=False).first.click()
     save("dashboard.png", full_page=True)
 
     settle(page, f"/accounts/{checking}")

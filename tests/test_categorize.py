@@ -227,7 +227,7 @@ class TestCorrectionsFeedback:
     def test_pending_ai_guesses_do_not_seed_deterministic_memory(
         self, seeded: None, client: TestClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Two unreviewed AI suggestions must not launder into 'deterministic'
+        """Two AI suggestions nobody confirmed must not launder into 'deterministic'
         for the third transaction — payee memory is posted-only."""
         _ai_env(monkeypatch, "openai")
         _patch_http(
@@ -254,6 +254,76 @@ class TestCorrectionsFeedback:
         }
         detail = client.get(f"/transactions/{third}").json()
         assert detail["category_path"] == "expenses.uncategorized"
+
+
+class TestConfidenceFloor:
+    """ai_min_confidence (decision 141): a model guess below it is not
+    applied, so the row stays uncategorized — and a bank-sync row with no
+    category is what needs review. The bracket bar is max(0.85, floor)."""
+
+    def test_the_default_floor_is_point_seven(self) -> None:
+        from purser.config import Settings
+
+        assert Settings().ai_min_confidence == 0.7
+
+    @pytest.mark.parametrize(("confidence", "applied"), [(0.69, False), (0.7, True)])
+    def test_a_guess_below_the_floor_is_not_applied(
+        self,
+        seeded: None,
+        client: TestClient,
+        monkeypatch: pytest.MonkeyPatch,
+        confidence: float,
+        applied: bool,
+    ) -> None:
+        _ai_env(monkeypatch, "openai")
+        _patch_http(
+            monkeypatch,
+            _mock_ai_transport(
+                json.dumps({"category": "expenses.groceries", "confidence": confidence}), []
+            ),
+        )
+        tx_id = _pending(client, "Synthetic Market")
+        stats = client.post("/categorize/run").json()
+        assert (stats["ai"], stats["unresolved"]) == ((1, 0) if applied else (0, 1))
+        detail = client.get(f"/transactions/{tx_id}").json()
+        assert detail["category_path"] == (
+            "expenses.groceries" if applied else "expenses.uncategorized"
+        )
+
+    def test_the_floor_is_a_runtime_setting(
+        self, seeded: None, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _ai_env(monkeypatch, "openai")
+        _patch_http(
+            monkeypatch,
+            _mock_ai_transport('{"category": "expenses.groceries", "confidence": 0.8}', []),
+        )
+        resp = client.put("/config", json={"ai_min_confidence": 0.9})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["values"]["ai_min_confidence"] == 0.9
+        assert client.put("/config", json={"ai_min_confidence": 1.5}).status_code == 422
+        _pending(client, "Synthetic Market")
+        assert client.post("/categorize/run").json()["unresolved"] == 1
+        assert client.delete("/config/ai_min_confidence").status_code == 200
+        assert client.post("/categorize/run").json()["ai"] == 1
+
+    def test_a_floor_above_the_bracket_bar_raises_it(
+        self, seeded: None, client: TestClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _real_account(client, "Savings", "assets.savings")
+        _ai_env(monkeypatch, "openai")
+        monkeypatch.setenv("PURSER_AI_MIN_CONFIDENCE", "0.95")
+        import purser.config
+
+        purser.config.get_settings.cache_clear()
+        _patch_http(
+            monkeypatch,
+            _mock_ai_transport('{"category": "[assets.savings]", "confidence": 0.9}', []),
+        )
+        tx_id = _pending(client, "Online Transfer")
+        stats = client.post("/categorize/run").json()
+        assert (stats["ai"], stats["unresolved"]) == (0, 1)
+        assert client.get(f"/transactions/{tx_id}").json()["is_transfer"] is False
 
 
 class TestProviderFailures:
@@ -413,7 +483,7 @@ class TestBornCategorizedImports:
     def test_pending_history_never_seeds_import_categorization(
         self, seeded: None, client: TestClient, migrated_engine: Engine
     ) -> None:
-        """The laundering guard extends to import time: unreviewed pendings
+        """The laundering guard extends to import time: unconfirmed pendings
         must not become 'deterministic' answers."""
         _pending(client, "Fresh Payee")
         _pending(client, "Fresh Payee")

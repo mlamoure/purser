@@ -18,10 +18,7 @@ releases its bill (#273, decision 69). The importer calls ``void_pending``
 too, when the bank posts a pending under the very same identity.
 
 Both paths — successor pairing and the identity move — supersede a pending by
-its posted row here and nowhere else, so this is also where a pending's review
-mark follows it (``review.carry_to_successor``, decision 82): a row someone
-already looked at while it was pending does not come back for review once it
-posts, unless the posted row's category differs.
+its posted row here and nowhere else.
 """
 
 import uuid
@@ -96,10 +93,9 @@ def void_pending(
 
     A live match on the pending follows it (decision 69): it is captured
     BEFORE the void, so the schedule estimate it feeds can be compared across
-    the change, then re-pointed to the successor or released. Its review
-    mark follows it to the successor too (decision 82)."""
+    the change, then re-pointed to the successor or released."""
     # Function-local: the feed layer stays decoupled from the services.
-    from purser import matching, review
+    from purser import matching
 
     live = matching.live_match_on(session, tx)
     tx.status = "void"
@@ -121,9 +117,7 @@ def void_pending(
             **({"identity_moved": True} if identity_moved else {}),
         },
     )
-    if successor is not None:
-        review.carry_to_successor(session, pending=tx, successor=successor)
-    else:
+    if successor is None:
         events.emit(
             session,
             type_="pending.vanished",

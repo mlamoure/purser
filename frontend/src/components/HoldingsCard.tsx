@@ -48,7 +48,7 @@ export function sortLines(lines: Line[], key: SortKey, descending: boolean): Lin
   });
 }
 
-function GainText({ amount, pct, currency }: { amount: string | null; pct: string | null; currency: string }) {
+export function GainText({ amount, pct, currency }: { amount: string | null; pct: string | null; currency: string }) {
   if (amount == null) return <span className="text-muted-foreground">—</span>;
   const sign = moneySign(amount);
   return (
@@ -61,11 +61,11 @@ function GainText({ amount, pct, currency }: { amount: string | null; pct: strin
   );
 }
 
-/** A brokerage account's holdings (#595), from the feed or tracked by hand:
+/** A brokerage account's holdings (#595), from SimpleFIN or entered in Purser:
  * the market value, unrealized gain and cash up top, an allocation bar, and
  * a sortable table with a cash row and the total, which is the account's
  * balance. Every figure comes from the server; this only formats strings.
- * A hand-tracked account edits its positions on the Positions tab, which
+ * An account whose holdings are entered in Purser edits its positions on the Positions tab, which
  * `onEditPositions` opens. */
 export function HoldingsCard({
   accountId,
@@ -102,7 +102,7 @@ export function HoldingsCard({
           {summary.data?.as_of && (
             <p className="mt-0.5 text-xs text-muted-foreground">
               As of {formatDate(summary.data.as_of)} ·{" "}
-              {summary.data.source === "manual" ? "tracked by hand" : "from the bank feed"}
+              {summary.data.source === "manual" ? "entered in Purser" : "from SimpleFIN"}
               {summary.data.closed && " · account closed"}
             </p>
           )}

@@ -38,7 +38,6 @@ from purser.models import (
     Schedule,
     Suggestion,
     Transaction,
-    TransactionReview,
     Valuation,
 )
 
@@ -215,10 +214,7 @@ def guarded_delete(session: Session, doomed: list[uuid.UUID]) -> dict[str, int]:
     Order matters:
 
     1. match rows referencing a doomed transaction (either side);
-    2. review marks — an annotation about a row goes with the row. Migration
-       0021 backfilled a mark onto every row that existed then, so without
-       this step the foreign key refuses the delete outright (#284);
-    3. with the posted-immutable guards disabled: lineage pointers
+    2. with the posted-immutable guards disabled: lineage pointers
        (``superseded_by`` / ``reverses_id``) on SURVIVING transactions NULLed
        (the 0010-migration precedent), then postings, then the transactions.
        A position event naming a doomed row as its trade's cash (decision 103)
@@ -230,7 +226,6 @@ def guarded_delete(session: Session, doomed: list[uuid.UUID]) -> dict[str, int]:
     """
     counts = {
         "matches_deleted": 0,
-        "reviews_deleted": 0,
         "lineage_nulled": 0,
         "position_events_unlinked": 0,
         "postings_deleted": 0,
@@ -241,11 +236,6 @@ def guarded_delete(session: Session, doomed: list[uuid.UUID]) -> dict[str, int]:
     counts["matches_deleted"] = _rowcount(
         session.execute(
             delete(Match).where(or_(Match.expected_id.in_(doomed), Match.posted_id.in_(doomed)))
-        )
-    )
-    counts["reviews_deleted"] = _rowcount(
-        session.execute(
-            delete(TransactionReview).where(TransactionReview.transaction_id.in_(doomed))
         )
     )
     # Disable the posted-immutable guards for the lineage NULLs (posted
@@ -382,7 +372,7 @@ def execute_delete(
         session.execute(delete(Position).where(Position.account_id == account.id))
     )
 
-    # 2-4. Matches, review marks, lineage pointers on survivors, postings and
+    # 2-4. Matches, lineage pointers on survivors, postings and
     # the transactions themselves — the shared guarded delete.
     deleted = guarded_delete(session, doomed)
     if deleted["lineage_nulled"]:

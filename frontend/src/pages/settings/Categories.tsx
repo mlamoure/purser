@@ -6,27 +6,64 @@ import { QueryState } from "../../components/QueryState";
 import type { components } from "../../api/schema";
 import { configQuery } from "../../lib/config";
 import { useIsAdmin } from "../../lib/useIsAdmin";
-import { AiCard } from "./AiCategorization";
+import { Saved, useSaveConfig, type ConfigOut } from "./saveConfig";
 
 type AccountOut = components["schemas"]["AccountOut"];
 
-/** Settings -> Categories: the category tree, and for admins the optional AI
- * provider that categorizes new transactions (#542) — it lives in admin-only
- * GET/PUT /config, so a member session never reads it. */
+/** Settings -> Categories, its first tab: the category tree, and for admins
+ * whether a bank-sync row with no category needs review (#694). That setting
+ * lives in admin-only GET/PUT /config, so a member session never reads it.
+ * Rules and AI categorization are the section's other tabs. */
 export default function Categories() {
   const isAdmin = useIsAdmin();
   return (
     <div className="space-y-6">
+      {isAdmin && <ReviewSetting />}
       <CategoryTree />
-      {isAdmin && <AiCategorization />}
     </div>
   );
 }
 
-function AiCategorization() {
+function ReviewSetting() {
   const config = useQuery(configQuery);
-  if (!config.data) return <QueryState query={config} what="the AI categorization setting" />;
-  return <AiCard initial={config.data} />;
+  if (!config.data) return <QueryState query={config} what="the review setting" />;
+  return <ReviewCard initial={config.data} />;
+}
+
+/** `review_uncategorized` (decision 141): a bank-sync row with no category
+ * needs review until something categorizes it. Reconciliation adjustments
+ * need review whatever it says. */
+function ReviewCard({ initial }: { initial: ConfigOut }) {
+  const [flag, setFlag] = useState(initial.values.review_uncategorized);
+  const [error, setError] = useState<string | null>(null);
+  const save = useSaveConfig(setError);
+
+  return (
+    <Card>
+      <CardTitle>Transactions that need review</CardTitle>
+      <label className="flex items-center gap-2 text-sm">
+        <input type="checkbox" checked={flag} onChange={(e) => setFlag(e.target.checked)} />
+        Flag bank-sync transactions with no category for review
+      </label>
+      <p className="mt-1 text-xs text-muted-foreground">
+        The flag clears as soon as a rule, Purser's memory of the payee, the AI categorizer, you
+        or your agent gives the transaction a category. Reconciliation adjustments are flagged
+        whatever this says.
+      </p>
+      <Button
+        className="mt-4"
+        disabled={save.isPending}
+        onClick={() => {
+          setError(null);
+          save.mutate({ review_uncategorized: flag });
+        }}
+      >
+        Save
+      </Button>
+      <Saved visible={save.isSuccess} />
+      <ErrorText>{error}</ErrorText>
+    </Card>
+  );
 }
 
 /** Purser ships a finite, described category set (DESIGN §3.2). This tab is

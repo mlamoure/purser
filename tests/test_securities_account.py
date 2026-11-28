@@ -387,11 +387,13 @@ class TestMachineryLeavesTradeCashAlone:
         assert all(ledger.has_system_leg(tx.postings) for tx in linked)
         assert categorize.payee_memory(db_session, payee_ids.pop()) is None
 
-    def test_the_trade_row_waits_for_review(
+    def test_the_trade_row_needs_no_review(
         self, trade: dict[str, str], admin_client: TestClient
     ) -> None:
+        """Purser's own trade row has a category (equity.securities) and is
+        no bank-sync row: nothing to review (decision 141)."""
         detail = admin_client.get(f"/transactions/{trade['cash']}").json()
-        assert detail["origin"] == "system" and detail["needs_review"] is True
+        assert detail["origin"] == "system" and detail["needs_review"] is False
         assert detail["securities_trade"] is True
 
     def test_the_matcher_never_settles_a_bill_with_it(

@@ -17,7 +17,7 @@ describe("HoldingsCard (#595)", () => {
     renderWithProviders(<HoldingsCard accountId="a-1" currency="USD" />);
 
     const card = await screen.findByRole("region", { name: "Holdings" });
-    expect(await within(card).findByText(/As of Nov 20, 2026 · from the bank feed/)).toBeInTheDocument();
+    expect(await within(card).findByText(/As of Nov 20, 2026 · from SimpleFIN/)).toBeInTheDocument();
     expect(within(card).getByText("$1,900.00")).toBeInTheDocument(); // securities
     expect(within(card).getAllByText("+$400.00").length).toBeGreaterThan(0); // gain
     expect(symbols()).toEqual(["AAAA", "BBBB"]);
@@ -68,7 +68,7 @@ describe("HoldingsCard (#595)", () => {
     renderWithProviders(<HoldingsCard accountId="a-1" currency="USD" onEditPositions={onEdit} />);
 
     expect(await screen.findByText("stale price")).toBeInTheDocument();
-    expect(screen.getByText(/tracked by hand/)).toBeInTheDocument();
+    expect(screen.getByText(/entered in Purser/)).toBeInTheDocument();
     expect(screen.getByText("no price")).toBeInTheDocument();
     expect(screen.getByText("no ticker")).toBeInTheDocument();
     expect(screen.getByText("value too large: check shares")).toBeInTheDocument();

@@ -109,7 +109,7 @@ from purser.ledger.tx_create import (
 )
 from purser.ledger.tx_create import _persist_transaction as _persist_transaction
 from purser.ledger.tx_create import _tx_audit_shape as _tx_audit_shape
-from purser.ledger.tx_read import get_transaction, search_transactions
+from purser.ledger.tx_read import did_you_mean, get_transaction, search_transactions
 from purser.ledger.tx_update import _flat_legs as _flat_legs
 from purser.ledger.tx_update import _specs_of as _specs_of
 from purser.ledger.tx_update import (
@@ -151,6 +151,7 @@ __all__ = [
     "create_split_transfer",
     "create_transfer",
     "delete_category",
+    "did_you_mean",
     "ensure_category_path",
     "get_account",
     "get_transaction",

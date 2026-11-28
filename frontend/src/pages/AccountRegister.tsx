@@ -32,18 +32,16 @@ const SEARCH_DEBOUNCE_MS = 250;
 const selectClass = "h-9 rounded-md border border-border bg-card px-2 text-sm";
 
 /** The per-account register (issue #112): every transaction the account has
- * seen — SimpleFIN imports, manual entries, agent proposals — with the
- * review actions that used to live on /review inline on each row. */
+ * seen — SimpleFIN imports, manual entries, agent proposals — with what fixes
+ * a row inline on it. A row that needs review says why (decision 141), and
+ * `?needs_review=true` (the Dashboard's links) opens only those rows. */
 export default function AccountRegister() {
   const { accountId } = useParams<{ accountId: string }>();
   const [params] = useSearchParams();
-  const [reviewOnly, setReviewOnly] = useState(params.get("reviewed") === "false");
-  const [selected, setSelected] = useState<string[]>([]);
-  const [preview, setPreview] = useState(false);
+  const [reviewOnly, setReviewOnly] = useState(params.get("needs_review") === "true");
   // Posted rows recategorized here: replacement id -> the category cell
   // value it replaced, for the row's "Corrected · Undo" (#541).
   const [corrections, setCorrections] = useState<Record<string, string>>({});
-  const qc = useQueryClient();
   const [q, setQ] = useState("");
   const searchQ = useDebouncedValue(q, SEARCH_DEBOUNCE_MS);
   const [statusFilter, setStatusFilter] = useState<"live" | "posted" | "pending" | "expected">(
@@ -54,7 +52,7 @@ export default function AccountRegister() {
   const [start, setStart] = useState(params.get("start") ?? "");
   const [end, setEnd] = useState(params.get("end") ?? "");
   const [offset, setOffset] = useState(0);
-  // A brokerage account tracked by hand (#390) adds a Positions tab.
+  // A brokerage account whose holdings are entered in Purser (#390) adds a Positions tab.
   const [tab, setTab] = useState<"register" | "positions">("register");
 
   const account = useQuery({
@@ -81,7 +79,7 @@ export default function AccountRegister() {
             with_category_provenance: true,
             limit: PAGE_SIZE,
             offset,
-            ...(reviewOnly ? { reviewed: false } : {}),
+            ...(reviewOnly ? { needs_review: true } : {}),
             ...(searchQ ? { q: searchQ } : {}),
             ...(start ? { start } : {}),
             ...(end ? { end } : {}),
@@ -104,32 +102,10 @@ export default function AccountRegister() {
   });
 
   useEffect(() => {
-    setSelected([]);
-    setPreview(false);
-  }, [accountId, searchQ, statusFilter, start, end, offset, reviewOnly, page.data]);
-  useEffect(() => {
     const id = params.get("transaction");
     if (id && page.data)
       document.getElementById(`transaction-${id}`)?.scrollIntoView?.({ block: "center" });
   }, [params, page.data]);
-  const reviewableRows = (page.data?.items ?? []).filter(
-    (t) => t.needs_review && t.status === "posted",
-  );
-  const selectedRows = reviewableRows.filter((t) => selected.includes(t.id));
-  const mark = useMutation({
-    mutationFn: async () => {
-      const { error } = await api.POST("/transactions/mark-reviewed", {
-        body: { transaction_ids: selectedRows.map((t) => t.id), escalate: false },
-      });
-      if (error) throw new Error(errorDetail(error));
-    },
-    onSuccess: () => {
-      setSelected([]);
-      setPreview(false);
-      qc.invalidateQueries();
-    },
-  });
-
   if (!accountId) return null;
   const currency = account.data?.currency;
   const total = page.data?.total ?? 0;
@@ -239,7 +215,10 @@ export default function AccountRegister() {
 
           <Card>
             <div className="mb-3 flex flex-wrap items-center gap-3 text-sm">
-              <label className="flex items-center gap-2">
+              <label
+                className="flex items-center gap-2"
+                title="A bank-sync row with no category, or a reconciliation adjustment nobody has explained or accepted"
+              >
                 <input
                   type="checkbox"
                   checked={reviewOnly}
@@ -248,69 +227,41 @@ export default function AccountRegister() {
                     setOffset(0);
                   }}
                 />
-                Awaiting review only
+                Needs review only
               </label>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={!selectedRows.length}
-                onClick={() => setPreview(true)}
-              >
-                Review selected ({selectedRows.length})
-              </Button>
             </div>
             {account.error && <ErrorText>{account.error.message}</ErrorText>}
-            {preview && (
-              <section
-                role="region"
-                aria-label="Confirm transaction review"
-                className="mb-4 rounded-lg border border-border p-3"
-              >
-                <h3 className="font-medium">
-                  Mark these {selectedRows.length} posted transactions reviewed?
-                </h3>
-                <p className="text-sm text-muted-foreground">
-                  This records your review. It does not change amounts or categories. Pending
-                  transactions and other pages are excluded.
-                </p>
-                <ReviewPreviewList rows={selectedRows} currency={currency} />
-                <div className="flex gap-2">
-                  <Button
-                    disabled={mark.isPending || !selectedRows.length}
-                    onClick={() => mark.mutate()}
-                  >
-                    Confirm review
-                  </Button>
-                  <Button variant="ghost" onClick={() => setPreview(false)}>
-                    Cancel
-                  </Button>
-                </div>
-                {mark.error && <ErrorText>{mark.error.message}</ErrorText>}
-              </section>
-            )}
             <QueryState
               query={page}
               what="transactions"
-              empty="No transactions match."
+              empty={
+                <p className="text-sm text-muted-foreground">
+                  No transactions match.
+                  {page.data?.did_you_mean && (
+                    <>
+                      {" "}
+                      Did you mean{" "}
+                      <button
+                        type="button"
+                        className="font-medium text-primary underline"
+                        onClick={() => {
+                          setQ(page.data?.did_you_mean ?? "");
+                          setOffset(0);
+                        }}
+                      >
+                        {page.data.did_you_mean}
+                      </button>
+                      ?
+                    </>
+                  )}
+                </p>
+              }
               isEmpty={(data) => data.items.length === 0}
             >
               {(data) => (
                 <Table>
                   <thead>
                     <tr>
-                      <Th>
-                        <input
-                          type="checkbox"
-                          aria-label="Select all posted transactions awaiting review on this page"
-                          checked={
-                            reviewableRows.length > 0 && selectedRows.length === reviewableRows.length
-                          }
-                          disabled={!reviewableRows.length || mark.isPending}
-                          onChange={(e) =>
-                            setSelected(e.target.checked ? reviewableRows.map((t) => t.id) : [])
-                          }
-                        />
-                      </Th>
                       <Th>Date</Th>
                       <Th>Payee</Th>
                       <Th>Description</Th>
@@ -340,25 +291,6 @@ export default function AccountRegister() {
                         }
                         onUndone={(id) =>
                           setCorrections(({ [id]: _undone, ...rest }) => rest)
-                        }
-                        selection={
-                          t.needs_review && t.status === "posted" ? (
-                            <input
-                              type="checkbox"
-                              disabled={mark.isPending}
-                              aria-label={`Select ${t.payee || t.description || "transaction"} on ${formatDate(t.date)}`}
-                              checked={selected.includes(t.id)}
-                              onChange={(e) =>
-                                setSelected(
-                                  e.target.checked
-                                    ? [...selected, t.id]
-                                    : selected.filter((id) => id !== t.id),
-                                )
-                              }
-                            />
-                          ) : (
-                            <span />
-                          )
                         }
                       />
                     ))}
@@ -425,23 +357,6 @@ export function SplitCell({
         ? `Split from ${pathName(t.split_account_path)}`
         : `Split (${t.split_lines})`}
     </Button>
-  );
-}
-
-/** The rows a bulk review will mark, by category name (#541). Mounted only
- * while the confirmation is open, so the register loads no names for it. */
-function ReviewPreviewList({ rows, currency }: { rows: TransactionOut[]; currency?: string | null }) {
-  const pathName = usePathNames();
-  return (
-    <ul className="my-3 space-y-1 text-sm">
-      {rows.map((t) => (
-        <li key={t.id}>
-          {formatDate(t.date)} · {t.payee || t.description || "Transaction"} ·{" "}
-          {formatMoney(t.amount, { currency })}{" "}
-          · {t.category_path ? pathName(t.category_path) : "Transfer / split"}
-        </li>
-      ))}
-    </ul>
   );
 }
 
@@ -517,7 +432,6 @@ export function RegisterRow({
   currency,
   candidates,
   proposed,
-  selection,
   correctedFrom,
   onCorrected,
   onUndone,
@@ -525,7 +439,6 @@ export function RegisterRow({
   /** The register is a brokerage account whose holdings come from the feed:
    * its category picker offers "Securities trade" (#591, decision 119). */
   brokerageFeed?: boolean;
-  selection?: React.ReactNode;
   /** This row is the replacement of a posted row recategorized in this
    * session; the value is the category cell it had before (#541). */
   correctedFrom?: string;
@@ -653,6 +566,33 @@ export function RegisterRow({
     onError: (e) => setError(e.message),
   });
 
+  // A reconciliation adjustment needs review until it is explained (its
+  // category changed or split away from expenses.reconciliation_adjustments)
+  // or accepted as it is (decision 141). Accepting is recorded on the
+  // reconciliation and audited, with an optional note.
+  const [accepting, setAccepting] = useState(false);
+  const [acceptNote, setAcceptNote] = useState("");
+  const accept = useMutation({
+    mutationFn: async () => {
+      const note = acceptNote.trim();
+      const { error: err } = await api.POST("/transactions/{tx_id}/accept-adjustment", {
+        params: { path: { tx_id: t.id } },
+        ...(note ? { body: { note } } : {}),
+      });
+      if (err) throw new Error(errorDetail(err));
+    },
+    onSuccess: () => {
+      setError(null);
+      setAccepting(false);
+      setAcceptNote("");
+      // The row's flag and every review count read the same predicate.
+      qc.invalidateQueries({ queryKey: ["register"] });
+      qc.invalidateQueries({ queryKey: ["needs-review"] });
+      qc.invalidateQueries({ queryKey: ["search"] });
+    },
+    onError: (e) => setError(e.message),
+  });
+
   // Schedule-instance actions (#236): an `expected` row a schedule
   // materialized can be overridden (pins it), skipped (the slot stays
   // filled, it never comes back) or marked paid against a posted row.
@@ -727,7 +667,6 @@ export function RegisterRow({
   return (
     <>
       <tr id={`transaction-${t.id}`} className={t.status === "void" ? "opacity-50" : undefined}>
-        {selection !== undefined && <Td>{selection}</Td>}
         <Td className="whitespace-nowrap">{formatDate(t.date)}</Td>
         <Td className="max-w-40 truncate">{t.payee}</Td>
         <Td className="max-w-56 truncate text-muted-foreground">{t.description}</Td>
@@ -860,13 +799,10 @@ export function RegisterRow({
                 pinned
               </Badge>
             )}
-            {/* The unreviewed set is a filter over this register, not a queue
-                (#175): a row is unreviewed until something token-bearing
-                touches it. Membership is the server's call (#248) — no mark
-                is not "needs review" (expected instances, manual and QIF/CSV
-                rows never need one). `flagged` is a reviewer handing it back. */}
-            {t.escalated_at && <Badge variant="red">flagged</Badge>}
-            {t.needs_review && <Badge variant="amber">needs review</Badge>}
+            {/* Whether a row needs review, and why, is the server's call
+                (decision 141): the same predicate as ?needs_review=true and
+                the Dashboard's counts. It clears when the reason is gone. */}
+            {t.needs_review && <ReviewBadge reason={t.review_reason} />}
           </span>
         </Td>
         <Td>
@@ -939,6 +875,16 @@ export function RegisterRow({
                 Unlink
               </Button>
             )}
+            {t.review_reason === "reconciliation_adjustment" && !accepting && (
+              <Button
+                size="sm"
+                variant="outline"
+                title="The difference is right as it is: accept it, and it no longer needs review. To explain it instead, change its category or split it."
+                onClick={() => setAccepting(true)}
+              >
+                Accept…
+              </Button>
+            )}
             {t.origin === "agent" && t.status === "pending" && (
               <>
                 <Button size="sm" onClick={() => postTx.mutate()}>
@@ -1001,9 +947,50 @@ export function RegisterRow({
           </span>
         </Td>
       </tr>
+      {accepting && (
+        <tr>
+          <Td colSpan={8}>
+            <form
+              aria-label="Accept the reconciliation adjustment"
+              className="flex flex-wrap items-center gap-2 text-sm"
+              onSubmit={(e) => {
+                e.preventDefault();
+                accept.mutate();
+              }}
+            >
+              <span className="text-muted-foreground">
+                Accept this adjustment of {formatMoney(t.amount, { currency })} as it is? Purser
+                records who accepted it and when.
+              </span>
+              <Input
+                className="h-8 w-full sm:w-72"
+                aria-label="Why the adjustment is right (optional)"
+                placeholder="Why it is right (optional)"
+                maxLength={200}
+                value={acceptNote}
+                onChange={(e) => setAcceptNote(e.target.value)}
+              />
+              <Button size="sm" type="submit" disabled={accept.isPending}>
+                Accept adjustment
+              </Button>
+              <Button
+                size="sm"
+                type="button"
+                variant="ghost"
+                onClick={() => {
+                  setAccepting(false);
+                  setError(null);
+                }}
+              >
+                Cancel
+              </Button>
+            </form>
+          </Td>
+        </tr>
+      )}
       {splitting && (
         <tr>
-          <Td colSpan={selection ? 9 : 8}>
+          <Td colSpan={8}>
             <SplitEditor
               txId={t.id}
               isSplit={t.split_lines > 0}
@@ -1019,7 +1006,7 @@ export function RegisterRow({
       )}
       {isInstance && picking && (
         <tr>
-          <Td colSpan={selection ? 9 : 8}>
+          <Td colSpan={8}>
             <PaidPicker
               accountPath={accountPath}
               currency={currency}
@@ -1032,12 +1019,38 @@ export function RegisterRow({
       )}
       {error && (
         <tr>
-          <Td colSpan={selection ? 9 : 8}>
+          <Td colSpan={8}>
             <ErrorText>{error}</ErrorText>
           </Td>
         </tr>
       )}
     </>
+  );
+}
+
+const REVIEW_REASONS: Record<NonNullable<TransactionOut["review_reason"]>, { label: string; help: string }> = {
+  uncategorized: {
+    label: "no category",
+    help: "A bank-sync row with no category. Give it one and it no longer needs review.",
+  },
+  reconciliation_adjustment: {
+    label: "reconciliation adjustment",
+    help: "The difference a reconcile posted. Change its category or split it to explain it, or accept it as it is.",
+  },
+};
+
+/** "needs review" with its reason (decision 141). */
+function ReviewBadge({ reason }: { reason?: TransactionOut["review_reason"] }) {
+  const why = reason ? REVIEW_REASONS[reason] : null;
+  return (
+    // The pill says "needs review"; the reason is small text under it that
+    // wraps (#700). As one pill, "needs review · reconciliation adjustment"
+    // widened the Status column past the table's edge (#556), and wrapped
+    // inside the pill it read as a blob.
+    <span className="flex flex-col items-start gap-0.5" title={why?.help}>
+      <Badge variant="amber">needs review</Badge>
+      {why && <span className="text-xs text-warning">{why.label}</span>}
+    </span>
   );
 }
 
@@ -1207,6 +1220,118 @@ function FloorEditor({
         {account.type === "credit_card" &&
           " A card is negative when owed: -4500.00 warns past 4,500 owed."}
         {trimmed !== "" && !valid && " Enter an amount such as 500.00."}
+      </span>
+    </span>
+  );
+}
+
+/** A credit card's statement closing day (#674, decision 136): payments to
+ * the card whose schedule sizes them from the statement cycle are resized
+ * from it. Shows the day the card's history suggests; never applies it. */
+function CloseDayEditor({
+  account,
+  onSaved,
+  onError,
+}: {
+  account: AccountOut;
+  onSaved: () => void;
+  onError: (message: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  const current = account.statement_close_day ?? null;
+  const cycle = useQuery({
+    queryKey: ["statement-cycle", account.id],
+    enabled: editing,
+    queryFn: async () => {
+      const { data, error: err } = await api.GET("/accounts/{account_id}/statement-cycle", {
+        params: { path: { account_id: account.id } },
+      });
+      if (err) throw new Error(errorDetail(err));
+      return data;
+    },
+  });
+
+  const save = useMutation({
+    mutationFn: async (statement_close_day: number | null) => {
+      const { error: err } = await api.PATCH("/accounts/{account_id}", {
+        params: { path: { account_id: account.id } },
+        body: { statement_close_day },
+      });
+      if (err) throw new Error(errorDetail(err));
+    },
+    onSuccess: () => {
+      setEditing(false);
+      onSaved();
+    },
+    onError: (e) => onError(e.message),
+  });
+
+  if (!editing)
+    return (
+      <span className="flex items-center gap-2 text-sm text-muted-foreground">
+        {current != null ? `Statement closes on day ${current}` : "No closing day"}
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            setValue(current != null ? String(current) : "");
+            setEditing(true);
+          }}
+        >
+          {current != null ? "Edit closing day" : "Set closing day…"}
+        </Button>
+      </span>
+    );
+
+  const day = Number(value.trim());
+  const valid = /^\d{1,2}$/.test(value.trim()) && day >= 1 && day <= 31;
+  const suggested = cycle.data?.suggested_close_day ?? null;
+  return (
+    <span className="flex flex-wrap items-center gap-2 text-sm">
+      <label className="flex items-center gap-2 text-muted-foreground">
+        Statement closing day
+        <Input
+          aria-label="Statement closing day"
+          className="w-16 font-mono"
+          inputMode="numeric"
+          autoFocus
+          placeholder="15"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+        />
+      </label>
+      <Button size="sm" disabled={!valid || save.isPending} onClick={() => save.mutate(day)}>
+        Save
+      </Button>
+      {suggested != null && suggested !== current && (
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={save.isPending}
+          onClick={() => setValue(String(suggested))}
+        >
+          Use suggested day {suggested}
+        </Button>
+      )}
+      {current != null && (
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={save.isPending}
+          onClick={() => save.mutate(null)}
+        >
+          Clear
+        </Button>
+      )}
+      <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
+        Cancel
+      </Button>
+      <span className="w-full text-xs text-muted-foreground">
+        The day of the month the statement closes (a later day than the month has means its
+        last day). Card payments set to the statement cycle pay what the statement showed.
+        {cycle.data && ` Suggestion: ${cycle.data.suggestion_detail}.`}
+        {value.trim() !== "" && !valid && " Enter a day from 1 to 31."}
       </span>
     </span>
   );
@@ -1407,6 +1532,9 @@ function AccountHeader({ account }: { account: AccountOut | undefined }) {
             {FLOOR_TYPES.has(account.type) && (
               <FloorEditor account={account} onSaved={invalidate} onError={setError} />
             )}
+            {account.type === "credit_card" && (
+              <CloseDayEditor account={account} onSaved={invalidate} onError={setError} />
+            )}
             {account.type === "brokerage" && isAdmin && (
               <label className="flex items-center gap-2 text-sm text-muted-foreground">
                 Holdings
@@ -1419,13 +1547,13 @@ function AccountHeader({ account }: { account: AccountOut | undefined }) {
                     const next = e.target.value as "feed" | "manual";
                     const message =
                       next === "manual"
-                        ? "Track this account's holdings by hand? Its feed snapshots stay as history, and the feed no longer records holdings for it; its cash still syncs."
-                        : "Take this account's holdings from the feed again? The hand-tracked holdings stay in effect until the first sync after this switch, which replaces them from its date: a position the feed does not report ends there. The positions stay, read-only.";
+                        ? "Enter this account's holdings in Purser? Its SimpleFIN snapshots stay as history, and SimpleFIN no longer records holdings for it; its cash still syncs. Market data prices the holdings you enter."
+                        : "Take this account's holdings from SimpleFIN again? The holdings entered in Purser stay in effect until the first sync after this switch, which replaces them from its date: a position SimpleFIN does not report ends there. The positions stay, read-only.";
                     if (window.confirm(message)) setHoldingsSource.mutate(next);
                   }}
                 >
-                  <option value="feed">from the feed</option>
-                  <option value="manual">tracked by hand</option>
+                  <option value="feed">from SimpleFIN</option>
+                  <option value="manual">entered in Purser</option>
                 </select>
               </label>
             )}

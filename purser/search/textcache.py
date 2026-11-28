@@ -62,7 +62,14 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
 from purser import crypto
-from purser.core.search_query import Text, fold
+from purser.core.search_query import (
+    MAX_FUZZY,
+    Text,
+    fold,
+    is_word,
+    one_edit_away,
+    within_one_edit,
+)
 from purser.logging import get_logger
 
 log = get_logger(__name__)
@@ -74,6 +81,12 @@ CHUNK_ROWS = 4096
 # Between two rows of a chunk. Matches that would cross it are rejected, so
 # any character may appear in the text itself.
 SEP = "\n"
+# What separates two words in the cached text.
+_BOUNDARY = frozenset({" ", SEP})
+# Above this many distinct characters in the vocabulary (a script with a large
+# alphabet), typo neighbours are found by comparing every word of a nearby
+# length instead of generating every one-edit spelling.
+MAX_ALPHABET = 64
 # Statuses whose text can still change in place.
 MUTABLE = frozenset({"pending", "expected"})
 RECONCILE_SECONDS = 600.0
@@ -140,6 +153,29 @@ class _Field:
                     at = hay.find(term, at + 1)
         for value, slot in zip(self._open_rows, self._open_slots, strict=True):
             if term in value:
+                out.add(slot)
+
+    def find_word(self, word: str, out: set[int]) -> None:
+        """Add the slot of every row with ``word`` as a whole word (folded
+        text separates words with one space; rows end at ``SEP``)."""
+        size = len(word)
+        for hay, starts, slots in self._closed:
+            at = hay.find(word)
+            while at != -1:
+                row = bisect_right(starts, at) - 1
+                after = starts[row + 1]
+                end = at + size
+                if (
+                    end < after
+                    and (at == starts[row] or hay[at - 1] in _BOUNDARY)
+                    and (end == after - 1 or hay[end] in _BOUNDARY)
+                ):
+                    out.add(slots[row])
+                    at = hay.find(word, after)
+                else:
+                    at = hay.find(word, at + 1)
+        for value, slot in zip(self._open_rows, self._open_slots, strict=True):
+            if word in value.split():
                 out.add(slot)
 
     def rows(self) -> Iterable[tuple[str, int]]:
@@ -224,6 +260,9 @@ class SearchText:
         self._payee_slots: list[array[int]] = []
         self._payee_state: tuple[int, int | None] = (0, None)
         self._payee_refs: dict[str, uuid.UUID] = {}  # py_ reference -> id
+        # Every word (no digits) of the cached text, for typo tolerance.
+        self._vocabulary: dict[int, set[str]] = {}
+        self._alphabet: set[str] = set()
         self._tracked: dict[bytes, _Tracked] = {}
         self._live = 0
         self._id_sum = 0
@@ -257,7 +296,9 @@ class SearchText:
                 continue
             self._payee_index[payee_id] = len(self._payee_names)
             self._payee_refs[crypto.payee_ref(payee_id)] = payee_id
-            self._payee_names.append(form(crypto.decrypt(name_enc) if name_enc else None))
+            name = form(crypto.decrypt(name_enc) if name_enc else None)
+            self._payee_names.append(name)
+            self._learn(name)
             self._payee_slots.append(array("I"))
 
     def _memos(
@@ -281,10 +322,13 @@ class SearchText:
         slot = len(self._ids) // 16
         key = row.id.bytes
         self._ids += key
-        description = crypto.decrypt(row.description_enc) if row.description_enc else None
-        self._description.add(slot, form(description))
+        description = form(crypto.decrypt(row.description_enc) if row.description_enc else None)
+        self._description.add(slot, description)
+        self._learn(description)
         if memos:
             self._memo.add(slot, SEP.join(memos))
+            for memo in memos:
+                self._learn(memo)
         payee = self._payee_index.get(row.payee_id, -1) if row.payee_id is not None else -1
         self._slot_payee.append(payee)
         if payee >= 0:
@@ -292,6 +336,43 @@ class SearchText:
         self._live += 1
         self._id_sum += _id_part(key)
         return slot
+
+    def _learn(self, folded: str) -> None:
+        for word in folded.split():
+            if is_word(word):
+                bucket = self._vocabulary.setdefault(len(word), set())
+                if word not in bucket:
+                    bucket.add(word)
+                    self._alphabet.update(word)
+
+    def _neighbours(self, word: str) -> set[str]:
+        """The vocabulary's words one edit from ``word``."""
+        sizes = (len(word) - 1, len(word), len(word) + 1)
+        if len(word) > MAX_FUZZY or not any(self._vocabulary.get(size) for size in sizes):
+            # Nothing can be one edit away, and generating the spellings of a
+            # long word is the expensive part (#698).
+            return set()
+        if len(self._alphabet) <= MAX_ALPHABET:
+            spellings = one_edit_away(word, self._alphabet)
+            return {w for w in spellings if w in self._vocabulary.get(len(w), ())}
+        found: set[str] = set()
+        for size in sizes:
+            for candidate in self._vocabulary.get(size, ()):
+                if candidate != word and within_one_edit(word, candidate):
+                    found.add(candidate)
+        return found
+
+    def _find_word(self, where: str, word: str) -> set[int]:
+        hits: set[int] = set()
+        if where in ("any", "desc"):
+            self._description.find_word(word, hits)
+        if where in ("any", "memo"):
+            self._memo.find_word(word, hits)
+        if where in ("any", "payee"):
+            for index, name in enumerate(self._payee_names):
+                if word in name.split():
+                    hits.update(self._payee_slots[index])
+        return hits
 
     def _kill(self, slot: int) -> None:
         if slot in self._dead:
@@ -396,7 +477,26 @@ class SearchText:
             for index, name in enumerate(self._payee_names):
                 if clause.text in name:
                     hits.update(self._payee_slots[index])
+        if clause.fuzzy:
+            # Every word of a row is in the vocabulary, so a row with a word
+            # one edit away has that neighbour as a whole word.
+            for neighbour in self._neighbours(clause.text):
+                hits |= self._find_word(clause.field, neighbour)
         return hits
+
+    def suggest(self, session: Session, clause: Text) -> str | None:
+        """For a word found nowhere in its field: the vocabulary word one
+        edit away found in the most rows (``did_you_mean``), else None."""
+        with self._lock:
+            self._refresh(session)
+            if self._find(clause) - self._dead:
+                return None
+            best: tuple[int, str] | None = None
+            for neighbour in sorted(self._neighbours(clause.text)):
+                rows = len(self._find_word(clause.field, neighbour) - self._dead)
+                if rows and (best is None or rows > best[0]):
+                    best = (rows, neighbour)
+            return None if best is None else best[1]
 
     def match(
         self, session: Session, clauses: Sequence[Text]
@@ -426,6 +526,30 @@ class SearchText:
                 excluded |= self._find(clause)
             excluded -= self._dead
             return None, self._uuids(excluded)
+
+    def rule_candidates(
+        self, session: Session, fields: Sequence[str], words: Sequence[str]
+    ) -> list[uuid.UUID]:
+        """After a refresh: the ids of every row where each word appears in
+        one of ``fields`` (``payee``, ``desc``). A rule's text matches whole
+        words of ``normalize_payee`` text, which is folded text with every
+        character outside a-z and 0-9 made a space, so each of its words is
+        a substring of the folded field: a superset of the rule's matches,
+        which the caller checks row by row."""
+        with self._lock:
+            self._refresh(session)
+            hits: set[int] | None = None
+            for word in sorted(words, key=len, reverse=True):
+                found: set[int] = set()
+                for field in fields:
+                    found |= self._find(Text(field, word))
+                hits = found if hits is None else hits & found
+                if not hits:
+                    return []
+            if hits is None:
+                return []
+            hits -= self._dead
+            return self._uuids(hits)
 
     def payee_for_ref(self, session: Session, ref: str) -> uuid.UUID | None:
         """The payee a ``py_`` reference names, after a refresh."""

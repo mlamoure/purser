@@ -195,6 +195,10 @@ def _keys(client: TestClient, ids: dict[str, str], engine: str, **params: Any) -
         ("is:debit is:credit", {}, []),
         ("blue category:coffee amount:<10 date:2026-01", {}, ["cup2"]),
         ("REF:12", {}, []),  # not a field: text
+        ("bleu~", {}, ["cup1", "cup2"]),  # one typo, on request
+        ("bleu", {}, []),  # exact otherwise
+        ("payrol~ -lunch~", {}, ["pay"]),
+        ("payee:bleu~ desc:chekcard~", {}, ["cup2"]),
         ("", {}, ["cup1", "cup2", "groc", "pay", "store", "xfer"]),
         ("   ", {}, ["cup1", "cup2", "groc", "pay", "store", "xfer"]),
     ],
@@ -210,13 +214,12 @@ def test_queries(
     assert _keys(admin_client, ledger, engine, q=q, **params) == expected
 
 
-def test_is_unreviewed_is_the_reviewed_parameter(
+def test_is_needs_review_is_the_needs_review_parameter(
     admin_client: TestClient, ledger: dict[str, str], engine: str
 ) -> None:
-    for flag, value in (("unreviewed", "false"), ("reviewed", "true")):
-        by_query = _keys(admin_client, ledger, engine, q=f"is:{flag}")
-        assert by_query == _keys(admin_client, ledger, engine, reviewed=value)
-    assert _keys(admin_client, ledger, engine, q="is:reviewed", reviewed="false") == []
+    by_query = _keys(admin_client, ledger, engine, q="is:needs-review")
+    assert by_query == _keys(admin_client, ledger, engine, needs_review="true")
+    assert _keys(admin_client, ledger, engine, q="is:needs-review", needs_review="false") == []
 
 
 def _payee_ref(name: str) -> str:
@@ -262,6 +265,23 @@ def test_malformed_queries_are_a_422_naming_the_fix(
     assert message in resp.json()["detail"]
 
 
+def test_a_long_word_is_cheap_and_a_long_query_refused(
+    admin_client: TestClient, ledger: dict[str, str], engine: str
+) -> None:
+    """#698: a word no vocabulary word is near costs no spelling generation
+    (it used to take ~1.2 GB at 6,000 characters), and a query past the
+    bound is a 422 that says so."""
+    long_word = "q" * 900
+    page = admin_client.get("/transactions", params={"q": long_word})
+    assert page.status_code == 200, page.text
+    assert page.json()["total"] == 0 and page.json().get("did_you_mean") is None
+    fuzzy = admin_client.get("/transactions", params={"q": long_word + "~"})
+    assert fuzzy.status_code == 200 and fuzzy.json()["total"] == 0
+    refused = admin_client.get("/transactions", params={"q": "q" * 6000})
+    assert refused.status_code == 422
+    assert "characters" in refused.json()["detail"]
+
+
 def test_the_cold_and_cached_answers_are_the_same_pages(
     admin_client: TestClient, ledger: dict[str, str], migrated_engine: Engine
 ) -> None:
@@ -288,16 +308,20 @@ class TestMcp:
         token = resp.json()["token"]
         textcache.warm()
         try:
-            found, refused = _call_all(
+            found, refused, typo, private = _call_all(
                 live_server.url,
                 token,
                 [
                     ("search_transactions", {"q": "payee:blue amount:<10"}),
                     ("search_transactions", {"q": "paye:blue"}),
+                    ("search_transactions", {"q": "bleu"}),
+                    ("search_transactions", {"q": "bleu", "withhold": ["description"]}),
                 ],
             )
         finally:
             textcache.reset()
+        assert typo["structured"]["did_you_mean"] == "blue"
+        assert "did_you_mean" not in private["structured"]
         assert not found["error"]
         assert [i["id"] for i in found["structured"]["items"]] == [ledger["cup2"]]
         assert refused["error"]
@@ -310,3 +334,15 @@ class TestMcp:
         doc = tools_read.search_transactions.__doc__ or ""
         paragraph = doc[doc.index("q: words") :].split("\n\n")[0]
         assert len(paragraph) / 4 <= 90, len(paragraph) / 4
+
+
+def test_did_you_mean(admin_client: TestClient, ledger: dict[str, str], engine: str) -> None:
+    page = admin_client.get("/transactions", params={"q": "bleu"}).json()
+    assert page["total"] == 0
+    assert page.get("did_you_mean") == ("blue" if engine == "cache" else None)
+    found = admin_client.get("/transactions", params={"q": "blue"}).json()
+    assert found["total"] == 2 and found.get("did_you_mean") is None
+    for withheld in ("description", "payee"):
+        hidden = admin_client.get("/transactions", params={"q": "bleu", "withhold": withheld})
+        assert hidden.status_code == 200
+        assert hidden.json().get("did_you_mean") is None  # words from the ledger's text

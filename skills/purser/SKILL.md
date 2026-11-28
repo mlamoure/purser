@@ -8,7 +8,7 @@ description: >-
   forecasts) or record bills/transactions. Bootstraps agent access with a
   read + write token — the agent acts with the user's authority, and can
   request its own access but can never mint or widen it.
-version: 1.21.1
+version: 1.22.1
 ---
 
 # Purser — agent operations skill
@@ -40,7 +40,7 @@ home network is the human's own project. In short:
 
    ```bash
    mkdir purser && cd purser
-   curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.6/docker-compose.yml
+   curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.7/docker-compose.yml
    PURSER_ENCRYPTION_KEY=keygen docker compose pull
    ```
 
@@ -122,6 +122,13 @@ someone else reached the instance first.
   category tree, and the account list in one round-trip. Then verify with a
   read call such as `list_accounts`. `GET /llms.txt` on the instance carries
   the same guide.
+- `describe` also counts the transactions that need review. A row needs
+  review only for a reason: a bank-sync row with no category, or a
+  reconciliation adjustment. `review_batch` lists them with their `reason`.
+  Categorize a row with no category (`update_transaction`), and propose a
+  rule when the payee will recur; recategorize or split an adjustment to
+  what it was, or `accept_reconciliation_adjustment` when the human says it
+  is right as it is. A fixed row leaves the list by itself.
 
 A 401 means a missing or wrong token; a 421 means the request's host is not
 `localhost`, the host in `PURSER_PUBLIC_URL` or a name in
@@ -275,12 +282,11 @@ An admin-scoped API token can mint tokens; do not give routine agents that scope
   for it. Until a sale's cash lands, `list_holdings` shows it as
   `in_transit` inside the position's `market_value` (a line with quantity 0
   after a sale of every share): it is the sale's cash, not a gain.
-  A row marked `securities_trade` (category `equity.securities`; in
-  `review_batch` it also carries `locked: {event_id, position_id}`, the trade
-  holding it) moves only with its trade — never
-  recategorize it or `confirm_transfer` it. If the trade is right, just
-  `mark_reviewed` it; if it is wrong (a sale recorded twice, at the wrong
-  price or date), `reverse_position_event(event_id)` — the `event_id` from
+  A row marked `securities_trade` (category `equity.securities`) that a
+  recorded trade holds moves only with its trade — never recategorize it or
+  `confirm_transfer` it. If the trade is right, leave it; if it is wrong (a
+  sale recorded twice, at the wrong price or date),
+  `reverse_position_event(event_id)` — the `event_id` from
   `record_sale`'s answer — undoes the shares and the cash, then record it
   again. A closed position is reopened first with
   `reopen_position(position_id)` (write scope; the `position_id` is in
@@ -315,11 +321,10 @@ An admin-scoped API token can mint tokens; do not give routine agents that scope
   Marking is refused on any other account (a hand-tracked one records the
   trade with `record_sale` instead), a transfer, a split or an expected row.
   After each sync Purser may post a "Balance adjustment" on such an account
-  (payee "Balance adjustment", flagged `balance_adjustment` in
-  `review_batch`): it puts the cash in step with the broker's balance less
-  its holdings, e.g. when the broker sent a deposit but never its buy row.
-  `mark_reviewed` it; never offset it with a manual entry. The human can
-  switch it off per account (`update_account(account,
+  (payee "Balance adjustment"): it puts the cash in step with the broker's
+  balance less its holdings, e.g. when the broker sent a deposit but never
+  its buy row. Leave it as it is; never offset it with a manual entry. The
+  human can switch it off per account (`update_account(account,
   balance_true_up=false)`); past adjustments stay.
 - Gifts received (`income.gifts`, e.g. a relative's deposit into a child's
   education account) and employer plan money (`income.employer_contributions`:
@@ -359,8 +364,11 @@ An admin-scoped API token can mint tokens; do not give routine agents that scope
   schedule pages the same way). A vest that will never happen is forfeited
   with `update_award_vest`; it counts once even when the broker also reports
   it as cancelled.
-  To correct a wrong buy or vest, reverse it (`reverse_position_event`) and
-  record it again; the same lot reference may be reused.
+  To correct a wrong vest, reverse it (`reverse_position_event`) and record
+  it again with `record_vest`; the same lot reference may be reused. A wrong
+  buy is reversed the same way, but no MCP tool records one: recording it
+  again needs the REST API (`POST /positions/{id}/events`, `kind: "buy"`)
+  or the person.
   `list_lots`, `list_awards` and `realized_gains` read it back: unvested
   units are never net worth, and `capture` (when the lots were read) is not
   the price date. References are withheld from your answers unless you pass

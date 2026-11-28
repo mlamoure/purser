@@ -27,11 +27,11 @@ agent decides what to ask and how to narrate it; Purser does the arithmetic.
 
 ## Optional model integrations
 
-Purser can call a separately configured model for categorization and transaction
-review. These integrations are off by default and use the provider, endpoint
-and credentials you supply. They can use a local or hosted model; any provider
+Purser can call a separately configured model to categorize transactions.
+This integration is off by default and uses the provider, endpoint and
+credentials you supply. It can use a local or hosted model; any provider
 charges or subscription belong to that service. The finance engine works with
-these integrations disabled. See [Configuration](../../reference/configuration/).
+it disabled. See [Configuration](../../reference/configuration/).
 
 ## Token budgets
 
@@ -72,9 +72,12 @@ questions about operating Purser from this documentation.
 The web UI covers setup, connections, settings, tokens and auditing. It also
 provides account registers, schedules, positions and a forecast chart for
 direct inspection. Its navigation is **Dashboard**, **Accounts** (each opens
-its register), **Scheduled transactions**, **Import**, and one **Settings**
-area: General, Connections, Categories, Rules, Agent memory, Prices, Agents &
-API, Security, Users and Audit log. A member sees the sections their own
+its register), **Search** (every account at once, with the
+[search syntax](../../how-to/search-transactions/)), **Scheduled
+transactions**, **Import**, and one **Settings**
+area: General, Connections, Categories (with Rules and AI categorization as
+its tabs), Agent memory, Market data, Agents & API, Security, Users and Audit
+log. A member sees the sections their own
 access works in; the admin-only ones (General, Security, Users, Audit log)
 are hidden from them. Your agent is the intended interface for day-to-day work.
 [Grafana](../../how-to/grafana/) supplies broader dashboards over the stable read

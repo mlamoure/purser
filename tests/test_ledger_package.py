@@ -38,6 +38,7 @@ PUBLIC = {
     "create_split_transfer",
     "create_transfer",
     "delete_category",
+    "did_you_mean",
     "ensure_category_path",
     "get_account",
     "get_transaction",

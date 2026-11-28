@@ -259,7 +259,7 @@ export interface paths {
         };
         /**
          * Holdings Summary
-         * @description The account's newest holdings set, from the feed or tracked by hand,
+         * @description The account's newest holdings set, from SimpleFIN or entered in Purser,
          *     with each line's unrealized gain (amount and percent) and share of the
          *     account, a cash line and totals. Lines are largest first. ``cost_basis``
          *     and ``unrealized_gain`` total only the lines whose gain is known, so a
@@ -313,7 +313,7 @@ export interface paths {
         /**
          * List Positions
          * @description The account's positions, each valued as of today. A feed-sourced
-         *     account lists the positions recorded while it was tracked by hand, if
+         *     account lists the positions entered while its holdings were entered in Purser, if
          *     any; they are read-only until it is switched back to manual.
          */
         get: operations["list_positions_accounts__account_id__positions_get"];
@@ -378,7 +378,8 @@ export interface paths {
          *     Purser compares the statement figure with its own balance on ``as_of`` in
          *     the chosen ``basis`` and posts ONE adjustment for the difference, dated
          *     ``as_of``, to the system category ``expenses.reconciliation_adjustments``.
-         *     The adjustment lands in the review set so a person sees it. When the ledger
+         *     The adjustment needs review until it is recategorized, split or accepted
+         *     (``POST /transactions/{id}/accept-adjustment``), so a person sees it. When the ledger
          *     already matches, nothing is posted and the clean reconcile is still
          *     recorded. Either way ``reconciled_through`` advances and an
          *     ``account.reconciled`` event is emitted.
@@ -475,6 +476,28 @@ export interface paths {
          *     zero and Purser stops keeping it. ``status: none`` when there was none.
          */
         delete: operations["remove_starting_balance_accounts__account_id__starting_balance_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/accounts/{account_id}/statement-cycle": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Statement Cycle
+         * @description A credit card's statement cycle: its closing day, a suggested one (the
+         *     day whose closing balance equals most of the card's full payments, or
+         *     the day of the latest recorded statement), and its latest statements.
+         */
+        get: operations["statement_cycle_accounts__account_id__statement_cycle_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1415,9 +1438,33 @@ export interface paths {
          * List Holdings
          * @description Latest snapshot set per brokerage account (cost basis + market value),
          *     whichever source the account's holdings come from: feed snapshots, or the
-         *     projection of positions tracked by hand (`source` says which).
+         *     projection of positions entered in Purser (`source` says which).
          */
         get: operations["list_holdings_holdings_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/holdings/portfolio": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Holdings Portfolio
+         * @description Every open brokerage account's newest holdings set, from SimpleFIN or
+         *     entered in Purser, each account's totals, totals per currency, and counts
+         *     of stale, unpriced and unpriceable lines (#684). A line whose price is a
+         *     close entered by hand says so (`manual_price`, #689). A line the bank
+         *     values carries its implied price (market value / shares).
+         */
+        get: operations["holdings_portfolio_holdings_portfolio_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2058,8 +2105,8 @@ export interface paths {
          *
          *     A sale moves its net proceeds to the account's cash unless `proceeds_to`
          *     is `none`; a buy takes its cost from the cash only with `funded_from`
-         *     `cash`. That cash is one posted system row against `equity.securities`
-         *     (it joins the unreviewed set), or an existing row linked with
+         *     `cash`. That cash is one posted system row against `equity.securities`,
+         *     or an existing row linked with
          *     `transaction_id`. When the account already shows a posted one-sided row
          *     of exactly that amount around the settlement date, the call is refused
          *     with 409 naming it, so the cash is never counted twice: link that row,
@@ -2160,6 +2207,76 @@ export interface paths {
         get: operations["price_status_prices_status_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/prices/symbols": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Symbol Settings
+         * @description Every symbol with price settings: aliases, and whether the providers are skipped (#686).
+         */
+        get: operations["list_symbol_settings_prices_symbols_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/prices/symbols/{symbol}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Put Symbol Settings
+         * @description Set one symbol's price settings (#686): its ticker per provider, and
+         *     whether the providers are skipped for it (its closes are entered by hand).
+         *     Changing a provider's alias makes the provider ask the corrected ticker
+         *     again.
+         *     Settings at their defaults remove the row.
+         */
+        put: operations["put_symbol_settings_prices_symbols__symbol__put"];
+        post?: never;
+        /**
+         * Delete Symbol Settings
+         * @description Remove one symbol's price settings (#686): back to the provider's own
+         *     spelling, and asked of the provider again.
+         */
+        delete: operations["delete_symbol_settings_prices_symbols__symbol__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/prices/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Probe Price Provider
+         * @description Test a price provider key (admin): ask the provider for a few recent
+         *     closes of one well-known symbol. Stores nothing.
+         */
+        post: operations["probe_price_provider_prices_test_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2714,27 +2831,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/transactions/mark-reviewed": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Mark Reviewed
-         * @description Bulk, idempotent. A review mark has no draft state, like
-         *     confirm_transfer and match (#175, decision 47).
-         */
-        post: operations["mark_reviewed_transactions_mark_reviewed_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/transactions/present": {
         parameters: {
             query?: never;
@@ -2770,8 +2866,9 @@ export interface paths {
         };
         /**
          * Review Batch
-         * @description The same payload the MCP tool serves — one service function, so REST
-         *     and MCP can never disagree about what a reviewer sees.
+         * @description The rows that need review, newest first, with their reason and what it
+         *     takes to fix them — the same payload as the MCP tool `review_batch`, from
+         *     one service function.
          */
         get: operations["review_batch_transactions_review_batch_get"];
         put?: never;
@@ -2791,8 +2888,11 @@ export interface paths {
         };
         /**
          * Review Summary
-         * @description Review counts and register destinations. Transfers count once globally,
-         *     but appear on both accounts; per-account totals must not be summed.
+         * @description How many transactions need review, by reason (decision 141: a
+         *     bank-sync row with no category, a reconciliation adjustment nobody has
+         *     explained or accepted), and on which accounts. Transfers count once
+         *     globally but appear on both accounts; per-account totals must not be
+         *     summed.
          */
         get: operations["review_summary_transactions_review_summary_get"];
         put?: never;
@@ -2875,6 +2975,33 @@ export interface paths {
          *     (`suggestion_id`).
          */
         patch: operations["update_transaction_transactions__tx_id__patch"];
+        trace?: never;
+    };
+    "/transactions/{tx_id}/accept-adjustment": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Accept Adjustment
+         * @description Accept a reconciliation adjustment as it is, so it no longer needs
+         *     review (decision 141). `tx_id` is the adjustment a reconcile posted, or
+         *     the row a correction of it left. Idempotent: an accepted adjustment
+         *     answers `created: false`. Audited `reconciliation.adjustment_accepted`
+         *     with the optional `note`. To explain the difference instead, recategorize
+         *     or split the row (PATCH / PUT .../split). 404 for an unknown row; 422 for
+         *     a row that is no reconciliation adjustment (an asset's value change
+         *     included: it never needs review).
+         */
+        post: operations["accept_adjustment_transactions__tx_id__accept_adjustment_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/transactions/{tx_id}/post": {
@@ -3162,6 +3289,51 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AcceptAdjustmentIn */
+        AcceptAdjustmentIn: {
+            /**
+             * Note
+             * @description why the adjustment is right (audit only)
+             */
+            note?: string | null;
+        };
+        /**
+         * AcceptAdjustmentOut
+         * @description A reconciliation adjustment's acceptance (decision 141).
+         */
+        AcceptAdjustmentOut: {
+            /**
+             * Accepted At
+             * Format: date-time
+             */
+            accepted_at: string;
+            /**
+             * Accepted By
+             * @description the token that accepted it
+             */
+            accepted_by: string | null;
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            /**
+             * Adjustment Tx Id
+             * Format: uuid
+             * @description the row the reconcile posted
+             */
+            adjustment_tx_id: string;
+            /**
+             * Created
+             * @description true when this call recorded the acceptance; false when it was already accepted (the call is idempotent)
+             */
+            created: boolean;
+            /**
+             * Reconciliation Id
+             * Format: uuid
+             */
+            reconciliation_id: string;
+        };
         /** AccountCreate */
         AccountCreate: {
             /**
@@ -3289,6 +3461,8 @@ export interface components {
              * @default []
              */
             secured_loan_ids: string[];
+            /** Statement Close Day */
+            statement_close_day?: number | null;
             /** Type */
             type: string;
         };
@@ -3387,6 +3561,8 @@ export interface components {
              * @default []
              */
             secured_loan_ids: string[];
+            /** Statement Close Day */
+            statement_close_day?: number | null;
             /** Type */
             type: string;
         };
@@ -3436,7 +3612,7 @@ export interface components {
             drift_basis_override?: ("pending_inclusive" | "posted_only") | null;
             /**
              * Feed Balance Is Cash
-             * @description Say that this brokerage account's feed balance is its CASH, as for a cash sweep whose positions are tracked by hand (`holdings_source` `manual`; 422 otherwise). The post-sync drift check then compares that balance with the account's transactions, like a checking account's. Off by default because many brokers report the whole account value instead. Turning it off clears a drift-basis pin; switching the account back to the feed turns it off. Admin scope.
+             * @description Say that this brokerage account's feed balance is its CASH, as for a cash sweep whose positions are entered in Purser (`holdings_source` `manual`; 422 otherwise). The post-sync drift check then compares that balance with the account's transactions, like a checking account's. Off by default because many brokers report the whole account value instead. Turning it off clears a drift-basis pin; switching the account back to the feed turns it off. Admin scope.
              */
             feed_balance_is_cash?: boolean | null;
             /** Feed Invert */
@@ -3447,7 +3623,7 @@ export interface components {
             hidden?: boolean | null;
             /**
              * Holdings Source
-             * @description Where this brokerage account's holdings come from: `feed` (the SimpleFIN snapshots) or `manual` (positions recorded by hand, priced daily, and projected into the same snapshots). Switching to `manual` keeps every feed snapshot as history; the first manual snapshot is dated the day after the last feed one. Switching back to `feed` needs a feed mapping (422 without one) and changes no snapshot: the hand-tracked holdings stay in effect until the first sync after the switch, which ends them from its own date (a position the feed does not report ends there); positions stay, read-only. Admin scope; brokerage accounts only (422 otherwise).
+             * @description Where this brokerage account's holdings come from: `feed` (the SimpleFIN snapshots) or `manual` (positions entered in Purser, priced daily, and projected into the same snapshots). Switching to `manual` keeps every feed snapshot as history; the first manual snapshot is dated the day after the last feed one. Switching back to `feed` needs a feed mapping (422 without one) and changes no snapshot: the holdings entered in Purser stay in effect until the first sync after the switch, which ends them from its own date (a position the feed does not report ends there); positions stay, read-only. Admin scope; brokerage accounts only (422 otherwise).
              */
             holdings_source?: ("feed" | "manual") | null;
             /**
@@ -3472,6 +3648,11 @@ export interface components {
              * @description A loan only: the hand-valued asset that secures it (a mortgage's house, a car loan's car); the asset then reports its equity. An explicit null clears it; absent leaves it unchanged. Write scope.
              */
             secured_by_id?: string | null;
+            /**
+             * Statement Close Day
+             * @description A credit card only (422 otherwise): the day of the month its statement closes, 1..31 (a day past a month's end means that month's last day). Payments to the card whose schedule sets payment_amount are then sized from the statement cycle (decision 136) and resized at once. GET /accounts/{id}/statement-cycle suggests a day from the card's history. An explicit null clears it; absent leaves it unchanged. Write scope.
+             */
+            statement_close_day?: number | null;
         };
         /** ActivityOut */
         ActivityOut: {
@@ -3580,9 +3761,9 @@ export interface components {
         AiDisclosureOut: {
             /**
              * Capability
-             * @enum {string}
+             * @constant
              */
-            capability: "categorize" | "review";
+            capability: "categorize";
             /**
              * Sends
              * @description Each item sent, as a phrase.
@@ -4598,6 +4779,11 @@ export interface components {
             overridden: string[];
             /** Price Api Key Set */
             price_api_key_set: boolean;
+            /**
+             * Price Fallback Api Key Set
+             * @default false
+             */
+            price_fallback_api_key_set: boolean;
             /** Sync Reschedule Live */
             sync_reschedule_live: boolean;
             values: components["schemas"]["ConfigValues"];
@@ -4615,6 +4801,11 @@ export interface components {
             ai_api_key?: string | null;
             /** Ai Base Url */
             ai_base_url?: string | null;
+            /**
+             * Ai Min Confidence
+             * @description An AI category guess below this confidence (0 to 1) is not applied: the row stays uncategorized. An [account] answer needs at least 0.85 as well.
+             */
+            ai_min_confidence?: number | null;
             /** Ai Model */
             ai_model?: string | null;
             /**
@@ -4643,10 +4834,19 @@ export interface components {
             oidc_issuer?: string | null;
             /** Price Api Key */
             price_api_key?: string | null;
+            /** Price Fallback Api Key */
+            price_fallback_api_key?: string | null;
+            /** Price Fallback Provider */
+            price_fallback_provider?: ("none" | "tiingo" | "eodhd") | null;
             /** Price Provider */
-            price_provider?: ("none" | "tiingo") | null;
+            price_provider?: ("none" | "tiingo" | "eodhd") | null;
             /** Price Stale Days */
             price_stale_days?: number | null;
+            /**
+             * Review Uncategorized
+             * @description Bank-sync transactions with no category need review. Reconciliation adjustments need review whatever this says.
+             */
+            review_uncategorized?: boolean | null;
             /** Session Idle Hours */
             session_idle_hours?: number | null;
             /** Session Ttl Days */
@@ -4664,6 +4864,8 @@ export interface components {
         ConfigValues: {
             /** Ai Base Url */
             ai_base_url: string;
+            /** Ai Min Confidence */
+            ai_min_confidence: number;
             /** Ai Model */
             ai_model: string | null;
             /** Ai Provider */
@@ -4684,10 +4886,17 @@ export interface components {
             oidc_enabled: boolean;
             /** Oidc Issuer */
             oidc_issuer: string | null;
+            /**
+             * Price Fallback Provider
+             * @default none
+             */
+            price_fallback_provider: string;
             /** Price Provider */
             price_provider: string;
             /** Price Stale Days */
             price_stale_days: number;
+            /** Review Uncategorized */
+            review_uncategorized: boolean;
             /** Session Idle Hours */
             session_idle_hours: number;
             /** Session Ttl Days */
@@ -5145,8 +5354,20 @@ export interface components {
             accounts_projected: number;
             /** Failed */
             failed: components["schemas"]["FetchFailedOut"][];
+            /**
+             * Fallback
+             * @default none
+             */
+            fallback: string;
+            /** Fallback Skipped */
+            fallback_skipped?: string | null;
             /** Fetched */
             fetched: number;
+            /**
+             * Not Covered
+             * @default []
+             */
+            not_covered: string[];
             /** Provider */
             provider: string;
             /** Skipped */
@@ -5210,9 +5431,9 @@ export interface components {
             amount: string;
             /**
              * Basis
-             * @description where the amount comes from: fixed, an estimate basis (last, rolling_avg_3, rolling_avg_12, counterparty_balance = the card's current balance), override (a pinned instance: the amount is yours) or statement (a recorded card statement balance, decision 80)
+             * @description where the amount comes from: fixed, an estimate basis (last, rolling_avg_3, rolling_avg_12, counterparty_balance = the card's current balance), override (a pinned instance: the amount is yours), statement (a recorded card statement, decision 80), or a card payment sized from its statement cycle (decision 136): statement_close (the statement has closed; what remains of it), cycle_projection (the next statement, projected to its close), statement_average or same_cycle_last_year (later payments)
              */
-            basis?: ("fixed" | "last" | "rolling_avg_3" | "rolling_avg_12" | "counterparty_balance" | "override" | "statement") | null;
+            basis?: ("fixed" | "last" | "rolling_avg_3" | "rolling_avg_12" | "counterparty_balance" | "override" | "statement" | "statement_close" | "cycle_projection" | "statement_average" | "same_cycle_last_year") | null;
             certainty?: components["schemas"]["CertaintyOut"] | null;
             /** Label */
             label: string;
@@ -5672,16 +5893,21 @@ export interface components {
             amount: string | null;
             /**
              * Basis
-             * @description where the amount comes from: fixed, an estimate basis (last, rolling_avg_3, rolling_avg_12, counterparty_balance = the card's current balance), override (a pinned instance: the amount is yours) or statement (a recorded card statement balance, decision 80)
+             * @description where the amount comes from: fixed, an estimate basis (last, rolling_avg_3, rolling_avg_12, counterparty_balance = the card's current balance), override (a pinned instance: the amount is yours), statement (a recorded card statement, decision 80), or a card payment sized from its statement cycle (decision 136): statement_close (the statement has closed; what remains of it), cycle_projection (the next statement, projected to its close), statement_average or same_cycle_last_year (later payments)
              * @enum {string}
              */
-            basis: "fixed" | "last" | "rolling_avg_3" | "rolling_avg_12" | "counterparty_balance" | "override" | "statement";
+            basis: "fixed" | "last" | "rolling_avg_3" | "rolling_avg_12" | "counterparty_balance" | "override" | "statement" | "statement_close" | "cycle_projection" | "statement_average" | "same_cycle_last_year";
             certainty?: components["schemas"]["CertaintyOut"] | null;
             /**
              * Date
              * Format: date
              */
             date: string;
+            /**
+             * Minimum Due
+             * @description the recorded statement's minimum payment, when given
+             */
+            minimum_due?: string | null;
             /**
              * Occurrence Date
              * @description the rule slot the instance fills; differs from date after an edit
@@ -6195,18 +6421,6 @@ export interface components {
             /** Type */
             type: string;
         };
-        /** MarkReviewed */
-        MarkReviewed: {
-            /**
-             * Escalate
-             * @default false
-             */
-            escalate: boolean;
-            /** Note */
-            note?: string | null;
-            /** Transaction Ids */
-            transaction_ids: string[];
-        };
         /** MatchOut */
         MatchOut: {
             /** Expected Amount */
@@ -6394,6 +6608,117 @@ export interface components {
             quantity?: string | null;
             /** Row */
             row?: number | null;
+        };
+        /** PortfolioAccountOut */
+        PortfolioAccountOut: {
+            /**
+             * Account Id
+             * Format: uuid
+             */
+            account_id: string;
+            /** As Of */
+            as_of: string | null;
+            /** Cash */
+            cash: string;
+            /** Cost Basis */
+            cost_basis: string | null;
+            /** Currency */
+            currency: string;
+            /** Gain Pct */
+            gain_pct: string | null;
+            /** Lines */
+            lines: components["schemas"]["PortfolioLineOut"][];
+            /** Market Value */
+            market_value: string;
+            /** Name */
+            name: string;
+            /** Path */
+            path: string;
+            /** Source */
+            source: string;
+            /** Total */
+            total: string;
+            /** Unrealized Gain */
+            unrealized_gain: string | null;
+        };
+        /** PortfolioLineOut */
+        PortfolioLineOut: {
+            /** Cost Basis */
+            cost_basis: string | null;
+            /** Gain Pct */
+            gain_pct: string | null;
+            /** In Transit */
+            in_transit: string | null;
+            /**
+             * Manual Price
+             * @default false
+             */
+            manual_price: boolean;
+            /** Market Value */
+            market_value: string | null;
+            /** Name */
+            name: string | null;
+            /** No Price */
+            no_price: boolean;
+            /** Position Id */
+            position_id: string | null;
+            /** Price */
+            price: string | null;
+            /** Price As Of */
+            price_as_of: string | null;
+            /** Price Source */
+            price_source: string | null;
+            /** Quantity */
+            quantity: string | null;
+            /** Source */
+            source: string;
+            /** Stale Price */
+            stale_price: boolean;
+            /** Symbol */
+            symbol: string;
+            /** Unpriceable */
+            unpriceable: boolean;
+            /** Unrealized Gain */
+            unrealized_gain: string | null;
+            /** Value Out Of Range */
+            value_out_of_range: boolean;
+            /** Weight Pct */
+            weight_pct: string | null;
+        };
+        /**
+         * PortfolioOut
+         * @description Every open brokerage account's newest holdings (#684), largest
+         *     account first, lines largest first. All figures are computed here.
+         */
+        PortfolioOut: {
+            /** Accounts */
+            accounts: components["schemas"]["PortfolioAccountOut"][];
+            /**
+             * As Of
+             * Format: date
+             */
+            as_of: string;
+            /** Lines */
+            lines: number;
+            /** No Price */
+            no_price: number;
+            /** Stale Price */
+            stale_price: number;
+            /** Totals */
+            totals: components["schemas"]["PortfolioTotalOut"][];
+            /** Unpriceable */
+            unpriceable: number;
+        };
+        /** PortfolioTotalOut */
+        PortfolioTotalOut: {
+            /** Cash */
+            cash: string;
+            /** Currency */
+            currency: string;
+            /** Market Value */
+            market_value: string;
+            /** Total */
+            total: string;
         };
         /** PositionCreate */
         PositionCreate: {
@@ -6829,15 +7154,47 @@ export interface components {
         };
         /** PriceStatusOut */
         PriceStatusOut: {
+            /**
+             * Fallback Provider
+             * @default none
+             */
+            fallback_provider: string;
             last_failure: components["schemas"]["FetchFailureOut"] | null;
             /** Last Fetched At */
             last_fetched_at: string | null;
+            /** Last Run At */
+            last_run_at?: string | null;
+            /** Next Run At */
+            next_run_at?: string | null;
             /** Provider */
             provider: string;
             /** Stale Days */
             stale_days: number;
             /** Symbols */
             symbols: components["schemas"]["SymbolPriceOut"][];
+        };
+        /**
+         * PriceTestIn
+         * @description A provider key test (#682). Both fields are optional: absent, the
+         *     configured provider and the stored key are tested. The key is used for
+         *     this one request and never stored, logged or echoed.
+         */
+        PriceTestIn: {
+            /** Api Key */
+            api_key?: string | null;
+            /** Provider */
+            provider?: ("tiingo" | "eodhd") | null;
+        };
+        /** PriceTestOut */
+        PriceTestOut: {
+            /** Ok */
+            ok: boolean;
+            /** Provider */
+            provider: string;
+            /** Reason */
+            reason?: string | null;
+            /** Status */
+            status?: number | null;
         };
         /**
          * PrivacyRecord
@@ -7060,6 +7417,10 @@ export interface components {
         ReconciliationOut: {
             /** Adjustment */
             adjustment: string;
+            /** Adjustment Accepted At */
+            adjustment_accepted_at?: string | null;
+            /** Adjustment Accepted By */
+            adjustment_accepted_by?: string | null;
             /** Adjustment Tx Id */
             adjustment_tx_id: string | null;
             /**
@@ -7203,29 +7564,128 @@ export interface components {
              * Format: uuid
              */
             account_id: string;
-            /** Agent Pending */
+            /**
+             * Agent Pending
+             * @description an agent's pending rows on this account
+             */
             agent_pending: number;
             /** Name */
             name: string;
             /** Path */
             path: string;
-            /** Pending */
+            /**
+             * Pending
+             * @description of them, pending rows
+             */
             pending: number;
-            /** Total */
+            /**
+             * Reconciliation Adjustments
+             * @description of them, reconciliation adjustments nobody has explained or accepted
+             */
+            reconciliation_adjustments: number;
+            /**
+             * Total
+             * @description rows on this account that need review
+             */
             total: number;
+            /**
+             * Uncategorized
+             * @description of them, bank-sync rows with no category
+             */
+            uncategorized: number;
+        };
+        /** ReviewBatch */
+        ReviewBatch: {
+            /** Remaining */
+            remaining: number;
+            /** Rows */
+            rows: components["schemas"]["ReviewBatchRow"][];
+            /**
+             * Total
+             * @description rows that need review (on the account, when given)
+             */
+            total: number;
+        };
+        /** ReviewBatchRow */
+        ReviewBatchRow: {
+            /** Account */
+            account: string | null;
+            /**
+             * Amount
+             * @description the account leg (negative = money out)
+             */
+            amount: string | null;
+            /**
+             * Category
+             * @description the category path; null for a split
+             */
+            category: string | null;
+            /**
+             * Date
+             * Format: date
+             */
+            date: string;
+            /** Description */
+            description: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Memories
+             * @description financial notes linked to the row's account or payee, and global ones
+             */
+            memories: {
+                [key: string]: unknown;
+            }[];
+            /** Payee */
+            payee: string | null;
+            /**
+             * Reason
+             * @enum {string}
+             */
+            reason: "uncategorized" | "reconciliation_adjustment";
+            /** Status */
+            status: string;
         };
         /** ReviewSummary */
         ReviewSummary: {
-            /** Accounts */
+            /**
+             * Accounts
+             * @description per real account; a transfer counts on both, so these must not be summed
+             */
             accounts: components["schemas"]["ReviewAccountSummary"][];
-            /** Agent Pending */
+            /**
+             * Agent Pending
+             * @description an agent's pending rows: a separate count, not a review reason
+             */
             agent_pending: number;
-            /** Oldest Date */
+            /**
+             * Oldest Date
+             * @description the oldest row that needs review
+             */
             oldest_date: string | null;
-            /** Pending */
+            /**
+             * Pending
+             * @description of them, pending rows
+             */
             pending: number;
-            /** Total */
+            /**
+             * Reconciliation Adjustments
+             * @description of them, reconciliation adjustments nobody has explained or accepted
+             */
+            reconciliation_adjustments: number;
+            /**
+             * Total
+             * @description rows that need review, each counted once
+             */
             total: number;
+            /**
+             * Uncategorized
+             * @description of them, bank-sync rows with no category
+             */
+            uncategorized: number;
         };
         /** RollupOut */
         RollupOut: {
@@ -7453,6 +7913,16 @@ export interface components {
             /** Estimate Basis */
             estimate_basis?: ("last" | "rolling_avg_3" | "rolling_avg_12" | "counterparty_balance") | null;
             /**
+             * Later Estimate
+             * @description with payment_amount: how payments after the next are estimated — statement_average (the average of the last later_window statements), same_cycle_last_year (the statement a year earlier, else the average) or fixed (the schedule's amount)
+             */
+            later_estimate?: ("statement_average" | "same_cycle_last_year" | "fixed") | null;
+            /**
+             * Later Window
+             * @description default 6
+             */
+            later_window?: number | null;
+            /**
              * Memo
              * @description free-text note
              */
@@ -7472,6 +7942,11 @@ export interface components {
              * @description who is paid or pays; required for a flat schedule without a memo
              */
             payee?: string | null;
+            /**
+             * Payment Amount
+             * @description a payment to a credit card with a statement closing day (decision 136): how much is paid — statement_balance (what the statement showed, less credits since), minimum_due (a recorded statement's minimum; else the schedule's amount), fixed (the schedule's amount, never more than the statement) or current_balance (the card's balance now). Null: the estimate basis sizes every payment. Omitted on an estimated payment to a card with a closing day: statement_balance
+             */
+            payment_amount?: ("statement_balance" | "minimum_due" | "fixed" | "current_balance") | null;
             /**
              * Propose
              * @description land a suggestion in the inbox for the user to decide instead of creating the schedule; for an agent acting on its own initiative (#436)
@@ -7532,6 +8007,16 @@ export interface components {
             /** Instances */
             instances: components["schemas"]["InstanceOut"][];
             /**
+             * Later Estimate
+             * @description with payment_amount: how payments after the next are estimated — statement_average (the average of the last later_window statements), same_cycle_last_year (the statement a year earlier, else the average) or fixed (the schedule's amount)
+             */
+            later_estimate?: ("statement_average" | "same_cycle_last_year" | "fixed") | null;
+            /**
+             * Later Window
+             * @description statements later_estimate averages; null = 6
+             */
+            later_window?: number | null;
+            /**
              * Matched Instances
              * @description Most recent 50 matched occurrences
              */
@@ -7553,6 +8038,11 @@ export interface components {
              * @description who is paid or pays (#534)
              */
             payee?: string | null;
+            /**
+             * Payment Amount
+             * @description a payment to a credit card with a statement closing day (decision 136): how much is paid — statement_balance (what the statement showed, less credits since), minimum_due (a recorded statement's minimum; else the schedule's amount), fixed (the schedule's amount, never more than the statement) or current_balance (the card's balance now). Null: the estimate basis sizes every payment
+             */
+            payment_amount?: ("statement_balance" | "minimum_due" | "fixed" | "current_balance") | null;
             /** Rrule */
             rrule: string;
             /** Source */
@@ -7606,6 +8096,16 @@ export interface components {
              */
             id: string;
             /**
+             * Later Estimate
+             * @description with payment_amount: how payments after the next are estimated — statement_average (the average of the last later_window statements), same_cycle_last_year (the statement a year earlier, else the average) or fixed (the schedule's amount)
+             */
+            later_estimate?: ("statement_average" | "same_cycle_last_year" | "fixed") | null;
+            /**
+             * Later Window
+             * @description statements later_estimate averages; null = 6
+             */
+            later_window?: number | null;
+            /**
              * Memo
              * @description free-text note (#534)
              */
@@ -7622,6 +8122,11 @@ export interface components {
              * @description who is paid or pays (#534)
              */
             payee?: string | null;
+            /**
+             * Payment Amount
+             * @description a payment to a credit card with a statement closing day (decision 136): how much is paid — statement_balance (what the statement showed, less credits since), minimum_due (a recorded statement's minimum; else the schedule's amount), fixed (the schedule's amount, never more than the statement) or current_balance (the card's balance now). Null: the estimate basis sizes every payment
+             */
+            payment_amount?: ("statement_balance" | "minimum_due" | "fixed" | "current_balance") | null;
             /** Rrule */
             rrule: string;
             /** Source */
@@ -7653,6 +8158,16 @@ export interface components {
             /** Estimate Basis */
             estimate_basis?: ("last" | "rolling_avg_3" | "rolling_avg_12" | "counterparty_balance") | null;
             /**
+             * Later Estimate
+             * @description with payment_amount: how payments after the next are estimated — statement_average (the average of the last later_window statements), same_cycle_last_year (the statement a year earlier, else the average) or fixed (the schedule's amount)
+             */
+            later_estimate?: ("statement_average" | "same_cycle_last_year" | "fixed") | null;
+            /**
+             * Later Window
+             * @description default 6
+             */
+            later_window?: number | null;
+            /**
              * Memo
              * @description "" clears it
              */
@@ -7667,11 +8182,21 @@ export interface components {
              * @description "" clears it (a memo must remain)
              */
             payee?: string | null;
+            /**
+             * Payment Amount
+             * @description a payment to a credit card with a statement closing day (decision 136): how much is paid — statement_balance (what the statement showed, less credits since), minimum_due (a recorded statement's minimum; else the schedule's amount), fixed (the schedule's amount, never more than the statement) or current_balance (the card's balance now). Null: the estimate basis sizes every payment. Sending payment_amount, later_estimate and later_window all null turns statement-cycle sizing off
+             */
+            payment_amount?: ("statement_balance" | "minimum_due" | "fixed" | "current_balance") | null;
             /** Rrule */
             rrule?: string | null;
         };
         /** SearchPage */
         SearchPage: {
+            /**
+             * Did You Mean
+             * @description on a search of one word that matched nothing: the query with that word replaced by a word one typo away that does occur (the search itself stays exact; `word~` asks for typo tolerance)
+             */
+            did_you_mean?: string | null;
             /** Items */
             items: components["schemas"]["TransactionOut"][];
             /** Limit */
@@ -7968,13 +8493,18 @@ export interface components {
              */
             due_date?: string | null;
             /**
+             * Minimum Due
+             * @description the statement's minimum payment: a schedule that pays the minimum takes it
+             */
+            minimum_due?: number | string | null;
+            /**
              * Statement Balance
              * @description as the statement prints it: the amount owed, positive
              */
             statement_balance: number | string;
             /**
              * Statement Date
-             * @description the statement's closing date (today or earlier)
+             * @description the statement's closing date (today or earlier); checked against the card's statement_close_day
              */
             statement_date?: string | null;
             /**
@@ -7989,16 +8519,26 @@ export interface components {
             amount: string | null;
             /**
              * Basis
-             * @description where the amount comes from: fixed, an estimate basis (last, rolling_avg_3, rolling_avg_12, counterparty_balance = the card's current balance), override (a pinned instance: the amount is yours) or statement (a recorded card statement balance, decision 80)
+             * @description where the amount comes from: fixed, an estimate basis (last, rolling_avg_3, rolling_avg_12, counterparty_balance = the card's current balance), override (a pinned instance: the amount is yours), statement (a recorded card statement, decision 80), or a card payment sized from its statement cycle (decision 136): statement_close (the statement has closed; what remains of it), cycle_projection (the next statement, projected to its close), statement_average or same_cycle_last_year (later payments)
              * @enum {string}
              */
-            basis: "fixed" | "last" | "rolling_avg_3" | "rolling_avg_12" | "counterparty_balance" | "override" | "statement";
+            basis: "fixed" | "last" | "rolling_avg_3" | "rolling_avg_12" | "counterparty_balance" | "override" | "statement" | "statement_close" | "cycle_projection" | "statement_average" | "same_cycle_last_year";
             certainty?: components["schemas"]["CertaintyOut"] | null;
+            /**
+             * Close Day Hint
+             * @description set when the statement_date disagrees with the card's statement_close_day: what to set it to. Nothing is changed for you
+             */
+            close_day_hint?: string | null;
             /**
              * Date
              * Format: date
              */
             date: string;
+            /**
+             * Minimum Due
+             * @description the recorded statement's minimum payment, when given
+             */
+            minimum_due?: string | null;
             /**
              * Occurrence Date
              * @description the rule slot the instance fills; differs from date after an edit
@@ -8041,6 +8581,50 @@ export interface components {
              * Format: uuid
              */
             transaction_id: string;
+        };
+        /**
+         * StatementCycleOut
+         * @description A credit card's statement cycle (#674, decision 136).
+         */
+        StatementCycleOut: {
+            /** Account */
+            account: string;
+            /**
+             * Statement Close Day
+             * @description the closing day set on the card
+             */
+            statement_close_day: number | null;
+            /**
+             * Statements
+             * @description the latest statements on record, newest first (needs a closing day)
+             */
+            statements: components["schemas"]["StatementOut"][];
+            /**
+             * Suggested Close Day
+             * @description the closing day the card's history (or a recorded statement date) suggests; never applied for you — set statement_close_day with PATCH
+             */
+            suggested_close_day: number | null;
+            /** Suggestion Detail */
+            suggestion_detail: string;
+            /**
+             * Suggestion Source
+             * @enum {string}
+             */
+            suggestion_source: "history" | "statement" | "none";
+        };
+        /** StatementOut */
+        StatementOut: {
+            /**
+             * Close
+             * Format: date
+             * @description the statement's closing date
+             */
+            close: string;
+            /**
+             * Owed
+             * @description the balance owed at the close, posted rows only
+             */
+            owed: string;
         };
         /** SubscriptionCreate */
         SubscriptionCreate: {
@@ -8223,6 +8807,34 @@ export interface components {
             source: string | null;
             /** Stale */
             stale: boolean;
+            /** Symbol */
+            symbol: string;
+        };
+        /**
+         * SymbolSettingIn
+         * @description One symbol's price settings (#686). ``aliases`` maps a provider to
+         *     the symbol's ticker there (e.g. ``{"eodhd": "VOD.LSE"}``); an empty
+         *     alias clears it. Both at their defaults remove the setting.
+         */
+        SymbolSettingIn: {
+            /** Aliases */
+            aliases?: {
+                [key: string]: string;
+            };
+            /**
+             * Skip Providers
+             * @default false
+             */
+            skip_providers: boolean;
+        };
+        /** SymbolSettingOut */
+        SymbolSettingOut: {
+            /** Aliases */
+            aliases: {
+                [key: string]: string;
+            };
+            /** Skip Providers */
+            skip_providers: boolean;
             /** Symbol */
             symbol: string;
         };
@@ -8520,8 +9132,6 @@ export interface components {
             date: string;
             /** Description */
             description: string | null;
-            /** Escalated At */
-            escalated_at?: string | null;
             /**
              * Has Linked Originals
              * @default false
@@ -8541,7 +9151,7 @@ export interface components {
             money_put_in: boolean;
             /**
              * Needs Review
-             * @description true when the row is in the unreviewed set (#175): the same test as GET /transactions?reviewed=false and the review count
+             * @description true when the row needs review (decision 141): the same test as GET /transactions?needs_review=true and the review counts
              */
             needs_review: boolean;
             /** Origin */
@@ -8554,8 +9164,11 @@ export interface components {
             remainder_amount?: string | null;
             /** Reverses Id */
             reverses_id: string | null;
-            /** Reviewed At */
-            reviewed_at?: string | null;
+            /**
+             * Review Reason
+             * @description why the row needs review, null when it does not: uncategorized (a bank-sync row with no category, or a split line with none; clears when it is categorized) or reconciliation_adjustment (the difference a reconcile posted; clears when it is recategorized or split away from expenses.reconciliation_adjustments, or accepted with POST /transactions/{id}/accept-adjustment)
+             */
+            review_reason?: ("uncategorized" | "reconciliation_adjustment") | null;
             /** Schedule Id */
             schedule_id?: string | null;
             /**
@@ -8661,8 +9274,6 @@ export interface components {
             date: string;
             /** Description */
             description: string | null;
-            /** Escalated At */
-            escalated_at?: string | null;
             /**
              * Has Linked Originals
              * @default false
@@ -8682,7 +9293,7 @@ export interface components {
             money_put_in: boolean;
             /**
              * Needs Review
-             * @description true when the row is in the unreviewed set (#175): the same test as GET /transactions?reviewed=false and the review count
+             * @description true when the row needs review (decision 141): the same test as GET /transactions?needs_review=true and the review counts
              */
             needs_review: boolean;
             /** Origin */
@@ -8691,8 +9302,11 @@ export interface components {
             payee: string | null;
             /** Remainder Amount */
             remainder_amount?: string | null;
-            /** Reviewed At */
-            reviewed_at?: string | null;
+            /**
+             * Review Reason
+             * @description why the row needs review, null when it does not: uncategorized (a bank-sync row with no category, or a split line with none; clears when it is categorized) or reconciliation_adjustment (the difference a reconcile posted; clears when it is recategorized or split away from expenses.reconciliation_adjustments, or accepted with POST /transactions/{id}/accept-adjustment)
+             */
+            review_reason?: ("uncategorized" | "reconciliation_adjustment") | null;
             /** Schedule Id */
             schedule_id?: string | null;
             /**
@@ -10000,6 +10614,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StartingBalanceResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    statement_cycle_accounts__account_id__statement_cycle_get: {
+        parameters: {
+            query?: {
+                /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
+                withhold?: string[] | null;
+            };
+            header?: never;
+            path: {
+                account_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StatementCycleOut"];
                 };
             };
             /** @description Validation Error */
@@ -11532,6 +12180,26 @@ export interface operations {
             };
         };
     };
+    holdings_portfolio_holdings_portfolio_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortfolioOut"];
+                };
+            };
+        };
+    };
     import_csv_import_csv_post: {
         parameters: {
             query?: never;
@@ -12747,6 +13415,125 @@ export interface operations {
             };
         };
     };
+    list_symbol_settings_prices_symbols_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SymbolSettingOut"][];
+                };
+            };
+        };
+    };
+    put_symbol_settings_prices_symbols__symbol__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                symbol: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SymbolSettingIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SymbolSettingOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_symbol_settings_prices_symbols__symbol__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                symbol: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SymbolSettingOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    probe_price_provider_prices_test_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PriceTestIn"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PriceTestOut"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_rules_rules_get: {
         parameters: {
             query?: {
@@ -13693,7 +14480,7 @@ export interface operations {
                 /** @description category subtree, e.g. expenses.dining */
                 category?: string | null;
                 payee?: string | null;
-                /** @description search: words all found in payee, description or memo ("a phrase", -word excludes; payee:, desc:, memo: scope one; payee:py_... is that payee), plus account:, category:, amount:>100 (magnitude; is:debit or is:credit for direction), amount:10..20, date:2026-10, date:2026-01..2026-03, status:pending,posted, is:unreviewed. A malformed clause is a 422. */
+                /** @description search: words all found in payee, description or memo ("a phrase", -word excludes, word~ allows one typo; payee:, desc:, memo: scope one; payee:py_... is that payee), plus account:, category:, amount:>100 (magnitude; is:debit or is:credit for direction), amount:10..20, date:2026-10, date:2026-01..2026-03, status:pending,posted, is:needs-review. A malformed clause is a 422. */
                 q?: string | null;
                 start?: string | null;
                 end?: string | null;
@@ -13701,8 +14488,8 @@ export interface operations {
                 include_collapsed?: boolean;
                 /** @description fill category_source from the audit trail (register badges) */
                 with_category_provenance?: boolean;
-                /** @description false = the unreviewed set (#175); true = its complement */
-                reviewed?: boolean | null;
+                /** @description true = the rows that need review (decision 141: a bank-sync row with no category, an unaccepted reconciliation adjustment); false = every other row */
+                needs_review?: boolean | null;
                 limit?: number;
                 offset?: number;
                 /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
@@ -13767,41 +14554,6 @@ export interface operations {
             };
         };
     };
-    mark_reviewed_transactions_mark_reviewed_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["MarkReviewed"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: number;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     present_transactions_present_post: {
         parameters: {
             query?: never;
@@ -13840,7 +14592,6 @@ export interface operations {
             query?: {
                 limit?: number;
                 account?: string | null;
-                include_guidance?: boolean;
                 /** @description Fields to leave out of this response: any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals and balances stay exact). Repeat the parameter or comma-separate. Nothing is withheld otherwise; the response names what it withheld in `withheld`. */
                 withhold?: string[] | null;
             };
@@ -13856,9 +14607,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["ReviewBatch"];
                 };
             };
             /** @description Validation Error */
@@ -14012,6 +14761,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["TransactionDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    accept_adjustment_transactions__tx_id__accept_adjustment_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                tx_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["AcceptAdjustmentIn"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcceptAdjustmentOut"];
                 };
             };
             /** @description Validation Error */

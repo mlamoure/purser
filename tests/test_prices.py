@@ -1303,3 +1303,34 @@ def test_a_new_provider_widens_both_source_checks(migrated_engine: Engine) -> No
     assert "'tiingo'" in checks["price_answered_source_values"]
     doc = providers.__doc__ or ""
     assert "security_prices.source" in doc and "price_answered.source" in doc
+
+
+class TestStatusRuns:
+    """Settings, Market data (#678): when the job last ran and next runs."""
+
+    def test_next_run_is_the_next_fetch_time_in_utc(self) -> None:
+        from datetime import UTC, datetime
+
+        day = datetime(2026, 3, 2, tzinfo=UTC)
+        at = day.replace(hour=prices.FETCH_HOUR_UTC, minute=prices.FETCH_MINUTE_UTC)
+        assert prices.next_run_at(at - timedelta(minutes=1)) == at
+        assert prices.next_run_at(at) == at + timedelta(days=1)
+        assert prices.next_run_at(at + timedelta(hours=3)) == at + timedelta(days=1)
+
+    def test_last_run_is_the_newest_fetch_run(self, broker: str, admin_client: TestClient) -> None:
+        _tiingo(admin_client)
+        symbol = _symbol()
+        _hold(broker, symbol, "1", days_ago=2)
+        prices.run_fetch(today=today(), client=_client(_windows([])))
+        status = admin_client.get("/prices/status").json()
+        with db.get_sessionmaker()() as session:
+            newest = session.execute(
+                select(AuditLog.at)
+                .where(AuditLog.action == "price.fetch")
+                .order_by(AuditLog.at.desc())
+                .limit(1)
+            ).scalar_one()
+        from datetime import datetime
+
+        assert datetime.fromisoformat(status["last_run_at"]) == newest
+        assert status["next_run_at"] is not None

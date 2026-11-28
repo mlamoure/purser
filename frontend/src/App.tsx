@@ -11,16 +11,24 @@ import Wizard from "./pages/Wizard";
 import Dashboard from "./pages/Dashboard";
 import Accounts from "./pages/Accounts";
 import AccountRegister from "./pages/AccountRegister";
+import Search from "./pages/Search";
 import Schedules from "./pages/Schedules";
 import ImportQif from "./pages/ImportQif";
 import Selection from "./pages/Selection";
-import SettingsLayout, { SettingsIndex, settingsSection } from "./pages/settings/Layout";
+import SettingsLayout, {
+  SettingsIndex,
+  SettingsTabs,
+  settingsSection,
+  settingsTab,
+} from "./pages/settings/Layout";
 import General from "./pages/settings/General";
 import Connections from "./pages/settings/Connections";
 import Categories from "./pages/settings/Categories";
 import Rules from "./pages/settings/Rules";
+import AiCategorization from "./pages/settings/AiCategorization";
 import Memories from "./pages/settings/Memories";
-import Prices from "./pages/settings/Prices";
+import MarketData from "./pages/settings/MarketData";
+import Holdings from "./pages/Holdings";
 import AgentsApi from "./pages/settings/AgentsApi";
 import Security from "./pages/settings/Security";
 import Users from "./pages/settings/Users";
@@ -29,6 +37,8 @@ import AuditLog from "./pages/settings/AuditLog";
 // Browser-tab names. Account registers name their own tab after the account
 // (AccountRegister), so only the list at exactly /accounts is named here.
 const PAGE_TITLES: [string, string][] = [
+  ["/holdings", "Holdings"],
+  ["/search", "Search"],
   ["/schedules", "Scheduled transactions"],
   ["/import", "Import"],
   ["/selection", "Selected transactions"],
@@ -39,7 +49,12 @@ function pageTitle(pathname: string): string | null {
   if (pathname === "/accounts") return "Accounts";
   if (pathname === "/settings" || pathname.startsWith("/settings/")) {
     const section = settingsSection(pathname);
-    return section ? `${section.label} · Settings` : "Settings";
+    if (!section) return "Settings";
+    // A tab other than the section's own page names itself first (#694).
+    const tab = settingsTab(pathname);
+    return tab?.path
+      ? `${tab.label} · ${section.label} · Settings`
+      : `${section.label} · Settings`;
   }
   const hit = PAGE_TITLES.find(([prefix]) => pathname === prefix || pathname.startsWith(`${prefix}/`));
   return hit ? hit[1] : null;
@@ -52,9 +67,13 @@ const MOVED_ROUTES: [string, string][] = [
   ["/config", "/settings"],
   ["/config/simplefin", "/settings/connections"],
   ["/config/categories", "/settings/categories"],
-  ["/config/rules", "/settings/rules"],
+  ["/config/rules", "/settings/categories/rules"],
   ["/config/memories", "/settings/agent-memory"],
-  ["/config/prices", "/settings/prices"],
+  ["/config/prices", "/settings/market-data"],
+  // Settings, Prices was renamed Market data (#678).
+  ["/settings/prices", "/settings/market-data"],
+  // Rules became a tab of Settings, Categories (#694).
+  ["/settings/rules", "/settings/categories/rules"],
   ["/config/settings", "/settings/general"],
   ["/connections", "/settings/connections"],
   ["/tokens", "/settings/agents"],
@@ -124,6 +143,8 @@ export default function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/accounts" element={<Accounts />} />
           <Route path="/accounts/:accountId" element={<AccountRegister />} />
+          <Route path="/holdings" element={<Holdings />} />
+          <Route path="/search" element={<Search />} />
           <Route path="/schedules" element={<Schedules />} />
           <Route path="/import" element={<ImportQif />} />
           <Route path="/selection" element={<Selection />} />
@@ -131,10 +152,13 @@ export default function App() {
             <Route index element={<SettingsIndex />} />
             <Route path="general" element={<General />} />
             <Route path="connections" element={<Connections />} />
-            <Route path="categories" element={<Categories />} />
-            <Route path="rules" element={<Rules />} />
+            <Route path="categories" element={<SettingsTabs />}>
+              <Route index element={<Categories />} />
+              <Route path="rules" element={<Rules />} />
+              <Route path="ai" element={<AiCategorization />} />
+            </Route>
             <Route path="agent-memory" element={<Memories />} />
-            <Route path="prices" element={<Prices />} />
+            <Route path="market-data" element={<MarketData />} />
             <Route path="agents" element={<AgentsApi />} />
             <Route path="security" element={<Security />} />
             <Route path="users" element={<Users />} />

@@ -102,8 +102,11 @@ its current feed", or send `"replace_feed": true` with an admin token. The
 answer then names the feed it replaced, in the dry run too.
 
 Mapping cannot be undone from the app. To remove an account that was mapped
-with the wrong type, use the `delete-account` command described in the
-[CLI reference](../../reference/cli/), then map the bank account again.
+with the wrong type, close it first (**Close…** in its register, or
+`POST /accounts/{id}/close`; closing unmaps it), because `delete-account`
+refuses an account attached to a feed. Then use the `delete-account` command
+described in the [CLI reference](../../reference/cli/), and map the bank
+account again.
 
 Until you decide, the Dashboard lists each such account under **bank accounts
 not in Purser yet**, with a link that opens its row.
@@ -191,7 +194,7 @@ code and, where it applies, the bank login or account it concerns:
 A sync whose fetch carries a `con.*` or `act.*` error, or `gen.auth`, sets the
 connection's status to `warning`; the next clean fetch sets it back to
 `active`. `GET /connections` lists the latest fetch's errors as `last_issues`
-(code, message, `conn_id`, `account_id`) beside the plain messages in
+(`code`, `msg`, `conn_id`, `account_id`) beside the plain messages in
 `last_errors`, and a sync result carries the same `issues`. A server that still
 answers in version 1 sends messages without codes; they read as code `gen.`,
 and any of them sets `warning`.
@@ -238,7 +241,8 @@ curl -X POST "$PURSER_URL/connections/$CONNECTION_ID/refetch" \
   -d '{"start": "2026-08-10", "end": "2026-10-12", "accounts": ["assets.checking"]}'
 ```
 
-`end` defaults to today and may be at most 90 days after `start` (fetched in
+`end` defaults to today, and the range may cover at most 90 days, both dates
+included (fetched in
 45-day pages, each one of the day's 24 fetches); `accounts`
 are ledger paths and default to every mapped account. Agents use the MCP tool
 `refetch_feed`. Rows already in the ledger are skipped, so a repeat run imports
@@ -426,11 +430,11 @@ bases they are applied to.
 
 Some brokerage feeds deliver the account's cash but no holdings at all. Switch
 such an account's **holdings source** to `manual` (admin,
-`PATCH /accounts/{id}` with `{"holdings_source": "manual"}`) and record its
-positions by hand: the feed keeps importing the cash, stops recording holdings
+`PATCH /accounts/{id}` with `{"holdings_source": "manual"}`) and enter its
+positions in Purser: the feed keeps importing the cash, stops recording holdings
 for that account (`holdings_skipped_manual` in the sync result), and the
 positions you record are priced daily and added to the balance the same way.
-See [Track holdings by hand](../../how-to/manual-holdings/).
+See [Enter holdings in Purser](../../how-to/manual-holdings/).
 
 ## Watch accounts converge
 
@@ -467,7 +471,7 @@ positions you track by hand: an admin can say its feed balance is its cash
 (`PATCH /accounts/{id}` with `{"feed_balance_is_cash": true}`, or **Feed
 balance is cash** on the account page), and the account is then checked like a
 checking account. See
-[Track holdings by hand](../../how-to/manual-holdings/#check-a-cash-sweeps-balance).
+[Enter holdings in Purser](../../how-to/manual-holdings/#check-a-cash-sweeps-balance).
 
 ## Pin an account's drift basis
 
@@ -476,7 +480,9 @@ When an account's history is short or misleading, pin its basis by hand: the
 Purser learned) and the two pins. Over the API, an admin sends
 `PATCH /accounts/{id}` with `{"drift_basis_override": "posted_only"}` or
 `"pending_inclusive"`; `null` clears the pin and absent leaves it alone. Only
-checking, savings, cash and credit-card accounts take a pin (the drift check
+checking, savings, cash and credit-card accounts, and a brokerage account
+whose holdings are entered in Purser and whose `feed_balance_is_cash` is on,
+take a pin (the drift check
 runs on nothing else), and the change is audited.
 
 A pinned basis wins over the learned one everywhere it is reported:

@@ -392,7 +392,24 @@ _WORDS = [
 _PAYEES = [None, "Blue Cup", "Whole Foods", "Café Rosa", "7-Eleven"]
 _MEMOS = [None, "team lunch", "refund pending", "Coffee beans", "gift"]
 _TERMS = st.sampled_from(
-    ["amazon", "COFFEE", "whole", "café", "ü", "#12", "1", "cup", "lunch", "7-eleven", "東京"]
+    [
+        "amazon",
+        "COFFEE",
+        "whole",
+        "café",
+        "ü",
+        "#12",
+        "1",
+        "cup",
+        "lunch",
+        "7-eleven",
+        "東京",
+        "amazn",  # one typo away from words in the corpus
+        "cofee",
+        "luncj",
+        "wholesalr",
+        "ramne",
+    ]
 ) | st.text(alphabet="amzoncfé ÜW1#-", min_size=1, max_size=4)
 
 
@@ -407,6 +424,8 @@ def _queries(draw: st.DrawFn) -> str:
         body = f'"{term}"' if quoted else term.replace(" ", "")
         if not body.strip('"'):
             body = "x"
+        if not quoted and draw(st.booleans()):
+            body += "~"  # typo tolerance (phase 2)
         clauses.append(("-" if draw(st.booleans()) and clauses else "") + scope + body)
     return " ".join(clauses)
 
@@ -535,6 +554,7 @@ class TestParity:
             ("memo:refund -payee:blue", None, None, False, 0, 10),
             ("cup -lunch", None, None, False, 0, 10),
             ("payee:rosa", ["pending", "posted", "void"], None, True, 0, 10),
+            ("cofee~ -luncj~", None, None, False, 0, 10),
         ],
     )
     def test_the_cache_engine_is_a_filter_of_the_listing(
@@ -619,13 +639,16 @@ def _bench_ledger(conn: object, n: int) -> tuple[uuid.UUID, list[str]]:
     accounts = [uuid.uuid4() for _ in range(20)]
     categories = [uuid.uuid4() for _ in range(10)]
     execute(
-        text("INSERT INTO accounts (id, name, type, path) VALUES (:id, :n, :t, CAST(:p AS ltree))"),
+        text(
+            "INSERT INTO accounts (id, name, type, path, is_virtual) "
+            "VALUES (:id, :n, :t, CAST(:p AS ltree), :v)"
+        ),
         [
-            {"id": a, "n": f"Bench {i}", "t": "checking", "p": f"assets.b{i}"}
+            {"id": a, "n": f"Bench {i}", "t": "checking", "p": f"assets.b{i}", "v": False}
             for i, a in enumerate(accounts)
         ]
         + [
-            {"id": c, "n": f"Cat {i}", "t": "category_expense", "p": f"expenses.c{i}"}
+            {"id": c, "n": f"Cat {i}", "t": "category_expense", "p": f"expenses.c{i}", "v": True}
             for i, c in enumerate(categories)
         ],
     )
@@ -744,3 +767,57 @@ def test_search_cache_benchmark(
             )
     finally:
         reset_db(migrated_engine)
+
+
+class TestTypos:
+    """``word~`` (phase 2): the cache finds every row with a word one edit
+    away, by generated spellings or, for a large alphabet, by comparing
+    every word of a nearby length — the same rows either way."""
+
+    def test_both_neighbour_searches_agree(
+        self, clean_db: None, cache: None, migrated_engine: Engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with migrated_engine.begin() as conn:
+            rows = {
+                "STARBUCKS #12": _insert(conn, "STARBUCKS #12"),
+                "starbuck coffee": _insert(conn, "starbuck coffee"),
+                "STARBUKS reserve": _insert(conn, "STARBUKS reserve"),
+                "starbucks2 store": _insert(conn, "starbucks2 store"),  # a digit: not a word
+                "東京都 ラーメン": _insert(conn, "東京都 ラーメン"),
+            }
+        textcache.warm()
+        generated = _matches("starbucks~")
+        assert generated == {
+            rows["STARBUCKS #12"],
+            rows["starbuck coffee"],
+            rows["STARBUKS reserve"],
+            rows["starbucks2 store"],  # by substring, as without the ~
+        }
+        assert _matches("starbuk~") >= {rows["STARBUKS reserve"], rows["starbuck coffee"]}
+        monkeypatch.setattr(textcache, "MAX_ALPHABET", 1)
+        assert _matches("starbucks~") == generated
+        assert _matches("東亰都~") == {rows["東京都 ラーメン"]}
+
+    def test_did_you_mean(self, clean_db: None, cache: None, migrated_engine: Engine) -> None:
+        with migrated_engine.begin() as conn:
+            for _ in range(3):
+                _insert(conn, "STARBUCKS #12")
+            _insert(conn, "STARBUCKZ")
+        store = textcache.warm()
+        with get_sessionmaker()() as session:
+            assert ledger_service.did_you_mean(session, "starbuks") == "starbucks"
+            assert ledger_service.did_you_mean(session, "desc:Starbuks date:2026") == (
+                "desc:starbucks date:2026"
+            )
+            assert ledger_service.did_you_mean(session, "starbucks") is None  # found
+            assert ledger_service.did_you_mean(session, "starbuks coffee") is None  # two words
+            assert ledger_service.did_you_mean(session, "-starbuks") is None
+            assert ledger_service.did_you_mean(session, "memo:starbuks") is None  # not in memos
+            assert ledger_service.did_you_mean(session, "zzzzzz") is None
+            assert ledger_service.did_you_mean(session, "paye:x") is None  # malformed
+            session.rollback()
+        textcache.reset()
+        with get_sessionmaker()() as session:
+            assert ledger_service.did_you_mean(session, "starbuks") is None  # no cache
+            session.rollback()
+        del store

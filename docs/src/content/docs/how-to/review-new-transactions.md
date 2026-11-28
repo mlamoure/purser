@@ -1,154 +1,111 @@
 ---
-title: Review new transactions
-description: Rows that arrive without human eyes form an unreviewed set over your registers — how to work through it yourself, with an agent, or automatically.
+title: Transactions that need review
+description: Purser flags a transaction only when there is something to fix — a bank-sync row with no category, or a reconciliation adjustment — and the flag clears when you fix it.
 ---
 
-Some rows land in your ledger without anyone looking at them: transactions the
-SimpleFIN feed imports, and transfers Purser merges on its own. Those form the
-**unreviewed set**.
+Purser flags a transaction as **needs review** only when there is a reason,
+and it tells you which:
 
-It is a filter over your existing registers, not a second inbox. Purser
-deliberately replaced its review queue with per-account registers, and this
-does not bring the queue back — a row is simply flagged until something looks
-at it.
+- **No category.** A row the bank feed (SimpleFIN) brought in has no
+  category: `expenses.uncategorized` or `income.uncategorized`, on the row or
+  on a line of a split.
+- **Reconciliation adjustment.** The difference Purser posted when you
+  [reconciled an account](../../how-to/reconcile-an-account/) and your
+  statement did not agree with the ledger.
 
-## What is in the set
+Nothing else is ever flagged. Rows you type in, rows your agent writes, QIF
+and CSV files you import, starting balances, brokerage balance adjustments,
+changes in an asset's value, merged transfers and upcoming rows a schedule
+expects never need review. Who or what wrote a row does not matter either: a
+bank row your rule or Purser's payee memory already filed is as done as one
+you filed yourself.
 
-Only rows that arrived unattended:
+The flag is not a mark someone sets. Purser reads it from the row every time,
+so it clears the moment the reason is gone, and nothing needs to be marked
+as reviewed.
 
-- transactions imported from the **feed**;
-- transfers Purser **merged automatically**;
-- replacements produced by a **rule**;
-- adjustments Purser posts when you
-  [reconcile an account](../../how-to/reconcile-an-account/), whoever asked for
-  the reconcile.
+## Rows with no category
 
-Your own imports are not included. A QIF or CSV file you chose to import is
-not something you need reminding to review, so a 6,000-row Quicken import adds
-nothing to the set. Neither do rows your agent writes: each is attributed to its
-token in the audit log and marked agent-made in the register.
+A bank-sync row needs review while it has no category. It clears as soon as
+anything gives it one: a rule, Purser's memory of the payee, the AI
+categorizer, you, or your agent. A split clears when none of its lines is
+uncategorized.
 
-Upcoming rows a schedule expects are not in it either. An expected bill or
-paycheck is a forecast, not something that happened; when the bank row it
-predicted arrives, that row is the one to review.
+The flag follows the bank line, not the row id. If you edit a posted bank row
+(its description, say) without giving it a category, the corrected row still
+needs review; once the bank posts a pending row, the pending row drops out and
+the posted row is the one that counts.
 
-Everything that existed before this feature shipped counts as reviewed, so it
-starts quiet and only ever concerns rows that arrive from now on.
+When you file the same payee over and over, write a rule so it never comes
+back: see [Write deterministic rules](../../how-to/rules/).
 
-## Rows leave the set on their own
+You can turn this reason off on the **Categories** tab of **Settings ->
+Categories** (the `review_uncategorized` setting,
+`PURSER_REVIEW_UNCATEGORIZED`). Rows with no category then stay
+uncategorized without a flag; reconciliation adjustments are still flagged.
 
-You usually do not have to mark anything. A row clears when **anything you or
-your agent does touches it**: editing it, posting it, confirming a transfer,
-confirming a match or matching it to an expected row by hand. The action *is*
-the review.
+If you use the AI categorizer, its confidence floor decides how sure it must
+be before it files a row (`ai_min_confidence`, 0.7 by default; **Minimum
+confidence** on the **AI categorization** tab of **Settings -> Categories**,
+as a percentage). A guess below the floor is not applied: the row stays
+uncategorized, so it needs review. See
+[Configuration](../../reference/configuration/).
 
-Automation is different. A rule that recategorizes a row, the nightly
-categorization pass, or a match Purser confirms on its own leaves it needing
-review — automation touching a row is not the same as someone checking it.
-That is the whole point of the flag.
+## Reconciliation adjustments
 
-A review **follows the bank line**. When a pending row you reviewed (or
-confirmed a match on) posts, the posted row arrives already reviewed — who
-reviewed it, when, the note and any flag come along — as long as it carries the
-same category you saw on the pending. If the posted row lands in a different
-category, it needs review again, because that category is something nobody has
-looked at. A row the bank posts after you never reviewed its pending stays in
-the set. A merged transfer is a new judgement of its own, so merging rows into
-a transfer never carries their review.
+When a reconcile posts an adjustment to
+`expenses.reconciliation_adjustments`, that row needs review until you deal
+with it in one of two ways:
 
-## Working through it
+- **Explain it.** If you find what the difference was (a fee, a missed
+  deposit), recategorize the row, or split it into what it really was. Once
+  no part of it is on `expenses.reconciliation_adjustments`, it no longer
+  needs review.
+- **Accept it.** If the difference is right as it is, accept it: in the web
+  app, **Accept…** on the row in the account's register. The
+  acceptance is recorded on the reconciliation, with who accepted it and when,
+  and in the audit log (`reconciliation.adjustment_accepted`), with your note
+  if you give one.
 
-In the UI, unreviewed rows carry a `needs review` badge in their register, and
-the dashboard shows how many are outstanding. Both come from the same
-server-side check, so they always agree. Over the REST API, each row from
-`GET /transactions` (and a single transaction's detail) carries it as
-`needs_review`; read that rather than treating a missing `reviewed_at` as
-unreviewed, because rows outside the set never get a mark.
+A change in a hand-valued asset's value (a reconcile of a property account) is
+never flagged.
 
-From an agent, `review_batch` returns the next rows **with everything needed
-to judge them inline** — current category and who chose it, any transfer on
-the row, the raw-versus-friendly payee, what automation did — plus a short
-checklist. There are no per-row round-trips by design; a reviewer that has to
-fetch context row by row will skip it.
+## Finding them
 
-Then `mark_reviewed` closes the loop, in bulk and idempotently.
+In the web app, a row that needs review carries a badge in its register that
+says why (**needs review · no category** or **needs review · reconciliation
+adjustment**), and **Needs review only** narrows the register to those rows.
+The dashboard's **Needs attention** counts them by reason and account, and
+links each account to its register narrowed that way.
 
-### Check what context was available
+Over the REST API:
 
-Every batch reports a `context` map saying which surfaces it could actually
-offer. If something a decision needed was unavailable, that batch's rows were
-reviewed with less information than they look like they had — so the guidance
-says to **escalate rather than clear** in that case.
+| What | How |
+| --- | --- |
+| Is this row flagged, and why | `needs_review` and `review_reason` (`uncategorized` or `reconciliation_adjustment`, else null) on every row from `GET /transactions` and `GET /transactions/{id}` |
+| Only the flagged rows | `GET /transactions?needs_review=true` (`false` is every other row) |
+| The same in a search | `is:needs-review` (see [Search transactions](../../how-to/search-transactions/)) |
+| Counts by reason and account | `GET /transactions/review-summary` |
+| The rows with what it takes to fix them | `GET /transactions/review-batch` |
+| Accept an adjustment | `POST /transactions/{id}/accept-adjustment`, optionally with `{"note": "..."}` (write scope; repeating it changes nothing) |
 
-### Escalating
+Read `needs_review` rather than working it out yourself: the server applies the
+one rule above, and every count uses the same rule.
 
-A reviewer that is unsure can mark a row reviewed **and** flag it for you.
-The row leaves the unreviewed set — no second queue appears — but shows a
-`flagged` badge and carries a note explaining why.
+## With an agent
 
-The clearest case is an ambiguous transfer: categorizing a row as
-`[account path]` names an account, not a specific row, so when two rows in
-that account could be its pair, the right move is to hand it back rather than
-guess.
-
-### Rows a securities trade holds
-
-A sale's cash on a hand-tracked brokerage account, and the bank's row a sale
-linked as its cash, are flagged `securities_trade` and carry `locked`, which
-names the trade (`event_id`) and its position (`position_id`). Such a row
-moves only with its trade, so recategorizing it or confirming it as a transfer
-is refused. Mark it reviewed if the trade is right; if it is wrong, reverse
-the trade's event (reopening a closed position first) and record it again.
-The batch's guidance says the same, so a later page fetched with
-`include_guidance=false` carries only the marker. See
-[Manual holdings](../../how-to/manual-holdings/).
-
-A row flagged `securities_trade` **without** `locked` was marked a securities
-trade by you, an agent or a rule: mark it reviewed if it is a buy or sell, or
-give it the right category. A row flagged `balance_adjustment` is Purser's
-post-sync true-up of a brokerage account's cash; mark it reviewed, or
-recategorize it if you know what the gap was. See
-[Mark brokerage buys and sells](../../how-to/brokerage-trades/).
-
-A row flagged `starting_balance` is what an account held before its first
-transaction, taken from the bank's reported balance. Mark it reviewed; Purser
-lowers it by itself when older history is imported, and it cannot be edited.
-See [Start an account from the bank's balance](../../how-to/starting-balance/).
-
-## Letting Purser review it for you
-
-If you have configured an AI provider, you can have the review pass run
-server-side instead of waiting for a connected agent. It is off by default and
-needs its own switch — configuring a provider grants nothing on its own.
-
-When enabled, it runs after each sync, clears what the context supports, and
-escalates the rest, so your attention lands on the residue rather than the
-whole set. It is capped per run, and a provider failure simply leaves rows
-unreviewed rather than breaking the sync.
-
-Rows it clears are recorded as `ai_review`, permanently distinguishable in the
-audit trail from a row you looked at yourself.
-
-## Nothing grows forever
-
-If reviewing lapses, rows older than `PURSER_REVIEW_MAX_AGE_DAYS` (90 by
-default) are auto-marked as `aged` by a nightly sweep. That is deliberately a
-different mark from a real review, so an audit reader can always tell which
-rows were actually examined — and the count is reported in your digest rather
-than clearing silently, because the sweep firing at all means review has
-lapsed.
-
-## Fixes that repeat should become rules
-
-The checklist ends with this and it is worth repeating: if you find yourself
-making the same correction over and over, that is a rule waiting to be
-written. These flags are the record of what your rules did **not** catch.
-
-See [Write deterministic rules](../../how-to/rules/).
+`describe` and `whats_new` say how many transactions need review and why.
+`review_batch` lists them, newest first, each with its reason, account, payee,
+description, amount, category and the financial notes that apply. Your agent
+categorizes a row with no category with `update_transaction` (and proposes a
+rule for a payee that keeps coming back), and either recategorizes, splits or
+accepts a reconciliation adjustment (`accept_reconciliation_adjustment`).
+Nothing needs to be marked afterwards: a fixed row drops off the list.
 
 ## See also
 
+- [Reconcile an account](../../how-to/reconcile-an-account/)
 - [Write deterministic rules](../../how-to/rules/)
-- [Manage transfers](../../how-to/transfers/)
+- [Use a local model](../../how-to/local-model/)
 - [`DESIGN.md`](https://github.com/mlamoure/purser/blob/main/DESIGN.md)
-  section 4 (review marks) and decision 47
+  section 4 (transactions that need review) and decision 141

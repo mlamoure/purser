@@ -1,6 +1,6 @@
 ---
 title: Track tax lots and equity awards
-description: Load a broker's lot list and award schedule into a hand-tracked position, record lot-aware sales and vests, and correct mistakes, through the REST API or MCP.
+description: Load a broker's lot list and award schedule into a position entered in Purser, record lot-aware sales and vests, and correct mistakes, through the REST API or MCP.
 ---
 
 A position you [track by hand](../../how-to/manual-holdings/) can also track
@@ -124,7 +124,7 @@ curl -X POST https://purser.example.com/positions/<position-id>/events \
     lot has no basis.
 
   A method never takes unallocated shares.
-- **Cash.** A sale's cash works exactly as on any hand-tracked position: the
+- **Cash.** A sale's cash works exactly as on any position entered in Purser: the
   double-count check, `transaction_id` links and `settle_on` all apply.
 - **What is recorded.** Each disposition records its basis, its share of the
   net proceeds, the realized gain when both are known, and the term. A
@@ -136,9 +136,10 @@ curl -X POST https://purser.example.com/positions/<position-id>/events \
   as a move to another broker. It is never a sale.
 
 Over MCP: `record_sale(..., lots=[{lot, quantity}])` or
-`record_sale(..., lot_method="fifo")`, and `record_transfer_out`. A `buy` on
-a lot-tracked position opens its own lot. Pass `"unallocated": true` to keep
-the shares outside every lot.
+`record_sale(..., lot_method="fifo")`, and `record_transfer_out`. No MCP tool
+records a buy. Over REST, a `buy` (`POST /positions/{id}/events` with
+`"kind": "buy"`) on a lot-tracked position opens its own lot. Pass
+`"unallocated": true` to keep its shares outside every lot.
 
 ## Load awards and record vests
 

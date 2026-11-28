@@ -91,7 +91,7 @@ async def reverse_value_change(transaction_id: str) -> dict[str, Any]:
     """Undo a change in a hand-valued asset's value (write scope): one made
     with record_value_change or posted by reconcile_account on a property
     account. transaction_id is the change's id (search_transactions on the
-    account shows it; a row flagged value_change in review_batch is one).
+    account shows it).
     Purser corrects it through a reversal pair, so the history keeps both;
     amount in the answer is what was taken back and balance the asset's value
     now. Record the right figure afterwards if there is one."""

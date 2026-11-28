@@ -56,7 +56,7 @@ CONVENTIONS = """\
   wait for review. Unmatch preserves evidence; reset returns to the rule while
   retaining the original and history.
 - A brokerage account takes its holdings from the feed or, once an admin
-  sets its holdings_source to manual, from positions recorded by hand:
+  sets its holdings_source to manual, from positions entered in Purser:
   record_position(account, symbol, quantity, as_of) is "I hold N shares as
   of D" (backdating re-values history from D), record_price(symbol, date,
   close) supplies a close, and a daily provider fetch may supply the rest.
@@ -74,8 +74,8 @@ CONVENTIONS = """\
   force_cash=true when that row is a different payment. dry_run=true answers
   without writing. reverse_position_event(event_id) undoes a wrong sale (its
   shares and cash; reopen_position(position_id) first when its position is
-  closed); a row review_batch marks securities_trade WITH `locked` is
-  corrected only that way. record_split(account, symbol, ratio,
+  closed); a trade's cash row (a securities trade a recorded trade holds)
+  is corrected only that way. record_split(account, symbol, ratio,
   effective_date) records a stock split ('2:1' forward, '1:10' reverse):
   every share becomes that many, each lot keeping its basis and term;
   cash_in_lieu is what the broker paid for the fractional share. Reversing
@@ -84,8 +84,8 @@ CONVENTIONS = """\
   row is a securities trade: update_transaction(securities_trade=true) marks
   it (never category=equity.securities) and proposes a trade_rule card; a
   category changes it back. Purser never guesses which rows are trades.
-  A "Balance adjustment" row (review_batch flag balance_adjustment) is
-  Purser's post-sync true-up of such an account's cash: mark_reviewed it.
+  A "Balance adjustment" row is Purser's post-sync true-up of such an
+  account's cash; leave it as it is.
 - A bank account the feed delivers is not in Purser until it is mapped;
   feed_status lists the waiting ones as not_connected. map_feed_accounts()
   answers Purser's plan for them (name, type, path, and why that type) and
@@ -95,11 +95,17 @@ CONVENTIONS = """\
   afterwards, so never apply a plan the person has not seen.
 - A bank feed brings about three months of rows and no balance from before
   them. Mapping a new account therefore posts a "Starting balance" row
-  (review_batch flag starting_balance) against equity.opening_balances, and
-  Purser lowers it by itself when older history is imported.
+  against equity.opening_balances, and Purser lowers it by itself when older
+  history is imported.
   set_starting_balance(account) gives one to a bank-fed account that lacks
   it (account_balance shows a large bank_snapshot.comparison.difference);
   never work the figure out yourself or use reconcile_account for it.
+- A transaction needs review only for a reason: a bank-sync row with no
+  category (categorize it; propose_rule when the payee recurs), or a
+  reconciliation adjustment (recategorize or split it to what it was, or
+  accept_reconciliation_adjustment when it is right as it is). describe
+  counts them; review_batch lists them with their reason. Rows you or the
+  user enter, QIF/CSV imports and Purser's own entries never need review.
 - forecast_balance carries `coverage`: schedules_active == 0 means the line
   is flat by construction, not a quiet month.
 - A purser:// URI a tool hands out (daily_uri, series_uri) is the full

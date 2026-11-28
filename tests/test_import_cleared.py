@@ -302,9 +302,9 @@ class TestQuickenCsv:
         from purser.db import get_sessionmaker
 
         with get_sessionmaker()() as s:
-            # A manual import never enters the unreviewed set (#175) — expected
+            # A manual import never needs review (decision 141) — expected
             # rows included.
-            assert review.unreviewed_count(s) == 0
+            assert review.counts(s)["total"] == 0
             # Past-dated uncleared rows are late items: one bill.late each, once.
             assert webhooks.emit_late_bills(s) == 2
             assert webhooks.emit_late_bills(s) == 0

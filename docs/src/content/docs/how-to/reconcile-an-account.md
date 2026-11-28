@@ -125,11 +125,13 @@ rejected.
 - **One adjustment, when needed.** A difference becomes one ordinary posted
   transaction dated on the statement date, in the category
   `expenses.reconciliation_adjustments`, with the payee "Balance
-  reconciliation". It lands in the
-  [unreviewed set](../../how-to/review-new-transactions/), so you see every
-  adjustment, including one an agent made. If you later find what it was,
-  recategorize it like any other transaction. The account balance does not
-  change.
+  reconciliation". It
+  [needs review](../../how-to/review-new-transactions/#reconciliation-adjustments),
+  so you see every adjustment, including one an agent made: if you find what
+  it was, recategorize or split it like any other transaction; if it is right
+  as it is, accept it (`POST /transactions/{id}/accept-adjustment`, MCP
+  `accept_reconciliation_adjustment`). Either way the account balance does
+  not change. A hand-valued asset's change in value never needs review.
 - **A clean reconcile too.** When the ledger already matches, nothing is
   posted, and the reconciliation is still recorded with an adjustment of 0.
 - **The marker.** The account's `reconciled_through` moves to the statement

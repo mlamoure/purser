@@ -49,15 +49,18 @@ Two consequences worth knowing:
 ## The three methods
 
 What a surface reports as an account's balance depends on the account type, and
-every response says which method produced it via `balance_method` (`method` on
-`GET /accounts/{id}/balance`).
+the answer says which method produced it: `method` in MCP `account_balance` and
+`balance_history` and in `GET /accounts/{id}/balance`, and `balance_method` on
+the REST account rows. MCP `list_accounts` and `describe` carry
+`balance_method` only on an account an overlay values (`valuation` or
+`postings+holdings`).
 
 | Method | Applies to | What it means |
 | --- | --- | --- |
-| `postings` | checking, savings, cash, credit cards | The stored running balance alone. A bank-fed account's first row is its [starting balance](../../how-to/starting-balance/): what it held before the first transaction the feed delivered. |
+| `postings` | checking, savings, cash, credit cards | The stored running balance alone. An account that starts from the bank's balance has its [starting balance](../../how-to/starting-balance/) as its first row: what it held before the first transaction the feed delivered. |
 | `postings` | property (a hand-valued asset) | Its value is a ledger: a change in value is an entry against `equity.revaluation`, and reconciling sets the value on a date. See [Track a house or other asset](../../how-to/hand-valued-assets/). |
 | `valuation` | loan | The latest valuation **replaces** the postings sum. A mortgage's feed reports a balance, not a transaction history, so the postings sum is not the debt. |
-| `postings+holdings` | brokerage | The latest holdings market value is **added to** the postings sum. Brokerage cash is real money the feed already reported, so it is not discarded. The holdings come from the feed's snapshots or, for an account [tracked by hand](../../how-to/manual-holdings/), from its positions priced at the newest close. |
+| `postings+holdings` | brokerage | The latest holdings market value is **added to** the postings sum. Brokerage cash is real money the feed already reported, so it is not discarded. The holdings come from the feed's snapshots or, for an account whose holdings are [entered in Purser](../../how-to/manual-holdings/), from its positions priced at the newest close. |
 
 When an overlay produced the answer, `balance_as_of` names the date of the
 valuation or snapshot used, and `postings_balance` carries the cash-only figure
@@ -217,9 +220,9 @@ The three questions and their tools:
 ten years back, and its `series_uri` serves that same window day by day.
 
 
-## Future value on Home
+## Future value on the Dashboard
 
-Home keeps current owned values prominent in the **Net worth** and **Assets**
+The Dashboard keeps current owned values prominent in the **Net worth** and **Assets**
 cards. When unvested awards exist, each card adds an **Including unvested**
 line; expand **Unvested stock** in Assets for valuation details. With no
 unvested awards, the cards show only the current values. The future totals add the current
@@ -231,7 +234,7 @@ Owned balances and the historical net-worth chart continue to count owned
 assets. Unvested awards enter owned holdings only when a vest is recorded.
 Closed accounts are excluded from the future view; hidden accounts count.
 
-If remaining units or a usable price are missing, Home labels the valuation
+If remaining units or a usable price are missing, the Dashboard labels the valuation
 incomplete and shows the known priced portion. Full future totals stay unknown.
 Stale prices are identified, with the oldest price date shown. Awards in a
 non-USD account require currency conversion and leave the total incomplete.

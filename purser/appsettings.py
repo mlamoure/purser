@@ -31,15 +31,24 @@ from purser.config import Settings, get_settings
 from purser.models import AppSetting
 
 SYNC_SCHEDULE_KEY = "sync_schedule"
-# Reviewer guidance is narrative text with no 1:1 Settings attribute, so it is
-# a standalone key like the sync schedule — and encrypted, because it is prose
-# the user wrote (issue #175).
-REVIEW_GUIDANCE_KEY = "review_guidance"
 # The price provider's API key (#390, decision 89) is a standalone secret key,
 # not an overlay: there is deliberately no PURSER_* env default for it. Purser
 # is the party that sends it, so it lives only here, Fernet-encrypted and
 # write-only like the other secrets.
 PRICE_API_KEY = "price_api_key"
+# The fallback provider's key (#686, decision 139), stored the same way.
+PRICE_FALLBACK_API_KEY = "price_fallback_api_key"
+# Which provider each stored key was entered for (#698). The two slots are
+# roles (the provider, the fallback); a key is sent only to the provider it
+# was entered for, so changing or swapping providers (Settings, PUT/DELETE
+# /config, or PURSER_PRICE_PROVIDER) never hands one provider another's key.
+# A key stored before the binding existed was Tiingo's, the only provider
+# until #686; an unbound fallback key goes nowhere until it is entered again.
+PRICE_KEY_BINDINGS = {
+    PRICE_API_KEY: "price_api_key_provider",
+    PRICE_FALLBACK_API_KEY: "price_fallback_api_key_provider",
+}
+_UNBOUND_PRICE_KEY_PROVIDER = {PRICE_API_KEY: "tiingo", PRICE_FALLBACK_API_KEY: None}
 # Keys that overlay Settings attributes 1:1 (names must match config.Settings).
 OVERLAY_KEYS = (
     "transfer_auto_link",
@@ -60,19 +69,25 @@ OVERLAY_KEYS = (
     "oidc_client_id",
     "oidc_client_secret",
     "oidc_auto_provision",
-    "ai_review",
-    "review_max_age_days",
+    # The AI confidence floor and the "no category" review reason (#694,
+    # decision 141).
+    "ai_min_confidence",
+    "review_uncategorized",
     "price_provider",
+    "price_fallback_provider",
     "price_stale_days",
     "feed_stale_days",
     # The household time zone (#471, decision 105): the ledger day follows it.
     "timezone",
 )
-ALL_KEYS = (SYNC_SCHEDULE_KEY, REVIEW_GUIDANCE_KEY, PRICE_API_KEY, *OVERLAY_KEYS)
-SECRET_KEYS = frozenset({"ai_api_key", "oidc_client_secret", PRICE_API_KEY})
-# Encrypted at rest but NOT write-only: unlike a secret, the user needs to read
-# their own guidance back to edit it.
-ENCRYPTED_KEYS = SECRET_KEYS | {REVIEW_GUIDANCE_KEY}
+ALL_KEYS = (
+    SYNC_SCHEDULE_KEY,
+    PRICE_API_KEY,
+    PRICE_FALLBACK_API_KEY,
+    *PRICE_KEY_BINDINGS.values(),
+    *OVERLAY_KEYS,
+)
+SECRET_KEYS = frozenset({"ai_api_key", "oidc_client_secret", PRICE_API_KEY, PRICE_FALLBACK_API_KEY})
 CACHE_TTL_SECONDS = 30.0
 
 _MASK_SET = "set"
@@ -173,28 +188,18 @@ def effective() -> Settings:
     return get_settings().model_copy(update=overlay)
 
 
-def review_guidance() -> list[str]:
-    """The reviewer checklist: the user's override, else the shipped default.
-
-    Narrative text, so it round-trips through the encrypted branch of
-    set_values — but it is not a SECRET, and _masked leaves it readable so the
-    user can edit what they wrote.
-    """
-    from purser.review import DEFAULT_GUIDANCE
-
-    raw = overrides().get(REVIEW_GUIDANCE_KEY)
-    if not raw:
-        return list(DEFAULT_GUIDANCE)
-    if isinstance(raw, str):
-        return [line for line in raw.splitlines() if line.strip()]
-    return [str(line) for line in raw]
-
-
-def price_api_key() -> str | None:
-    """The price provider's API key, or None when it is not set. Read for the
-    provider call only; it never leaves the server and is never logged."""
-    raw = overrides().get(PRICE_API_KEY)
-    return raw if isinstance(raw, str) and raw.strip() else None
+def price_key_for(provider: str) -> str | None:
+    """The stored API key entered for price provider ``provider``, from
+    either slot (#686, #698), or None. Read for that provider's call only;
+    it never leaves the server and is never logged."""
+    values = overrides()
+    for slot, binding in PRICE_KEY_BINDINGS.items():
+        raw = values.get(slot)
+        if not (isinstance(raw, str) and raw.strip()):
+            continue
+        if values.get(binding, _UNBOUND_PRICE_KEY_PROVIDER[slot]) == provider:
+            return raw
+    return None
 
 
 def sync_schedule() -> SyncSchedule:
@@ -224,7 +229,7 @@ def set_values(session: Session, changes: dict[str, Any], *, actor_token_id: UUI
         row = session.get(AppSetting, key)
         before[key] = _masked(key, _decode(row)) if row is not None else None
         after[key] = _masked(key, value)
-        if key in ENCRYPTED_KEYS:
+        if key in SECRET_KEYS:
             value_col, enc_col = None, crypto.encrypt(json.dumps(value))
         else:
             # JSON.NULL: an explicit null override must land as JSON null,

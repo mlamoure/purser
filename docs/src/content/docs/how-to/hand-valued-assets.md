@@ -197,9 +197,8 @@ dated today.
   (a value on a date) and **Change value** (a change, or money put in), and
   every entry in the register below with **Undo**.
 - In the register, its entries carry `value_change: true` (and
-  `money_put_in: true` for money put in). In
-  `review_batch` they are flagged `value_change`: mark one reviewed when the
-  figure is right, reverse it when it is not.
+  `money_put_in: true` for money put in). They never need review: reverse
+  one when the figure is wrong.
 
 Each change emits an `asset.value_changed` event (see
 [Events and webhooks](../../reference/events-webhooks/)).

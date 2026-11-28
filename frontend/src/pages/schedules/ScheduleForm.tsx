@@ -43,6 +43,11 @@ type FormState = {
   estimate_basis: "last" | "rolling_avg_3" | "rolling_avg_12" | "counterparty_balance";
   amount: string;
   autopost_policy: "auto_post" | "wait_for_match" | "reminder_only";
+  // A payment to a credit card sized from its statement cycle (#674); "" = by the
+  // estimate basis, as before.
+  payment_amount: "" | "statement_balance" | "minimum_due" | "fixed" | "current_balance";
+  later_estimate: "statement_average" | "same_cycle_last_year" | "fixed";
+  later_window: number;
 };
 
 function initialForm(accounts: AccountOut[], existing?: ScheduleOut, accountPath?: string): FormState {
@@ -77,6 +82,9 @@ function initialForm(accounts: AccountOut[], existing?: ScheduleOut, accountPath
     estimate_basis: (existing?.estimate_basis as FormState["estimate_basis"]) ?? "rolling_avg_3",
     amount: existing?.amount ?? "",
     autopost_policy: (existing?.autopost_policy as FormState["autopost_policy"]) ?? "wait_for_match",
+    payment_amount: existing?.payment_amount ?? "",
+    later_estimate: existing?.later_estimate ?? "statement_average",
+    later_window: existing?.later_window ?? 6,
   };
 }
 
@@ -106,6 +114,9 @@ export default function ScheduleForm({
     setForm((f) => ({ ...f, [key]: value }));
   const rrule = buildRrule(form);
   const isTransfer = form.target.startsWith("[");
+  const card = isTransfer
+    ? accounts.find((a) => a.path === form.target.slice(1, -1) && a.type === "credit_card")
+    : undefined;
   const needsPayee = !isTransfer && form.payee.trim() === "" && form.memo.trim() === "";
 
   const save = useMutation({
@@ -122,6 +133,19 @@ export default function ScheduleForm({
         counterparty_account: isTransfer ? form.target.slice(1, -1) : null,
         estimate_basis: form.amount_type === "estimated" ? form.estimate_basis : null,
         autopost_policy: form.autopost_policy,
+        // Statement-cycle sizing (#674) only on a payment to a card; all three null
+        // turns it off on an edit.
+        ...(card
+          ? form.payment_amount
+            ? {
+                payment_amount: form.payment_amount,
+                later_estimate: form.later_estimate,
+                later_window: form.later_window,
+              }
+            : existing?.payment_amount
+              ? { payment_amount: null, later_estimate: null, later_window: null }
+              : {}
+          : {}),
       };
       if (existing) {
         // "" clears a payee or memo on the server; a transfer's payee is not ours to touch.
@@ -346,6 +370,56 @@ export default function ScheduleForm({
               <option value="rolling_avg_12">Average of last 12</option>
               {isTransfer && <option value="counterparty_balance">Pay the other account's balance</option>}
             </select>
+          </div>
+        )}
+        {card && (
+          <div>
+            <Label htmlFor={field("payment_amount")}>Card payment</Label>
+            <select
+              id={field("payment_amount")}
+              className={`${selectClass} w-full`}
+              value={form.payment_amount}
+              onChange={(e) => set("payment_amount", e.target.value as FormState["payment_amount"])}
+            >
+              <option value="">By the amount settings</option>
+              <option value="statement_balance">Statement balance</option>
+              <option value="minimum_due">Minimum due</option>
+              <option value="fixed">Fixed amount</option>
+              <option value="current_balance">Current balance</option>
+            </select>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {card.statement_close_day != null
+                ? `Sized from the statement that closes on day ${card.statement_close_day}.`
+                : "Set the card's statement closing day for this to take effect."}
+            </p>
+          </div>
+        )}
+        {card && form.payment_amount !== "" && (
+          <div>
+            <Label htmlFor={field("later_estimate")}>Later payments</Label>
+            <select
+              id={field("later_estimate")}
+              className={`${selectClass} w-full`}
+              value={form.later_estimate}
+              onChange={(e) => set("later_estimate", e.target.value as FormState["later_estimate"])}
+            >
+              <option value="statement_average">Average of past statements</option>
+              <option value="same_cycle_last_year">Same statement last year</option>
+              <option value="fixed">Fixed amount</option>
+            </select>
+            {form.later_estimate !== "fixed" && (
+              <>
+                <Label htmlFor={field("later_window")}>Statements to average</Label>
+                <Input
+                  id={field("later_window")}
+                  type="number"
+                  min={1}
+                  max={24}
+                  value={form.later_window}
+                  onChange={(e) => set("later_window", Number(e.target.value))}
+                />
+              </>
+            )}
           </div>
         )}
         <div>

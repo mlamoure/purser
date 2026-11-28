@@ -8,7 +8,7 @@ see it, and net worth is unmoved by the posting (the market value of the
 shares sold leaves the holdings at the same time).
 
 The cash is either posted here — one ordinary flat transaction, posted,
-``origin='system'`` so it joins the unreviewed set, dated ``settle_on`` — or
+``origin='system'``, dated ``settle_on`` — or
 LINKED: a row the feed (or a person) already recorded is booked to
 ``equity.securities`` through the ledger's reversal-pair correction. Before
 posting, the account is probed for such a row (``probe``): when one exists the

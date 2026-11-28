@@ -93,7 +93,9 @@ charges since. Purser cannot read statements (SimpleFIN carries no statement
 figure), so you or your agent record it against the payment it is due on —
 on the Scheduled transactions page (**Statement** on a card payment's instance), over
 REST, or with MCP `record_statement_balance`. An agent reading a statement
-email ("statement balance 8,347.00, payment due October 19") makes one call:
+email ("statement balance 8,347.00, payment due October 19") makes one call
+(add `"minimum_due"` when the statement prints one and the schedule pays the
+minimum):
 
 ```json
 { "account": "liabilities.citicard", "statement_balance": "8347.00",
@@ -109,11 +111,70 @@ the next cycle's payment keeps following the balance. Over REST (`POST
 instead of `account` and `due_date`. The statement, its closing date and
 who recorded it stay on the instance, the instance and the
 [forecast](../../explanation/forecasting/) report `basis: statement`, and
-recording again replaces the figure. Reset the instance to go back to the
-current balance. Recording needs write scope and works on credit card
+recording again replaces the figure. When `statement_date` disagrees with
+the card's closing day, the response's `close_day_hint` says what to set;
+nothing changes on its own. Reset the instance to go back to the rule's
+estimate. Recording needs write scope and works on credit card
 payments only; a loan payment, or any other bill, is an ordinary override
 (below). Paying the exact statement amount also lets the schedule link the
 payment's bank rows (it vouches only for its exact amount).
+
+## Card payments from the statement cycle
+
+A card issuer bills on a cycle: the statement closes on a day of the month,
+and a full-pay autopay pays what that statement showed, less any refunds,
+credits or payments posted after it closed. Purser can size each card
+payment that way once it knows the card's **closing day**. Without one, a
+card payment keeps following its estimate basis, as above.
+
+1. **Set the card's closing day.** On the card's register page, **Set
+   closing day…** (it also offers the day the card's history suggests), or
+   `PATCH /accounts/{id}` with `statement_close_day`, or MCP
+   `update_account(statement_close_day=…)`. Days run 1 to 31; a month
+   shorter than the day closes on its last day. `GET
+   /accounts/{id}/statement-cycle` and MCP `card_statement_cycle` suggest a
+   day: the day of the latest recorded statement date, or the day whose
+   closing balance equals most of the card's full payments (at least three).
+   The suggestion is never applied for you.
+2. **Choose how the schedule pays.** On the payment schedule (a transfer to
+   the card), set **Card payment** (`payment_amount`) and **Later payments**
+   (`later_estimate`). A new *estimated* payment to a card that has a closing
+   day starts at statement balance and the average of past statements.
+
+| `payment_amount` | The payment is |
+| --- | --- |
+| `statement_balance` | what the statement showed, less credits since |
+| `minimum_due` | the minimum a recorded statement printed; else the schedule's amount |
+| `fixed` | the schedule's amount, never more than a known statement |
+| `current_balance` | the card's balance now, on the next payment only |
+
+| `later_estimate` | Payments after the next one are |
+| --- | --- |
+| `statement_average` | the average of the last `later_window` statements (6 by default; a month with nothing owed counts as 0) |
+| `same_cycle_last_year` | the statement a year earlier, once the card's history reaches back that far (the average until then) |
+| `fixed` | the schedule's amount |
+
+Each payment then shows where its amount comes from:
+
+- `statement_close`: the statement has closed, so the figure is known (what
+  remains of it after credits since);
+- `cycle_projection`: the next statement, projected to its close from what
+  the card owes now plus its usual daily spending;
+- `statement_average` or `same_cycle_last_year`: a later month.
+
+A recorded statement (next section) still wins over all of these, and a
+payment you override keeps your amount. The nightly refresh moves a payment
+exactly once its statement has closed. Before that it moves only when the
+projection changes by more than 5%, so a few new charges do not rewrite the
+forecast every night. Changing the card's closing day resizes its payments at
+once.
+
+Example: a card that closes on the 15th and is paid on the 10th. On the
+25th, the payment on the 10th is the 15th's statement (1,000.00 owed) less a
+200.00 refund posted on the 20th, so 800.00 (`statement_close`). Next month's
+payment is what the card owes now, less that 800.00, plus the usual spending
+until the next close (`cycle_projection`). Every later month is the average
+of the last six statements (`statement_average`).
 
 ## Rules and instances
 

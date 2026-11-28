@@ -91,7 +91,7 @@ after the replay. A chain that converted the row to a transfer (a leg on
 another account) is refused either way: convert it back to a category first.
 
 A feed row that a securities sale or purchase linked as its cash (see
-[Track holdings by hand](../../how-to/manual-holdings/)) is refused even with
+[Enter holdings in Purser](../../how-to/manual-holdings/)) is refused even with
 `--include-corrections`: the dry run counts such rows, and `--yes` exits
 naming each trade and these steps:
 

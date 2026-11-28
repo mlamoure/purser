@@ -43,6 +43,21 @@ const groups: { kind: Kind; title: string; help: string }[] = [
 ];
 const selectClass = "h-9 min-w-0 max-w-full rounded-md border border-border bg-card px-2 text-sm";
 
+/** Why rows need review (decision 141), e.g. "3 with no category · 1
+ * reconciliation adjustment"; a reason with no rows is left out. */
+function reasonBreakdown(counts: {
+  uncategorized: number;
+  reconciliation_adjustments: number;
+}): string {
+  const parts: string[] = [];
+  if (counts.uncategorized > 0) parts.push(`${counts.uncategorized} with no category`);
+  if (counts.reconciliation_adjustments > 0)
+    parts.push(
+      `${counts.reconciliation_adjustments} reconciliation adjustment${counts.reconciliation_adjustments === 1 ? "" : "s"}`,
+    );
+  return parts.join(" · ");
+}
+
 function Cards({
   kind,
   total,
@@ -135,7 +150,7 @@ export default function NeedsAttention() {
     },
   });
   const review = useQuery({
-    queryKey: ["unreviewed", "summary"],
+    queryKey: ["needs-review", "summary"],
     queryFn: async () => {
       const { data, error } = await api.GET("/transactions/review-summary");
       if (error) throw new Error(errorDetail(error));
@@ -159,7 +174,9 @@ export default function NeedsAttention() {
   const reviewAccounts = (review.data?.accounts ?? []).filter(
     (a) => !account || a.account_id === account,
   );
-  const reviewTotal = account ? (reviewAccounts[0]?.total ?? 0) : (review.data?.total ?? 0);
+  // One account's counts when the card is filtered to it, else the totals.
+  const reviewCounts = account ? reviewAccounts[0] : review.data;
+  const reviewTotal = reviewCounts?.total ?? 0;
   const proposals = account
     ? (reviewAccounts[0]?.agent_pending ?? 0)
     : (review.data?.agent_pending ?? 0);
@@ -172,7 +189,7 @@ export default function NeedsAttention() {
         <div>
           <CardTitle className="mb-1">Needs attention</CardTitle>
           <p className="text-sm text-muted-foreground">
-            Resolve exceptions, then review suggestions and new transactions.
+            Resolve exceptions, then review suggestions and the transactions that need review.
           </p>
         </div>
         <Link to="/schedules" className="text-sm text-primary underline">
@@ -308,33 +325,30 @@ export default function NeedsAttention() {
       {(reviewTotal > 0 || proposals > 0) && (
         <details className="mt-3 border-t border-border pt-3">
           <summary className="cursor-pointer font-medium">
-            Transaction review <Badge variant="amber">{reviewTotal}</Badge>
+            Transactions that need review <Badge variant="amber">{reviewTotal}</Badge>
+            {reviewCounts && reviewTotal > 0 && ` · ${reasonBreakdown(reviewCounts)}`}
             {proposals > 0 && ` · ${proposals} agent proposals`}
           </summary>
           <p className="my-2 text-xs text-muted-foreground">
-            Review posted transactions in each register. Pending transactions are separate; a
-            transfer can appear on both accounts.
+            A bank-sync transaction with no category, or a reconciliation adjustment nobody has
+            explained or accepted. Fix it in the account's register and it drops off this list. A
+            transfer can count on both of its accounts.
           </p>
           <ul className="space-y-2">
             {reviewAccounts.map((a) => (
               <li key={a.account_id} className="flex flex-wrap justify-between gap-2 text-sm">
                 <span>{a.name}</span>
                 <span className="flex flex-wrap gap-3">
-                  {a.total > a.pending && (
+                  {a.total > 0 && (
                     <Link
                       className="text-primary underline"
-                      to={`/accounts/${a.account_id}?reviewed=false&status=posted`}
+                      to={`/accounts/${a.account_id}?needs_review=true`}
                     >
-                      {a.total - a.pending} posted
+                      {a.total} to review
                     </Link>
                   )}
-                  {a.pending > 0 && (
-                    <Link
-                      className="text-primary underline"
-                      to={`/accounts/${a.account_id}?reviewed=false&status=pending`}
-                    >
-                      {a.pending} pending
-                    </Link>
+                  {a.total > 0 && (
+                    <span className="text-muted-foreground">{reasonBreakdown(a)}</span>
                   )}
                   {a.agent_pending > 0 && (
                     <Link

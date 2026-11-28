@@ -13,6 +13,7 @@ from purser import clock
 from purser import networth as service
 from purser.admin.auth import ReadToken, WriteToken
 from purser.api.disclosure import NOTHING, disclose
+from purser.api.positions import HoldingsSummaryLineOut
 from purser.db import get_session
 from purser.holdings.overlay import Holding
 from purser.ledger import LedgerError, NotFoundError
@@ -215,6 +216,96 @@ def materialize(
     return {"days_materialized": count, "points": len(points)}
 
 
+class PortfolioLineOut(HoldingsSummaryLineOut):
+    # The line's price is a close entered by hand (#689). An account from
+    # SimpleFIN is otherwise valued by the bank, any other by Market data.
+    manual_price: bool = False
+
+
+class PortfolioAccountOut(BaseModel):
+    account_id: uuid.UUID
+    name: str
+    path: str
+    currency: str
+    as_of: date_type | None
+    source: str  # feed | manual: where the newest set came from
+    cash: Decimal
+    market_value: Decimal
+    cost_basis: Decimal | None  # over the lines whose gain is known
+    unrealized_gain: Decimal | None
+    gain_pct: Decimal | None
+    total: Decimal  # cash + market value: the account's reported balance
+    lines: list[PortfolioLineOut]
+
+
+class PortfolioTotalOut(BaseModel):
+    currency: str
+    market_value: Decimal
+    cash: Decimal
+    total: Decimal
+
+
+class PortfolioOut(BaseModel):
+    """Every open brokerage account's newest holdings (#684), largest
+    account first, lines largest first. All figures are computed here."""
+
+    as_of: date_type
+    totals: list[PortfolioTotalOut]  # one per currency
+    accounts: list[PortfolioAccountOut]
+    lines: int
+    stale_price: int
+    no_price: int
+    unpriceable: int
+
+
+@holdings_router.get("/portfolio", dependencies=[disclose(NOTHING)])
+def holdings_portfolio(token: ReadToken, session: DbSession) -> PortfolioOut:
+    """Every open brokerage account's newest holdings set, from SimpleFIN or
+    entered in Purser, each account's totals, totals per currency, and counts
+    of stale, unpriced and unpriceable lines (#684). A line whose price is a
+    close entered by hand says so (`manual_price`, #689). A line the bank
+    values carries its implied price (market value / shares)."""
+    from dataclasses import asdict
+
+    from purser.holdings.portfolio import portfolio
+
+    result = portfolio(session)
+    accounts = []
+    for account in result.accounts:
+        s = account.summary
+        lines = []
+        for pl in account.lines:
+            body = asdict(pl.line)
+            body["price"] = pl.price
+            lines.append(PortfolioLineOut(**body, manual_price=pl.manual_price))
+        accounts.append(
+            PortfolioAccountOut(
+                account_id=account.account_id,
+                name=account.name,
+                path=account.path,
+                currency=account.currency,
+                as_of=s.as_of,
+                source=s.source,
+                cash=s.cash,
+                market_value=s.market_value,
+                cost_basis=s.cost_basis,
+                unrealized_gain=s.unrealized_gain,
+                gain_pct=s.gain_pct,
+                total=s.total,
+                lines=lines,
+            )
+        )
+    return PortfolioOut(
+        as_of=result.as_of,
+        totals=[PortfolioTotalOut(**asdict(t)) for t in result.totals],
+        accounts=accounts,
+        lines=result.lines,
+        stale_price=result.stale_price,
+        no_price=result.no_price,
+        unpriceable=result.unpriceable,
+    )
+
+
 @holdings_router.get("", dependencies=[disclose(NOTHING)])
 def list_holdings(
     token: ReadToken,
@@ -224,7 +315,7 @@ def list_holdings(
 ) -> list[HoldingOut]:
     """Latest snapshot set per brokerage account (cost basis + market value),
     whichever source the account's holdings come from: feed snapshots, or the
-    projection of positions tracked by hand (`source` says which)."""
+    projection of positions entered in Purser (`source` says which)."""
     from sqlalchemy import select
 
     from purser import ledger as ledger_service

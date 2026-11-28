@@ -1643,134 +1643,47 @@ _BANK_STATES = st.lists(
 )
 
 
-class TestPendingReviewCarry:
-    """#342 (decision 82) end to end: a pending someone reviewed does not
-    come back for review once the bank posts it — through the successor
-    pairing (a re-described posted row) or the identity move (the same
-    row, ``pending`` dropped) — while an unreviewed pending's successor
-    stays in the set."""
+class TestPendingReview:
+    """End to end (decision 141): a feed pending with no category needs
+    review, and when the bank posts it — through the identity move (the same
+    row, ``pending`` dropped) or the successor pairing (a re-described posted
+    row) — the void pending no longer does, while its posted row, still with
+    no category, does. Nothing is carried: each row says what it says."""
 
-    def _connect(self, harness: FeedHarness, rows: list[dict[str, Any]]) -> str:
-        harness.use_transport(RecordingBackend(_honouring_window(rows), backfill=False).transport())
+    @pytest.mark.parametrize("posted_as", ["Corner Bakery", "CORNER BAKERY 7"])
+    def test_the_posted_row_takes_over(self, harness: FeedHarness, posted_as: str) -> None:
+        pending = {
+            "id": "bakery",
+            "posted": _recent_epoch(2),
+            "amount": "-42.00",
+            "description": "Corner Bakery",
+            "pending": True,
+        }
+        harness.use_transport(
+            RecordingBackend(_honouring_window([pending]), backfill=False).transport()
+        )
         connection_id = harness.connect()
         harness.map_new(connection_id, "Demo Checking", "assets.checking")
         harness.sync(connection_id)
-        return connection_id
-
-    def _serve(self, harness: FeedHarness, rows: list[dict[str, Any]]) -> None:
-        harness.use_transport(RecordingBackend(_honouring_window(rows), backfill=False).transport())
-
-    def _pending_id(self, harness: FeedHarness) -> str:
         (row,) = harness.client.get("/transactions", params={"status": "pending"}).json()["items"]
-        return str(row["id"])
-
-    def _mark(self, harness: FeedHarness, tx_id: str) -> None:
-        resp = harness.client.post(
-            "/transactions/mark-reviewed",
-            json={"transaction_ids": [tx_id], "note": "looked at it"},
-        )
-        assert resp.status_code == 200, resp.text
-        assert resp.json()["marked"] == 1
-
-    def _unreviewed(self, harness: FeedHarness) -> set[str]:
-        page = harness.client.get("/transactions", params={"reviewed": False, "limit": 200}).json()
-        return {str(item["id"]) for item in page["items"]}
-
-    def _carried(self, engine: Engine, tx_id: str) -> Any:
-        with engine.connect() as conn:
-            return conn.execute(
-                text(
-                    "SELECT via, reviewed_by, reviewed_at, carried_from::text AS carried_from"
-                    " FROM transaction_reviews WHERE transaction_id = :t"
-                ),
-                {"t": tx_id},
-            ).one_or_none()
-
-    def test_identity_move_carries_the_review(
-        self, harness: FeedHarness, migrated_engine: Engine
-    ) -> None:
-        pending = {
-            "id": "bakery",
-            "posted": _recent_epoch(2),
-            "amount": "-42.00",
-            "description": "Corner Bakery",
-            "pending": True,
-        }
-        connection_id = self._connect(harness, [pending])
-        pending_id = self._pending_id(harness)
-        self._mark(harness, pending_id)
-        source = self._carried(migrated_engine, pending_id)
-
-        self._serve(harness, [{k: v for k, v in pending.items() if k != "pending"}])
-        sync = harness.sync(connection_id)
-        assert (sync["imported"], sync["voided_pendings"]) == (1, 1)
-
-        successor_id = harness.client.get(f"/transactions/{pending_id}").json()["superseded_by"]
-        assert successor_id is not None
-        assert successor_id not in self._unreviewed(harness)
-        assert harness.client.get(f"/transactions/{successor_id}").json()["needs_review"] is False
-        carried = self._carried(migrated_engine, successor_id)
-        assert (carried.via, carried.reviewed_by, carried.reviewed_at) == (
-            "explicit",
-            source.reviewed_by,
-            source.reviewed_at,
-        )
-        assert carried.carried_from == pending_id
-
-    def test_successor_pairing_carries_the_review(
-        self, harness: FeedHarness, migrated_engine: Engine
-    ) -> None:
-        hold = {
-            "id": "hold",
-            "posted": _recent_epoch(3),
-            "amount": "-64.10",
-            "description": "Harbor Market hold",
-            "pending": True,
-        }
-        connection_id = self._connect(harness, [hold])
-        pending_id = self._pending_id(harness)
-        self._mark(harness, pending_id)
-
-        # The bank drops the pending and posts a re-described row instead.
-        posted = {
-            "id": "posted",
-            "posted": _recent_epoch(2),
-            "amount": "-64.10",
-            "description": "HARBOR MARKET 0042",
-        }
-        self._serve(harness, [posted])
-        sync = harness.sync(connection_id)
-        assert (sync["imported"], sync["voided_pendings"]) == (1, 1)
-
-        successor_id = harness.client.get(f"/transactions/{pending_id}").json()["superseded_by"]
-        assert successor_id is not None
-        assert successor_id not in self._unreviewed(harness)
-        assert self._carried(migrated_engine, successor_id).carried_from == pending_id
-
-    @pytest.mark.parametrize("posted_as", ["Corner Bakery", "CORNER BAKERY 7"])
-    def test_an_unreviewed_pendings_successor_stays_unreviewed(
-        self, harness: FeedHarness, migrated_engine: Engine, posted_as: str
-    ) -> None:
-        """Both paths: the same description is the identity move, a new one
-        the successor pairing."""
-        pending = {
-            "id": "bakery",
-            "posted": _recent_epoch(2),
-            "amount": "-42.00",
-            "description": "Corner Bakery",
-            "pending": True,
-        }
-        connection_id = self._connect(harness, [pending])
-        pending_id = self._pending_id(harness)
+        pending_id = str(row["id"])
+        assert row["review_reason"] == "uncategorized"
 
         posted = {"id": "posted", "posted": _recent_epoch(2), "amount": "-42.00"}
-        self._serve(harness, [{**posted, "description": posted_as}])
+        harness.use_transport(
+            RecordingBackend(
+                _honouring_window([{**posted, "description": posted_as}]), backfill=False
+            ).transport()
+        )
         assert harness.sync(connection_id)["voided_pendings"] == 1
 
-        successor_id = harness.client.get(f"/transactions/{pending_id}").json()["superseded_by"]
+        detail = harness.client.get(f"/transactions/{pending_id}").json()
+        assert detail["status"] == "void" and detail["needs_review"] is False
+        successor_id = detail["superseded_by"]
         assert successor_id is not None
-        assert successor_id in self._unreviewed(harness)
-        assert self._carried(migrated_engine, successor_id) is None
+        page = harness.client.get("/transactions", params={"needs_review": True}).json()
+        assert [item["id"] for item in page["items"]] == [successor_id]
+        assert page["items"][0]["review_reason"] == "uncategorized"
 
 
 class TestPendingLifecycleProperties:

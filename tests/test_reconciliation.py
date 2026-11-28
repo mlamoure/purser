@@ -150,7 +150,7 @@ def test_reconcile_posts_one_adjustment_and_exact_retry_is_idempotent(
     assert Decimal(balance["balance"]) == Decimal("125.00")
 
     # The adjustment: one posted, system-origin row in the system category,
-    # still in the review set so a person sees it.
+    # needing review so a person sees it (decision 141).
     detail = client.get(f"/transactions/{result['adjustment_tx_id']}").json()
     assert detail["status"] == "posted"
     assert detail["origin"] == "system"
@@ -159,8 +159,9 @@ def test_reconcile_posts_one_adjustment_and_exact_retry_is_idempotent(
     assert detail["category_path"] == reconciliation.CATEGORY_PATH
     assert sum(Decimal(p["amount"]) for p in detail["postings"]) == 0
     assert detail["needs_review"] is True
-    unreviewed = client.get("/transactions", params={"reviewed": "false", "limit": 200}).json()
-    assert result["adjustment_tx_id"] in {row["id"] for row in unreviewed["items"]}
+    assert detail["review_reason"] == "reconciliation_adjustment"
+    flagged = client.get("/transactions", params={"needs_review": "true", "limit": 200}).json()
+    assert result["adjustment_tx_id"] in {row["id"] for row in flagged["items"]}
 
     assert (
         _count(
@@ -737,8 +738,8 @@ def test_ledger_balances_batch_matches_single_points(clean_db: None, db_session:
 
 
 def test_an_adjustment_never_settles_an_expected_bill(clean_db: None, db_session: Session) -> None:
-    """origin=system puts the adjustment in the review set, which would also
-    put it in the matcher's pool (§5) — it is excluded explicitly there."""
+    """origin=system would put the adjustment in the matcher's pool (§5) —
+    it is excluded explicitly there."""
     token, account, category = _setup(db_session)
     _row(db_session, token, account, category, Decimal("100.00"), _opened())
     expected = _row(
@@ -759,7 +760,10 @@ def test_an_adjustment_never_settles_an_expected_bill(clean_db: None, db_session
         is None
     )
     assert db_session.get(Transaction, expected.id).status == "expected"  # type: ignore[union-attr]
-    assert not review.is_reviewed(db_session, done.adjustment_tx_id)  # type: ignore[arg-type]
+    assert done.adjustment_tx_id is not None
+    assert review.review_reasons(db_session, [done.adjustment_tx_id]) == {
+        done.adjustment_tx_id: review.REASON_ADJUSTMENT
+    }
 
 
 def test_delete_account_removes_its_reconciliations(clean_db: None, db_session: Session) -> None:

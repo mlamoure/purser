@@ -4,8 +4,13 @@ place, posted rows via reversal+replacement corrections (origin=rule).
 
 The deterministic pass learns from accepted (posted) history only — every
 human correction becomes the payee's memory, so corrections improve the hit
-rate with no model in the loop. Pending rows never seed it: an unreviewed
-AI guess must not launder into "deterministic" for the next transaction.
+rate with no model in the loop. Pending rows never seed it: an AI guess
+nobody has confirmed must not launder into "deterministic" for the next
+transaction.
+
+A model answer is applied only at or above ``ai_min_confidence`` (decision
+141); below it the row stays uncategorized, which is what puts a bank-sync
+row in front of the user for review (§4).
 """
 
 import uuid
@@ -40,14 +45,15 @@ MIN_DETERMINISTIC_OCCURRENCES = 2
 # detect a bad one. This bar is what stands in for that missing check, so it
 # is deliberately well above the 0.5 default `_parse_reply` assigns when a
 # model omits the field. Below it the row stays uncategorized and surfaces
-# for review (DESIGN §4).
+# for review (DESIGN §4). The operator's `ai_min_confidence` raises it, never
+# lowers it: a bracket answer needs max(this, ai_min_confidence).
 BRACKET_MIN_CONFIDENCE = 0.85
 
 
 def payee_memory(session: Session, payee_id: uuid.UUID) -> uuid.UUID | None:
     """The category this payee's accepted history points to: the most common
     non-uncategorized category leg across posted transactions. Posted only —
-    pending rows may carry unreviewed AI suggestions."""
+    pending rows may carry AI suggestions nobody has confirmed."""
     rows = session.execute(
         select(Posting.account_id, func.count().label("n"))
         .join(Transaction, Transaction.id == Posting.transaction_id)
@@ -440,7 +446,8 @@ def run(
             stats["unresolved"] += 1
             continue
         is_bracket = suggestion.category_path.startswith("[")
-        if is_bracket and suggestion.confidence < BRACKET_MIN_CONFIDENCE:
+        floor = float(settings.ai_min_confidence)
+        if is_bracket and suggestion.confidence < max(BRACKET_MIN_CONFIDENCE, floor):
             # Leave it uncategorized rather than restructure the row and move
             # a second account's balance on a low-confidence guess (§11.1).
             stats["unresolved"] += 1
@@ -449,7 +456,19 @@ def run(
                 transaction_id=str(tx.id),
                 target=suggestion.category_path,
                 confidence=suggestion.confidence,
-                threshold=BRACKET_MIN_CONFIDENCE,
+                threshold=max(BRACKET_MIN_CONFIDENCE, floor),
+            )
+            continue
+        if suggestion.confidence < floor:
+            # The operator's floor (decision 141): a guess below it is not
+            # applied, so the row stays uncategorized and needs review.
+            stats["unresolved"] += 1
+            log.info(
+                "categorize.below_min_confidence",
+                transaction_id=str(tx.id),
+                target=suggestion.category_path,
+                confidence=suggestion.confidence,
+                threshold=floor,
             )
             continue
         category = session.execute(

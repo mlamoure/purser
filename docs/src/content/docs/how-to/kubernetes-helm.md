@@ -11,7 +11,7 @@ rough edges here.
 
 The chart lives in the repository at `charts/purser`. Its default image is the
 published `ghcr.io/mlamoure/purser`, tagged `v` + the chart's appVersion
-(for example `v2026.10.0`); to run your own build, push it to your registry
+(`appVersion` in `charts/purser/Chart.yaml`); to run your own build, push it to your registry
 and set `image.repository`.
 
 It runs the same one-image, multi-role design as every other deployment: an
@@ -60,8 +60,11 @@ kubectl port-forward svc/purser 8000:8000
 - **`bundled`**: a single-replica Postgres StatefulSet in the release, for
   evaluation only. It has no backups. Set `postgres.password` (16 or more
   characters of letters, digits and `. _ ~ -`; `openssl rand -hex 24` gives
-  one) or `postgres.existingSecret`. The chart keeps the password in its own
-  Secret, and derives the app's database URL from it when you do not set one.
+  one) or `postgres.existingSecret`. With `postgres.password` the chart keeps
+  the password in its own Secret, and derives the app's database URL from it
+  when you do not set one. With `postgres.existingSecret`, also set
+  `secrets.databaseUrl` (or a top-level `existingSecret` with
+  `PURSER_DATABASE_URL`).
 
 ## Secure defaults
 

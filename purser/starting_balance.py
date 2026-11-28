@@ -168,7 +168,7 @@ def get(session: Session, account_id: uuid.UUID) -> AccountStartingBalance | Non
 
 def entry_ids(session: Session, tx_ids: list[uuid.UUID]) -> set[uuid.UUID]:
     """Which of ``tx_ids`` are a starting balance as it stands now (one
-    query, for the register's label and the review flag)."""
+    query, for the register's label)."""
     if not tx_ids:
         return set()
     found = session.execute(

@@ -26,7 +26,7 @@ from datetime import date as date_type
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Select, or_, select, tuple_
+from sqlalchemy import Select, func, or_, select, tuple_
 from sqlalchemy.orm import Session, selectinload
 
 from purser import audit, crypto
@@ -727,32 +727,103 @@ def set_state(
 # Preview / projection / apply-history
 # --------------------------------------------------------------------------
 
-# Preview decrypt-and-filters a bounded sample of history (the measured
-# ceiling in #141): it is a sample by design and says so. Apply-history walks
-# ALL of it in keyset batches (#356), because a retroactive rule that silently
-# stops at the newest N rows is wrong, not slow.
+# A predicate on payee or description text is answered from the search text
+# cache (#141 phase 1c): the cache gives every live row that could match, and
+# those rows alone are loaded and checked by the same per-row logic, so
+# preview covers all history and apply-history (and the trade-rule projection
+# that runs it) stops decrypting every row. Without the cache (a process that
+# never builds one, or before it is built), and for a predicate with no text,
+# preview decrypt-and-filters a bounded sample of history and says so, and
+# apply-history walks ALL of it in keyset batches (#356), because a
+# retroactive rule that silently stops at the newest N rows is wrong, not
+# slow.
 _SCAN_CAP = 5000
 _HISTORY_BATCH = 1000
 _SAMPLE_CAP = 20
 
 
-def _live_heads() -> Select[Transaction]:
-    """Live chain heads, newest first — the same pair of conditions
+def _live_conditions() -> tuple[Any, ...]:
+    """Live chain heads — the same pair of conditions
     categorize._uncategorized_rows uses, minus the uncategorized filter."""
     reversed_ids = select(Transaction.reverses_id).where(Transaction.reverses_id.is_not(None))
+    return (
+        Transaction.status.in_(["pending", "posted"]),
+        Transaction.superseded_by.is_(None),
+        Transaction.id.not_in(reversed_ids),
+    )
+
+
+def _live_heads() -> Select[Transaction]:
+    """Live chain heads, newest first, with what a predicate reads loaded."""
     return (
         select(Transaction)
         .options(
             selectinload(Transaction.postings).selectinload(Posting.account),
             selectinload(Transaction.payee),
         )
-        .where(
-            Transaction.status.in_(["pending", "posted"]),
-            Transaction.superseded_by.is_(None),
-            Transaction.id.not_in(reversed_ids),
-        )
+        .where(*_live_conditions())
         .order_by(Transaction.date.desc(), Transaction.id.desc())
     )
+
+
+def _live_count(session: Session) -> int:
+    return int(
+        session.execute(select(func.count(Transaction.id)).where(*_live_conditions())).scalar_one()
+    )
+
+
+def _text_candidates(session: Session, predicate: core_rules.Predicate) -> list[uuid.UUID] | None:
+    """Every live row a text predicate could match, from the search text
+    cache: a superset (each word of the rule's normalized text appears in the
+    folded field), checked row by row by the caller. ``None`` when the
+    predicate reads no text or the cache is not ready."""
+    if predicate.match_field is None or predicate.match_text is None:
+        return None
+    from purser.search import textcache
+
+    store = textcache.ready()
+    if store is None:
+        return None
+    words = core_ledger.normalize_payee(predicate.match_text).split()
+    if not words:
+        return []  # an empty needle matches nothing (core_rules.text_matches)
+    fields = {
+        core_rules.MatchField.PAYEE: ("payee",),
+        core_rules.MatchField.DESCRIPTION: ("desc",),
+        core_rules.MatchField.PAYEE_OR_DESCRIPTION: ("payee", "desc"),
+    }[predicate.match_field]
+    return store.rule_candidates(session, fields, words)
+
+
+def _batches_among(session: Session, ids: list[uuid.UUID]) -> Iterator[list[Transaction]]:
+    """The live rows among ``ids``, newest first (the full walk's order), in
+    batches of ``_HISTORY_BATCH`` with what a predicate reads loaded."""
+    if not ids:
+        return
+    from sqlalchemy import bindparam
+    from sqlalchemy.dialects.postgresql import ARRAY
+    from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+
+    wanted = bindparam("candidate_ids", ids, type_=ARRAY(PG_UUID(as_uuid=True)))
+    ordered = list(
+        session.execute(
+            select(Transaction.id)
+            .where(*_live_conditions(), Transaction.id == func.any(wanted))
+            .order_by(Transaction.date.desc(), Transaction.id.desc())
+        ).scalars()
+    )
+    for start in range(0, len(ordered), _HISTORY_BATCH):
+        chunk = ordered[start : start + _HISTORY_BATCH]
+        loaded = session.execute(
+            select(Transaction)
+            .options(
+                selectinload(Transaction.postings).selectinload(Posting.account),
+                selectinload(Transaction.payee),
+            )
+            .where(Transaction.id.in_(chunk))
+        ).scalars()
+        by_id = {t.id: t for t in loaded}
+        yield [by_id[i] for i in chunk]
 
 
 def _live_rows(session: Session) -> list[Transaction]:
@@ -805,27 +876,42 @@ def preview(
     session: Session, *, predicate: core_rules.Predicate, limit: int = _SAMPLE_CAP
 ) -> dict[str, object]:
     """Dry-run a predicate over history: how many live rows it would touch,
-    with a small sample. The count is exact over the scanned window and
-    ``scanned``/``scan_capped`` say so rather than implying totality."""
-    rows = _live_rows(session)
-    matched: list[Transaction] = []
-    for tx in rows:
-        candidate = _candidate_of(tx)
-        if candidate is not None and core_rules.matches(predicate, candidate):
-            matched.append(tx)
-    sample = [
-        {
-            "id": str(tx.id),
-            "date": tx.date.isoformat(),
-            "payee": tx.payee.name if tx.payee else None,
-            "description": tx.description,
-        }
-        for tx in matched[:limit]
-    ]
+    with a small sample. A text predicate with the search text cache ready
+    covers every live row; otherwise the count is exact over the newest
+    ``_SCAN_CAP`` and ``scanned``/``scan_capped`` say so rather than implying
+    totality."""
+    candidates = _text_candidates(session, predicate)
+    batches: Iterable[list[Transaction]]
+    if candidates is not None:
+        # All history, a batch at a time: only the count and the newest
+        # matches are kept, however many rows the candidates are.
+        batches = _batches_among(session, candidates)
+        scanned, capped = _live_count(session), False
+    else:
+        window = _live_rows(session)
+        batches = [window]
+        scanned, capped = len(window), len(window) >= _SCAN_CAP
+    matched = 0
+    sample: list[dict[str, object]] = []
+    for batch in batches:
+        for tx in batch:
+            candidate = _candidate_of(tx)
+            if candidate is None or not core_rules.matches(predicate, candidate):
+                continue
+            matched += 1
+            if len(sample) < limit:
+                sample.append(
+                    {
+                        "id": str(tx.id),
+                        "date": tx.date.isoformat(),
+                        "payee": tx.payee.name if tx.payee else None,
+                        "description": tx.description,
+                    }
+                )
     return {
-        "matched": len(matched),
-        "scanned": len(rows),
-        "scan_capped": len(rows) >= _SCAN_CAP,
+        "matched": matched,
+        "scanned": scanned,
+        "scan_capped": capped,
         "sample": sample,
     }
 
@@ -1038,8 +1124,17 @@ def apply_history(
     skipped_not_a_transfer = 0
     # The "not a transfer" memory, read once for the whole run (#386 review).
     pairs = transfers_service.SuppressedPairs()
-    for batch in _live_row_batches(session):
-        scanned += len(batch)
+    # A text predicate's candidates come from the search text cache; every
+    # other live row cannot match it, so it is counted as scanned unread.
+    text_candidates = _text_candidates(session, loaded.predicate)
+    if text_candidates is None:
+        batches = _live_row_batches(session)
+    else:
+        batches = _batches_among(session, text_candidates)
+        scanned = _live_count(session)
+    for batch in batches:
+        if text_candidates is None:
+            scanned += len(batch)
         selected: list[Transaction] = []
         for tx in batch:
             candidate = _candidate_of(tx)

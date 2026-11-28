@@ -9,8 +9,8 @@ administrative controls for setup, configuration, access and record inspection.
 
 Purser is not an AI. It is an AI enablement engine: it stores financial data,
 performs calculations and provides tools for your agent to use. Purser requires
-no AI subscription. Optional integrations can call a model you configure for
-categorization and review; they are off by default.
+no AI subscription. An optional integration can call a model you configure to
+categorize transactions; it is off by default.
 
 You choose what to share with your agent. Purser provides access scopes,
 disclosure settings and an audit log; it does not prescribe how much financial
@@ -51,7 +51,7 @@ flowchart LR
   end
   S["SimpleFIN Bridge<br/>(hosted, optional)"] -- "bank data, fetched by Purser over HTTPS" --> P
   A -- "MCP / REST, scoped token" --> P
-  P -. "optional categorization and review<br/>(off by default)" .-> M
+  P -. "optional categorization<br/>(off by default)" .-> M
 ```
 
 Purser and its database run on your server. Your agent reaches Purser with a
@@ -102,7 +102,7 @@ How it works in detail, with examples:
 
 - **Bank sync** through [SimpleFIN Bridge](https://bridge.simplefin.org/) for checking, savings, credit cards and brokerage accounts.
 - **QIF and CSV imports** with a preview and duplicate detection.
-- **Investments:** holdings from your brokerage feed or tracked by hand, priced daily and included in net worth.
+- **Investments:** holdings from your brokerage feed or entered in Purser, priced daily (Tiingo or EODHD, with an optional fallback provider) and included in net worth. A Holdings page shows every brokerage account's holdings with gains, weights and stale-price flags.
 - **Tax lots and equity awards** for holdings you track by hand: load a broker's lot list and vest schedule in one previewed step. Sales name the lots they draw on. Home includes potential value inside the Net worth and Assets cards when unvested awards exist; users without them see only current owned totals. Unvested awards remain outside owned net worth until vesting.
 
 ### Ledger and reconciliation
@@ -117,13 +117,15 @@ How it works in detail, with examples:
 - **Recurring bills and income** are detected or entered as schedules, then matched to incoming transactions.
 - **Occurrence estimates:** amount and date uncertainty are tracked separately, with evidence, original estimates and linked actuals. Fixed planning values can remain estimates, including projected slots without transaction IDs, without changing forecast amounts or dates. Confirm one payment without confirming later ones; ambiguous matches wait for review.
 - **Late bills and price changes** are flagged.
+- **Card payments follow the statement:** give a credit card its closing day and each payment is sized from the statement balance, the minimum due or a fixed amount, with later months estimated from past statements.
 - **Cash-flow forecasts** use schedules to project account balances and flag balances below your chosen floor.
 
 ### Categories, rules and notes
 
 - **Categories** come with a default hierarchy you can edit.
 - **Rules** categorize transactions and rename payees. Draft rules take effect when activated.
-- **Review and suggestions inboxes** collect new transactions, proposed schedules, transfer links and matches.
+- **Review only when there is a reason:** a bank-sync transaction with no category, or a reconciliation adjustment you have not accepted. The suggestions inbox collects proposed schedules, transfer links and matches.
+- **Search** across every account: words and phrases, filters such as `payee:`, `amount:>100` and `date:2026-10`, and typo tolerance on request (`amazn~`).
 - **[Financial notes](https://mlamoure.github.io/purser/explanation/memories/)** keep context about your finances in one place, such as "the HOA bill is annual," for your agent to use.
 
 ## The admin interface
@@ -133,7 +135,7 @@ administrative controls for setup, connections, settings, tokens and auditing.
 It also lets you inspect accounts and records directly. These screenshots use
 synthetic demonstration data.
 
-![Dashboard with net worth, Needs attention (a detected scheduled transaction and the transaction review summary) and accounts grouped as Banking, Credit cards, Investments, Property and Loans](docs/public/screenshots/dashboard.png)
+![Dashboard with net worth, Needs attention (a detected scheduled transaction, and the transactions that need review with their reasons) and accounts grouped as Banking, Credit cards, Investments, Property and Loans](docs/public/screenshots/dashboard.png)
 
 **Needs attention:** review missing expected payments first, expand suggestions
 by type, and open the exact account register for posted or pending review.

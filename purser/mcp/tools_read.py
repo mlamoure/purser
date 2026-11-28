@@ -45,11 +45,15 @@ def _memories_summary(session: Session) -> dict[str, Any]:
 
 
 def _review_summary(session: Session) -> dict[str, Any]:
-    """describe() carries a COUNT and a tool pointer, never rows (#175)."""
+    """describe() carries COUNTS and a tool pointer, never rows (decision
+    141): how many transactions need review, by reason."""
     from purser import review as review_service
 
+    counts = review_service.counts(session)
     return {
-        "unreviewed": review_service.unreviewed_count(session),
+        "needs_review": counts["total"],
+        "uncategorized": counts[review_service.REASON_UNCATEGORIZED],
+        "reconciliation_adjustments": counts[review_service.REASON_ADJUSTMENT],
         "tool": "review_batch",
     }
 
@@ -369,6 +373,7 @@ async def account_balance(account: str, as_of: str | None = None) -> dict[str, A
     scope="read",
     emits=Emits(
         payee=True,
+        description=("did_you_mean",),
         amount=("items[].amount", "items[].remainder"),
         balance=("items[].balance",),
     ),
@@ -402,11 +407,15 @@ async def search_transactions(
     — and no `category`, and is never a transfer; get_transaction lists its
     lines, split_transaction edits them.
 
-    q: words, all found in payee, description or memo ("a phrase"; -word
-    excludes; payee:, desc:, memo: scope one; payee:py_... is that payee),
-    plus account:, category:, amount:>100 (magnitude; is:debit|credit for
-    direction), amount:10..20, date:2026-10 or date:2026-01..2026-03,
-    status:pending,posted, is:unreviewed."""
+    q: words all found in payee, description or memo ("phrase"; -word
+    excludes; word~ allows one typo; payee: desc: memo: scope one;
+    payee:py_... is that payee), plus account:, category:, amount:>100 or
+    10..20 (magnitude; is:debit|credit), date:2026-10 or 2026-01..2026-03,
+    status:pending,posted, is:needs-review. One word with no hits may add
+    did_you_mean."""
+    from purser import privacy
+
+    withheld = privacy.current_withheld.get() or set()
 
     def op(session: Session) -> dict[str, Any]:
         from purser import balances as balance_service
@@ -498,7 +507,12 @@ async def search_transactions(
                     ),
                 }
             )
-        return {"total": total, "returned": len(items), "items": items}
+        out: dict[str, Any] = {"total": total, "returned": len(items), "items": items}
+        if q and total == 0 and not withheld & {"payee", "description"}:
+            suggestion = ledger_service.did_you_mean(session, q)
+            if suggestion is not None:
+                out["did_you_mean"] = suggestion
+        return out
 
     return await _run(op)
 
@@ -731,5 +745,29 @@ async def present(transaction_ids: list[str], note: str | None = None) -> dict[s
         from purser.selection import selection_link
 
         return selection_link(session, transaction_ids, note)
+
+    return await _run(op)
+
+
+@audited_tool(
+    kind="read", entity="account", scope="read", emits=Emits(amount=("statements[].owed",))
+)
+async def card_statement_cycle(account: str) -> dict[str, Any]:
+    """A credit card's statement cycle (path or id): statement_close_day (the
+    day of the month its statement closes, or null), suggested_close_day
+    with suggestion_source and suggestion_detail (history: the day whose
+    closing balance equals most of the card's full payments; statement: the
+    day of the latest recorded statement date; none: too few payments), and
+    the latest statements (close date, amount owed at the close) once a
+    closing day is set. Use it before setting statement_close_day with
+    update_account: confirm the suggestion with the user, or take the day
+    from a statement. Card payments sized from the statement cycle read
+    these statements."""
+
+    def op(session: Session) -> dict[str, Any]:
+        from purser import cycles
+
+        card = ledger.resolve_account(session, account)
+        return cycles.describe_card(session, card)
 
     return await _run(op)

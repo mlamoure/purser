@@ -90,7 +90,7 @@ Docker already works, and it stops with instructions if Docker Desktop or
 OrbStack is installed but not running:
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.6/scripts/install-docker-macos.sh
+curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.7/scripts/install-docker-macos.sh
 bash install-docker-macos.sh
 ```
 
@@ -123,17 +123,17 @@ into it:
 
 ```bash
 mkdir purser && cd purser
-curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.6/docker-compose.yml
-grep -c 'image: ghcr.io/mlamoure/purser:v2026.11.6' docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.7/docker-compose.yml
+grep -c 'image: ghcr.io/mlamoure/purser:v2026.11.7' docker-compose.yml
 ```
 
 If `mkdir` reports that `purser` already exists, stop and ask the human: it may
 hold an earlier installation and its key. The last command must print `1`.
 Every later command runs in this `purser` directory.
 
-This page installs the latest release, 2026.11.6. Each release has its own
+This page installs the latest release, 2026.11.7. Each release has its own
 compose file at the same address under its own tag (`vYYYY.M.PATCH`), and that
-file names the matching image, here `ghcr.io/mlamoure/purser:v2026.11.6`,
+file names the matching image, here `ghcr.io/mlamoure/purser:v2026.11.7`,
 published for linux/amd64 and linux/arm64.
 
 ## 3. Pull the images
@@ -261,13 +261,15 @@ If the human skipped the last step, they can create the token later on the
 boxes ticked (the default), leave `admin` unticked, and select **Create token**.
 The same per-client steps appear under the new token, which is shown once.
 
-When the human confirms, check that the wizard finished:
+When the human confirms, check that the admin account exists:
 
 ```bash
 curl -s http://localhost:8000/auth/setup/status
 ```
 
-Expected: `{"setup_needed":false}`.
+Expected: `{"setup_needed":false}`. This turns false at the wizard's first
+step, so it does not show the rest finished; the token from its last step
+answering `describe` in step 8 does.
 
 ## 7. Connect your client
 
@@ -498,7 +500,7 @@ makes `http://localhost:8000` work there while the tunnel is open.
 
 - [ ] `curl http://localhost:8000/healthz` returns `{"status":"ok","database":"ok"}`.
 - [ ] `docker compose ps` shows `purser` and `postgres` running, `purser` healthy.
-- [ ] `/auth/setup/status` returns `{"setup_needed":false}`.
+- [ ] `/auth/setup/status` returns `{"setup_needed":false}` (the admin account exists).
 - [ ] The human confirmed the encryption key is in their password manager.
 - [ ] `describe` returns `your_scopes` of `["read", "write"]`.
 - [ ] `list_accounts` answers without an error.
@@ -544,7 +546,7 @@ Read the application log with `docker compose logs purser --tail 50`.
 | The log shows `PURSER_ENCRYPTION_KEY is not a valid Fernet key` and the container restarts | The value is truncated or not a Purser key. | Have the human compare `.env` with the stored key. |
 | The log shows `PURSER_ENCRYPTION_KEY does not match this database` with two fingerprints | The database volume was created with a different key, usually an earlier install. | Stop. Ask the human for the original key. Never delete the volume to get past this. |
 | `docker compose up` fails with `port is already allocated` or `address already in use` | Another program uses the host port. | Append `PURSER_HOST_PORT=8010` (or another free port) to `.env`, run `docker compose up -d` again, and use that port wherever this page says 8000. |
-| The log shows `PURSER_TIMEZONE` is not known | The zone name in `.env` is not an IANA name. | Ask the human to correct the `PURSER_TIMEZONE` line (for example `America/New_York`), then `docker compose up -d`. |
+| The log shows `PURSER_TIMEZONE must be an IANA time zone name` | The zone name in `.env` is not an IANA name. | Ask the human to correct the `PURSER_TIMEZONE` line (for example `America/New_York`), then `docker compose up -d`. |
 | `/healthz` gets no answer | The app is still starting or exited. | Wait for the loop in step 5; then check `docker compose ps` and the log. |
 | `/healthz` returns HTTP 503 with `{"status":"error","database":"down"}` | Purser cannot reach PostgreSQL. | Check `docker compose ps postgres` and `docker compose logs postgres`. |
 | `/auth/setup/status` stays `{"setup_needed":true}` | The human has not created the admin yet. | Wait for the handoff in step 6. |
@@ -555,4 +557,4 @@ Read the application log with `docker compose logs purser --tail 50`.
 | The address works on the Docker host but not from another machine | Purser still listens on `127.0.0.1` only, or a firewall blocks the port. | Follow the home-network section; then ask the human to allow the port in the host's firewall. |
 | `curl` to `/mcp` returns 307 | The bare path redirects to `/mcp/`. | Use `/mcp/` with `curl`; MCP clients follow the redirect. |
 | A write tool is refused for scope | The token lacks `write`. | Ask the human for a `read + write` token. |
-| In step 9 the bank's `balance_date` is later than today | The bank's day is ahead of Purser's: the household time zone is not set, or the bank dates its balance ahead. | Ask the human to set the time zone under **Settings**, **General**, and do that account the next day. Never reconcile with a date other than the bank's. |
+| In step 9 `set_starting_balance` is refused | The bank's balance is stale (`stale_balance`), the bank reported no balance Purser can use for the account, or the account is reconciled and differs from the bank (`reconciled`). The message names which. | Tell the human the account and the reason. A stale balance needs a sync first; do not work a starting balance out yourself or use `reconcile_account` for it. |

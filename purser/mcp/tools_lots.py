@@ -105,9 +105,10 @@ async def list_lots(
     status: str = "open",
     cursor: str | None = None,
 ) -> Annotated[CallToolResult, ListLotsResult]:
-    """A hand-tracked position's tax lots (read scope), oldest first, a page
-    at a time, with its lot summary: shares held, shares in lots,
-    unallocated shares (outside every lot), shares whose lot has no basis,
+    """A position's tax lots, on an account whose holdings are entered in
+    Purser (read scope), oldest first, a page at a time, with its lot
+    summary: shares held, shares in lots, unallocated shares (outside every
+    lot), shares whose lot has no basis,
     and cost_basis — the lots' basis, null unless every share has one (never
     an average). capture says when the broker's lots were last captured
     (as_of, captured_at, completeness): capture freshness, distinct from
@@ -565,7 +566,7 @@ async def upsert_lots(
     skip_conflicts: bool = False,
 ) -> Annotated[CallToolResult, CaptureResult]:
     """Bulk, idempotent input of a broker's tax lots as of a day (write
-    scope) on a hand-tracked brokerage account. positions: [{symbol, lots:
+    scope) on a brokerage account whose holdings are entered in Purser. positions: [{symbol, lots:
     [{acquired_on, quantity (shares REMAINING on as_of), external_ref (the
     broker's lot reference, when shown: the lot's identity), plan,
     ordinal (when lots of one date and plan have no reference: 1, 2, ...
@@ -925,7 +926,7 @@ async def record_transfer_out(
     lot_method: str | None = None,
     note: str | None = None,
 ) -> Annotated[CallToolResult, TransferOutResult]:
-    """Record shares that left a hand-tracked position with no price and no
+    """Record shares that left a position entered in Purser with no price and no
     cash (write scope): a transfer to another broker, or a decrease the
     broker shows that is not a sale you can price. Never use it for a sale
     (record_sale). On a position that tracks lots, name the lots: lots

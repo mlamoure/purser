@@ -11,7 +11,7 @@ from datetime import date as date_type
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import ForeignKey, Numeric, UniqueConstraint, text
+from sqlalchemy import ForeignKey, Numeric, SmallInteger, UniqueConstraint, text
 
 # Aliased: the Memory model maps a column literally named `text`, which would
 # otherwise shadow sqlalchemy.text() inside that class body.
@@ -269,6 +269,15 @@ class Schedule(Base):
     amount_type: Mapped[str]
     amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
     estimate_basis: Mapped[str | None]
+    # Statement-cycle sizing of a card payment (#674, decision 136), used when
+    # the counterparty card has a closing day: how much is paid
+    # (statement_balance | minimum_due | fixed | current_balance) and how
+    # payments after the next are estimated (statement_average |
+    # same_cycle_last_year | fixed, the average over ``later_window``
+    # statements). Both NULL = the estimate basis sizes every payment.
+    payment_amount: Mapped[str | None]
+    later_estimate: Mapped[str | None]
+    later_window: Mapped[int | None] = mapped_column(SmallInteger)
     # fixed | estimated (#512, decision 108): whether the rule's dates are the
     # dates or only approximate when an occurrence lands.
     date_type: Mapped[str] = mapped_column(server_default="fixed")
@@ -674,6 +683,19 @@ class PriceAnswered(Base):
     updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
 
 
+class SecuritySetting(Base):
+    """Per-symbol price settings (#686, decision 139): the symbol's ticker
+    as each provider spells it (``aliases``, provider name -> ticker), and
+    ``price_by_hand``: the symbol is never sent to a provider."""
+
+    __tablename__ = "security_settings"
+
+    symbol: Mapped[str] = mapped_column(primary_key=True)
+    price_by_hand: Mapped[bool] = mapped_column(server_default=text("false"))
+    aliases: Mapped[dict[str, str]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
+
+
 class Valuation(Base):
     __tablename__ = "valuations"
 
@@ -820,6 +842,10 @@ class Account(Base):
     # (create_account, migration 0058), and only there (CHECK).
     balance_true_up: Mapped[bool] = mapped_column(server_default=text("false"))
     min_balance: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
+    # The day of the month a credit card's statement closes, 1..31 (a day
+    # past the month's end is its last day): card payments are sized from
+    # the balance on that day (#674, decision 136). Credit cards only.
+    statement_close_day: Mapped[int | None] = mapped_column(SmallInteger)
     # Lifecycle timestamps (real accounts only; CHECK + trigger enforce the
     # invariants — DESIGN §3.4). hidden_at hides an account from the default
     # /accounts listing; closed_at makes it read-only (no new postings).
@@ -854,6 +880,11 @@ class AccountReconciliation(Base):
     target_balance: Mapped[Decimal] = mapped_column(Numeric(20, 4))
     adjustment: Mapped[Decimal] = mapped_column(Numeric(20, 4))
     adjustment_tx_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("transactions.id"))
+    # A person's or an agent's acceptance of the adjustment (#694, decision
+    # 141, migration 0065): until then, and while the adjustment's live head
+    # still books to expenses.reconciliation_adjustments, it needs review.
+    adjustment_accepted_at: Mapped[datetime | None]
+    adjustment_accepted_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("api_tokens.id"))
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("api_tokens.id"))
     created_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
 
@@ -1038,44 +1069,12 @@ class Rule(Base):
     updated_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
 
 
-class TransactionReview(Base):
-    """A review mark — an annotation ABOUT a transaction, not ledger content
-    (#175, DESIGN §4, decision 47).
-
-    Deliberately a side table. `transactions_posted_guard` (migration 0005)
-    allow-lists only status/superseded_by via to_jsonb, so any new column on
-    `transactions` is immutable once posted — exactly the rows that need
-    marking. Carving out the guard would spend the property migration 0005
-    bought, for something that moves no money.
-    """
-
-    __tablename__ = "transaction_reviews"
-
-    transaction_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("transactions.id"), primary_key=True
-    )
-    reviewed_at: Mapped[datetime] = mapped_column(server_default=text("now()"))
-    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("api_tokens.id"))
-    via: Mapped[str]
-    note: Mapped[str | None] = mapped_column("note_enc", EncryptedText)
-    # Reviewed, but handed back for a human look. The row LEAVES the unreviewed
-    # set — no second queue is recreated — while surfacing in a small flagged
-    # list. Stays small by construction: opt-in per row.
-    escalated_at: Mapped[datetime | None]
-    # The row this mark was copied from, whole (decision 82): a pending's
-    # posted successor, a corrected row's replacement, an unlinked bank
-    # line's clone. Explains a reviewed_at older than the row itself.
-    carried_from: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("transactions.id", ondelete="SET NULL")
-    )
-
-
 class InstanceStatement(Base):
     """A card statement balance recorded against a card-payment instance
     (#351, DESIGN §6, decision 80): the figure as printed (owed, positive),
-    its closing date when known, and who recorded it. A side table like
-    ``transaction_reviews``: it annotates the instance, whose amount moves
-    through the ordinary transfer edit. Deleted with its transaction (FK
+    its closing date when known, and who recorded it. A side table: it
+    annotates the instance, whose amount moves through the ordinary transfer
+    edit. Deleted with its transaction (FK
     cascade) and by ``reset_instance``; copied onto a clone when the feed
     re-opens the instance (``matching.release_settlement``)."""
 
@@ -1086,6 +1085,9 @@ class InstanceStatement(Base):
     )
     statement_balance: Mapped[Decimal] = mapped_column(Numeric(20, 4))
     statement_date: Mapped[date | None]
+    # The statement's minimum payment, when recorded (#674): a schedule whose
+    # payment_amount is minimum_due pays it.
+    minimum_due: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
     source: Mapped[str]  # human | agent (the recording token's kind)
     recorded_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("api_tokens.id"))
     recorded_at: Mapped[datetime] = mapped_column(server_default=text("now()"))

@@ -95,7 +95,7 @@ export default function PositionsPanel({
       </QueryState>
       <p className="mt-3 text-xs text-muted-foreground">
         Each position is valued at the newest close for its symbol: a price you record, the
-        daily provider fetch (Settings, Prices), or a price implied by a feed snapshot of the
+        daily provider fetch (Settings, Market data), or a price implied by a feed snapshot of the
         same symbol. A position with no price yet adds nothing to the balance, and neither does
         one whose value at its close is too large to store: check its share count.
       </p>

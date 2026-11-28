@@ -17,15 +17,25 @@ an ltree, a spending rollup is a single indexed subtree query — everything und
 `expenses.dining` is `path <@ 'expenses.dining'`, one query, no recursion in
 application code.
 
-One virtual account is not a category: `equity.securities`, the other side of
-a securities trade's cash (see [Track holdings by hand](../../how-to/manual-holdings/)).
-Like a category it is virtual, so it stays out of net worth; unlike one it is
+Four virtual accounts are not categories. They are Purser's own system
+accounts under `equity`:
+
+- `equity.securities`, the other side of a securities trade's cash (see
+  [Enter holdings in Purser](../../how-to/manual-holdings/));
+- `equity.revaluation`, the other side of a change in a hand-valued asset's
+  value (see [Track a house or other asset](../../how-to/hand-valued-assets/));
+- `equity.capital`, the other side of money put into an asset that no tracked
+  account paid;
+- `equity.opening_balances`, the other side of an account's
+  [starting balance](../../how-to/starting-balance/).
+
+Like a category each is virtual, so it stays out of net worth; unlike one it is
 never offered as a category, never counted as income or spending, and no
 schedule or classifier can book to it. On a brokerage account whose holdings
 come from the feed you can mark a buy or sell row as a **Securities trade**, and
 a rule scoped to such accounts can do the same (see
 [Mark brokerage buys and sells](../../how-to/brokerage-trades/)); that is an
-explicit choice, never a category in a picker. The `equity` subtree belongs to it:
+explicit choice, never a category in a picker. The `equity` subtree belongs to them:
 no category or account can be created at `equity` or under it (a 422 says
 so), and a rollup or spending summary of that subtree counts nothing.
 

@@ -3,12 +3,15 @@ import { NavLink } from "react-router-dom";
 import { api } from "../lib/api";
 import { cn } from "../lib/utils";
 
-/** The primary navigation (#542): the four places people work, then one
- * Settings area (its sections, and their admin gating, are its own
- * sub-navigation). The same for every session. */
+/** The primary navigation (#542): the places people work — search across
+ * every account joined them in #141 — then one Settings area (its sections,
+ * and their admin gating, are its own sub-navigation). The same for every
+ * session. */
 export const MAIN_LINKS: [string, string][] = [
   ["/", "Dashboard"],
   ["/accounts", "Accounts"],
+  ["/holdings", "Holdings"],
+  ["/search", "Search"],
   ["/schedules", "Scheduled transactions"],
   ["/import", "Import"],
   ["/settings", "Settings"],

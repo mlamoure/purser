@@ -158,7 +158,7 @@ async def list_holdings(
 ) -> Annotated[CallToolResult, HoldingsResult]:
     """Brokerage holdings: each open brokerage account's newest snapshot set
     — what its value adds on top of its cash in net worth — with its source
-    (feed: the bank's snapshots; manual: positions recorded by hand and
+    (feed: the bank's snapshots; manual: positions entered in Purser and
     priced daily), the set's date and total, how many positions it holds and
     how many of those sit on a stale close (stale_price) or have no price at
     all (no_price: market_value null, adding nothing — never a silent 0), or
@@ -588,13 +588,14 @@ async def record_sale(
     leave the holdings (settle_date posts them on a later settlement date
     instead), booked against the system account equity.securities — never
     income. proceeds_to='none' records the sale without cash (shares
-    withheld for tax). If the account already shows a posted row of exactly
-    that amount around the settlement date (the broker's own "SOLD" cash),
-    the call is refused with cash_already_recorded naming that row: when it
-    is the sale's cash, call again with transaction_id set to that row's id
-    to link it (a linked row must hold exactly the net proceeds, to the
-    cent); when it is a different payment of the same amount, call again
-    with force_cash=true to post the sale's cash as well (audited). When the
+    withheld for tax). If the account already shows a pending or posted row
+    of exactly that amount around the settlement date (the broker's own
+    "SOLD" cash), the call is refused with cash_already_recorded naming that
+    row: when it is the sale's cash, call again with transaction_id set to
+    that row's id to link it (a linked row must be posted, so link a pending
+    one once it posts, and hold exactly the net proceeds, to the cent);
+    when it is a different payment of the same amount, call again with
+    force_cash=true to post the sale's cash as well (audited). When the
     broker's own row of exactly that cash arrives AFTER the sale, the import
     links it in place of Purser's row by itself: nothing to repair. A sale
     that would leave the position below zero on
@@ -971,11 +972,11 @@ async def reverse_position_event(
     when the remaining history would leave the position below zero on some
     date, when the event is already reversed or is itself a reversal, and
     when the position is closed: a closed position is reopened first (REST
-    PATCH /positions/{id} with closed=false). A trade's cash row in
-    review_batch (flag securities_trade) is corrected this way, never with
-    update_transaction or confirm_transfer. Reversing a split (record_split)
-    reverses its cash-in-lieu sale with it; that sale is never reversed
-    alone. note says why (optional)."""
+    PATCH /positions/{id} with closed=false). A trade's cash row (a
+    securities trade a recorded trade holds) is corrected this way, never
+    with update_transaction or confirm_transfer. Reversing a split
+    (record_split) reverses its cash-in-lieu sale with it; that sale is
+    never reversed alone. note says why (optional)."""
 
     def op(session: Session) -> CallToolResult:
         import uuid

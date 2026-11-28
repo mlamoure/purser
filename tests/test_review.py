@@ -1,13 +1,19 @@
-"""New-transaction review flags (issue #175, DESIGN §4, decision 47).
+"""Transactions that need review (issue #694, DESIGN §4, decision 141).
 
-The load-bearing claim is that a review mark is an annotation OUTSIDE the
-immutability envelope — so the posted-guard regression test here is the point,
-not a formality: it proves marking touched no ledger column.
+A row needs review only for a reason: a bank-sync row with no category
+(``uncategorized``, behind the ``review_uncategorized`` setting) or a
+reconciliation adjustment nobody has explained or accepted
+(``reconciliation_adjustment``). Both are derived from the row, so these tests
+check what a row says, never a mark: every surface evaluates
+``review.flagged_rows`` and must agree with it (#248).
+
+Synthetic data only; dates come from the pinned clock (#533).
 """
 
 import uuid
-from datetime import date, timedelta
+from datetime import timedelta
 from decimal import Decimal
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,36 +22,50 @@ from hypothesis import strategies as st
 from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session
 
-from purser import review
-from purser.models import ApiToken, TransactionReview
+from purser import crypto, review
 from tests.conftest import today
+
+UNCATEGORIZED = review.REASON_UNCATEGORIZED
+ADJUSTMENT = review.REASON_ADJUSTMENT
 
 
 @pytest.fixture
-def seeded(admin_client: TestClient) -> None:
-    admin_client.post(
-        "/accounts", json={"name": "Checking", "type": "checking", "path": "assets.checking"}
-    )
-    for name, path in [
-        ("Uncategorized", "expenses.uncategorized"),
-        ("Dining", "expenses.dining"),
+def seeded(admin_client: TestClient) -> dict[str, str]:
+    ids: dict[str, str] = {}
+    for key, name, type_, path in [
+        ("checking", "Checking", "checking", "assets.checking"),
+        ("savings", "Savings", "savings", "assets.savings"),
+        ("house", "House", "property", "assets.house"),
     ]:
-        admin_client.post(
-            "/categories", json={"name": name, "type": "category_expense", "path": path}
-        )
+        resp = admin_client.post("/accounts", json={"name": name, "type": type_, "path": path})
+        assert resp.status_code == 201, resp.text
+        ids[key] = resp.json()["id"]
+    for name, type_, path in [
+        ("Uncategorized", "category_expense", "expenses.uncategorized"),
+        ("Dining", "category_expense", "expenses.dining"),
+        ("Groceries", "category_expense", "expenses.groceries"),
+        ("Uncategorized Income", "category_income", "income.uncategorized"),
+    ]:
+        resp = admin_client.post("/categories", json={"name": name, "type": type_, "path": path})
+        assert resp.status_code == 201, resp.text
+        ids[path] = resp.json()["id"]
+    return ids
 
 
 def _feed_row(
     session: Session,
     *,
     status: str = "posted",
-    when: date | None = None,
     category: str = "expenses.uncategorized",
+    amount: str = "-25.00",
+    account: str = "assets.checking",
+    payee: str = "Synthetic Feed Payee",
+    days_ago: int = 0,
 ) -> uuid.UUID:
-    """A row that looks like it came from the feed — origin='import' WITH a
-    source_fetch_id, which is what puts it in review scope (decision 45's
-    feed-row definition)."""
-    from purser import crypto
+    """A row that came from the bank feed: origin='import' WITH a
+    source_fetch_id (decision 45's feed-row definition)."""
+    from purser import ledger
+    from purser.core import ledger as core
     from purser.models import Connection, RawFetch
 
     conn = Connection(provider="simplefin")
@@ -56,19 +76,15 @@ def _feed_row(
     )
     session.add(fetch)
     session.flush()
-
-    from purser import ledger
-    from purser.core import ledger as core
-
     tx = ledger.create_flat_transaction(
         session,
-        account_ref="assets.checking",
+        account_ref=account,
         category_ref=category,
-        amount=Decimal("-25.00"),
-        date=when or today(),
-        payee_name="Feed Row",
-        description="FEED ROW",
-        requested_status=core.Status.POSTED if status == "posted" else core.Status.PENDING,
+        amount=Decimal(amount),
+        date=today() - timedelta(days=days_ago),
+        payee_name=payee,
+        description="SYNTHETIC FEED ROW",
+        requested_status=core.Status(status),
         origin=core.Origin.IMPORT,
         token=None,
         source_fetch_id=fetch.id,
@@ -78,243 +94,49 @@ def _feed_row(
     return tx.id
 
 
-class TestScope:
-    def test_a_feed_row_is_unreviewed_and_a_manual_row_is_not(
-        self, seeded: None, client: TestClient, db_session: Session
-    ) -> None:
-        """QIF/CSV rows are ALSO origin='import'; the source_fetch_id clause is
-        what stops a 6,081-row Quicken import becoming 6,081 review items."""
-        feed_id = _feed_row(db_session)
-        db_session.commit()
-        assert review.unreviewed_count(db_session) == 1
-
-        # A manual (agent/human) row is out of scope entirely.
-        client.post(
-            "/transactions",
-            json={
-                "account": "assets.checking",
-                "category": "expenses.dining",
-                "amount": "-10.00",
-                "date": today().isoformat(),
-                "status": "posted",
-            },
-        )
-        db_session.expire_all()
-        assert review.unreviewed_count(db_session) == 1
-        assert feed_id is not None
-
-    def test_a_real_qif_import_stays_out_of_review_scope(
-        self, seeded: None, client: TestClient, db_session: Session
-    ) -> None:
-        """#127 archives QIF uploads to raw_fetches — but must NOT stamp
-        source_fetch_id on the ledger rows, or every historical manual import
-        floods the review set. Exercises the real import path end to end."""
-        qif = (
-            "!Account\nNChecking\nTBank\n^\n!Type:Bank\n"
-            "D1/15/2024\nT-42.00\nPCorner Store\nLDining\n^\n"
-        )
-        resp = client.post(
-            "/import/qif",
-            json={"content": qif, "account_map": {"Checking": "assets.checking"}},
-        )
-        assert resp.status_code == 200, resp.text
-        assert resp.json()["imported"] == 1
-        db_session.expire_all()
-        assert review.unreviewed_count(db_session) == 0
-
-    def test_marking_is_idempotent_and_monotonic(self, seeded: None, db_session: Session) -> None:
-        tx_id = _feed_row(db_session)
-        db_session.commit()
-        assert review.mark(db_session, tx_id=tx_id, token=None, via="explicit") is True
-        assert review.mark(db_session, tx_id=tx_id, token=None, via="explicit") is False
-        assert review.unreviewed_count(db_session) == 0
+def _manual(
+    client: TestClient,
+    *,
+    category: str = "expenses.uncategorized",
+    amount: str = "-10.00",
+    status: str = "posted",
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    resp = client.post(
+        "/transactions",
+        headers=headers or {},
+        json={
+            "account": "assets.checking",
+            "category": category,
+            "amount": amount,
+            "date": today().isoformat(),
+            "payee": "Synthetic Manual Payee",
+            "status": status,
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    return dict(resp.json())
 
 
-class TestImmutabilityEnvelope:
-    def test_marking_touches_no_ledger_column_on_a_posted_row(
-        self, seeded: None, db_session: Session, migrated_engine: Engine
-    ) -> None:
-        """The reason marks live in a side table: `transactions_posted_guard`
-        allow-lists only status/superseded_by, so a `reviewed_at` COLUMN could
-        never be set on the very rows this feature exists for. Prove the guard
-        still bites, and that marking sidesteps it."""
-        tx_id = _feed_row(db_session)
-        db_session.commit()
-        review.mark(db_session, tx_id=tx_id, token=None, via="explicit")
-        db_session.commit()
-
-        with migrated_engine.connect() as conn:
-            with pytest.raises(Exception) as excinfo:
-                conn.execute(
-                    text("UPDATE transactions SET origin = 'human' WHERE id = :id"),
-                    {"id": tx_id},
-                )
-                conn.commit()
-            assert "immutable" in str(excinfo.value).lower()
+def _detail(client: TestClient, tx_id: object) -> dict[str, Any]:
+    resp = client.get(f"/transactions/{tx_id}")
+    assert resp.status_code == 200, resp.text
+    return dict(resp.json())
 
 
-class TestImplicitMarks:
-    def test_posting_a_row_marks_it_reviewed(
-        self, seeded: None, client: TestClient, db_session: Session
-    ) -> None:
-        tx_id = _feed_row(db_session, status="pending")
-        db_session.commit()
-        assert review.unreviewed_count(db_session) == 1
-
-        assert client.post(f"/transactions/{tx_id}/post").status_code == 200
-        db_session.expire_all()
-        assert review.unreviewed_count(db_session) == 0
-
-    def test_automation_never_marks_a_row_reviewed(
-        self, seeded: None, client: TestClient, db_session: Session
-    ) -> None:
-        """The rule the whole feature rests on: automation that merely TOUCHES
-        a row leaves it needing review. Only a reviewer clears it."""
-        _feed_row(db_session)
-        db_session.commit()
-        before = review.unreviewed_count(db_session)
-        client.post("/categorize/run")  # a system-actor automation pass
-        db_session.expire_all()
-        assert review.unreviewed_count(db_session) == before
-
-
-class TestBatch:
-    def test_the_batch_declares_which_context_was_available(
-        self, seeded: None, db_session: Session
-    ) -> None:
-        """A batch that silently ships memories:[] because that feature is
-        absent is a row reviewed BLIND, clearing indistinguishably from one
-        reviewed properly. The context map is what turns a silent degradation
-        into a declared one."""
-        _feed_row(db_session)
-        db_session.commit()
-        payload = review.batch(db_session, limit=5)
-        assert set(payload["context"]) == {
-            "rules",
-            "memories",
-            "provenance",
-            "transfer_candidates",
-        }
-        assert payload["context"]["rules"] is True  # migration 0020 shipped
-        assert payload["unreviewed_total"] == 1
-        assert payload["guidance"]
-
-    def test_signals_ride_inline_so_there_are_no_per_row_round_trips(
-        self, seeded: None, db_session: Session
-    ) -> None:
-        _feed_row(db_session)
-        db_session.commit()
-        row = review.batch(db_session, limit=5)["rows"][0]
-        for key in ("category", "flags", "automation", "memories", "amount", "account"):
-            assert key in row
-        assert "uncategorized" in row["flags"]
-
-    def test_guidance_can_be_omitted_on_later_pages(
-        self, seeded: None, db_session: Session
-    ) -> None:
-        _feed_row(db_session)
-        db_session.commit()
-        assert "guidance" not in review.batch(db_session, limit=5, include_guidance=False)
-
-
-class TestMarkReviewedApi:
-    def test_bulk_and_idempotent(
-        self, seeded: None, client: TestClient, db_session: Session
-    ) -> None:
-        tx_id = _feed_row(db_session)
-        db_session.commit()
-        first = client.post("/transactions/mark-reviewed", json={"transaction_ids": [str(tx_id)]})
-        assert first.status_code == 200, first.text
-        assert first.json() == {"marked": 1, "already_reviewed": 0}
-        second = client.post("/transactions/mark-reviewed", json={"transaction_ids": [str(tx_id)]})
-        assert second.json() == {"marked": 0, "already_reviewed": 1}
-
-    def test_escalation_clears_the_row_but_flags_it(
-        self, seeded: None, client: TestClient, db_session: Session
-    ) -> None:
-        """Escalation is an escape hatch, not a second review tier: the row
-        LEAVES the unreviewed set, so no queue is recreated."""
-        tx_id = _feed_row(db_session)
-        db_session.commit()
-        client.post(
-            "/transactions/mark-reviewed",
-            json={"transaction_ids": [str(tx_id)], "escalate": True, "note": "ambiguous pair"},
-        )
-        db_session.expire_all()
-        assert review.unreviewed_count(db_session) == 0
-        payload = review.batch(db_session, limit=5)
-        assert [r["id"] for r in payload["escalated"]] == [str(tx_id)]
-
-    def test_requires_write_scope(self, seeded: None, client: TestClient) -> None:
-        token = client.post("/tokens", json={"name": "p", "scopes": ["read"]}).json()["token"]
-        resp = client.post(
-            "/transactions/mark-reviewed",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"transaction_ids": [str(uuid.uuid4())]},
-        )
-        assert resp.status_code == 403
-
-
-class TestRestSurface:
-    """These exercise the ROUTES, not the service.
-
-    The gap that let a real bug through: every other test here called
-    `review.batch()` directly, so nothing noticed that
-    GET /transactions/review-batch was shadowed by GET /transactions/{tx_id}
-    and 422'd trying to parse "review-batch" as a UUID. FastAPI matches in
-    registration order, so a literal path declared after a parameterized one
-    is unreachable.
-    """
-
-    def test_review_batch_route_is_not_shadowed_by_the_tx_id_route(
-        self, seeded: None, client: TestClient, db_session: Session
-    ) -> None:
-        _feed_row(db_session)
-        db_session.commit()
-        resp = client.get("/transactions/review-batch", params={"limit": 5})
-        assert resp.status_code == 200, resp.text
-        payload = resp.json()
-        assert payload["unreviewed_total"] == 1
-        assert "context" in payload
-        assert payload["guidance"]
-
-    def test_mark_reviewed_route_is_reachable(self, seeded: None, client: TestClient) -> None:
-        resp = client.post("/transactions/mark-reviewed", json={"transaction_ids": []})
-        assert resp.status_code == 200, resp.text
-
-    def test_a_real_transaction_id_still_resolves(
-        self, seeded: None, client: TestClient, db_session: Session
-    ) -> None:
-        """The reordering must not break the parameterized route itself."""
-        tx_id = _feed_row(db_session)
-        db_session.commit()
-        assert client.get(f"/transactions/{tx_id}").status_code == 200
-
-
-class TestRegisterFilter:
-    def test_reviewed_false_is_the_unreviewed_set(
-        self, seeded: None, client: TestClient, db_session: Session
-    ) -> None:
-        tx_id = _feed_row(db_session)
-        db_session.commit()
-        page = client.get("/transactions", params={"reviewed": False}).json()
-        assert [t["id"] for t in page["items"]] == [str(tx_id)]
-        assert page["items"][0]["reviewed_at"] is None
-
-        client.post("/transactions/mark-reviewed", json={"transaction_ids": [str(tx_id)]})
-        after = client.get("/transactions", params={"reviewed": False}).json()
-        assert after["items"] == []
-        marked = client.get("/transactions", params={"reviewed": True}).json()
-        assert any(t["id"] == str(tx_id) for t in marked["items"])
+def _reason(client: TestClient, tx_id: object) -> str | None:
+    detail = _detail(client, tx_id)
+    assert detail["needs_review"] is (detail["review_reason"] is not None)
+    return detail["review_reason"]
 
 
 ALL_STATUSES = ["expected", "pending", "posted", "void"]
 
 
-def _all_rows(client: TestClient, **params: object) -> list[dict[str, object]]:
+def _all_rows(client: TestClient, **params: object) -> list[dict[str, Any]]:
     """Every row the API will show — all statuses, correction chains
     uncollapsed — paged through so nothing hides past `limit`."""
-    items: list[dict[str, object]] = []
+    items: list[dict[str, Any]] = []
     offset = 0
     while True:
         page = client.get(
@@ -333,74 +155,506 @@ def _all_rows(client: TestClient, **params: object) -> list[dict[str, object]]:
             return items
 
 
-def _ids(client: TestClient) -> set[str]:
-    return {str(t["id"]) for t in _all_rows(client)}
-
-
-def _assert_one_predicate(client: TestClient, session: Session) -> set[str]:
-    """The per-row flag, ?reviewed=false (with ?reviewed=true its exact
-    complement), the count and the batch all describe ONE set (#248).
-    Returns that set."""
+def _assert_one_predicate(client: TestClient, session: Session) -> dict[str, str]:
+    """The per-row flag and reason, ?needs_review=true (with false its exact
+    complement), the search term, the counts, the summary and the batch all
+    describe ONE set (#248). Returns it as {id: reason}."""
     rows = _all_rows(client)
-    flagged = {str(t["id"]) for t in rows if t["needs_review"] is True}
-    unreviewed = {str(t["id"]) for t in _all_rows(client, reviewed=False)}
-    complement = {str(t["id"]) for t in _all_rows(client, reviewed=True)}
-    assert flagged == unreviewed
-    assert unreviewed.isdisjoint(complement)
-    assert unreviewed | complement == {str(t["id"]) for t in rows}
+    flagged = {str(t["id"]): t["review_reason"] for t in rows if t["needs_review"] is True}
+    assert all(t["needs_review"] is (t["review_reason"] is not None) for t in rows)
+    needs = {str(t["id"]) for t in _all_rows(client, needs_review=True)}
+    complement = {str(t["id"]) for t in _all_rows(client, needs_review=False)}
+    searched = {str(t["id"]) for t in _all_rows(client, q="is:needs-review")}
+    assert needs == set(flagged) == searched
+    assert needs.isdisjoint(complement)
+    assert needs | complement == {str(t["id"]) for t in rows}
     session.expire_all()
-    assert review.unreviewed_count(session) == len(flagged)
-    batch = client.get(
-        "/transactions/review-batch", params={"limit": 25, "include_guidance": False}
-    ).json()
-    assert batch["unreviewed_total"] == len(flagged)
-    assert {r["id"] for r in batch["rows"]} <= flagged
+    counts = review.counts(session)
+    assert counts["total"] == len(flagged)
+    assert counts[UNCATEGORIZED] == sum(r == UNCATEGORIZED for r in flagged.values())
+    assert counts[ADJUSTMENT] == sum(r == ADJUSTMENT for r in flagged.values())
+    summary = client.get("/transactions/review-summary").json()
+    assert summary["total"] == len(flagged)
+    assert summary["uncategorized"] == counts[UNCATEGORIZED]
+    assert summary["reconciliation_adjustments"] == counts[ADJUSTMENT]
+    batch = client.get("/transactions/review-batch", params={"limit": 25}).json()
+    assert batch["total"] == len(flagged)
+    assert {r["id"]: r["reason"] for r in batch["rows"]}.items() <= flagged.items()
     return flagged
 
 
-def _schedule_instance(client: TestClient) -> str:
-    """An `expected` row a schedule materialized (origin='rule'). Weekly, so
-    the 60-day horizon holds instances whatever day the suite runs."""
+# --------------------------------------------------------------------------
+# Reason 1: a bank-sync row with no category
+# --------------------------------------------------------------------------
+
+
+class TestUncategorized:
+    def test_a_bank_sync_row_with_no_category_needs_review(
+        self, seeded: dict[str, str], client: TestClient, db_session: Session
+    ) -> None:
+        expense = _feed_row(db_session)
+        income = _feed_row(db_session, category="income.uncategorized", amount="40.00")
+        filed = _feed_row(db_session, category="expenses.dining")
+        db_session.commit()
+        assert _reason(client, expense) == UNCATEGORIZED
+        assert _reason(client, income) == UNCATEGORIZED
+        assert _reason(client, filed) is None
+        assert _assert_one_predicate(client, db_session) == {
+            str(expense): UNCATEGORIZED,
+            str(income): UNCATEGORIZED,
+        }
+
+    def test_a_rule_or_payee_memory_categorizing_it_clears_it(
+        self, seeded: dict[str, str], client: TestClient, db_session: Session
+    ) -> None:
+        """Automation that files a row is exactly as good as a person doing
+        it: the flag reads the category, not who set it."""
+        by_rule = _feed_row(db_session, payee="Synthetic Rule Payee")
+        by_memory = _feed_row(db_session, status="pending", payee="Synthetic Memory Payee")
+        db_session.commit()
+        resp = client.post(
+            "/rules",
+            json={
+                "type": "categorize",
+                "match_field": "payee",
+                "match_mode": "equals",
+                "match_text": "Synthetic Rule Payee",
+                "category_id": seeded["expenses.groceries"],
+                "activate": True,
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        for _ in range(2):  # accepted history: payee memory
+            client.post(
+                "/transactions",
+                json={
+                    "account": "assets.checking",
+                    "category": "expenses.dining",
+                    "amount": "-9.00",
+                    "date": today().isoformat(),
+                    "payee": "Synthetic Memory Payee",
+                    "status": "posted",
+                },
+            )
+        assert _reason(client, by_rule) == UNCATEGORIZED
+        assert _reason(client, by_memory) == UNCATEGORIZED
+
+        stats = client.post("/categorize/run").json()
+        assert stats["rule"] == 1 and stats["deterministic"] == 1
+        assert _assert_one_predicate(client, db_session) == {}
+        assert _detail(client, by_memory)["category_path"] == "expenses.dining"
+
+    def test_rows_a_person_an_agent_or_a_file_import_wrote_never_need_review(
+        self, seeded: dict[str, str], client: TestClient, db_session: Session
+    ) -> None:
+        manual = _manual(client)
+        agent_token = client.post(
+            "/tokens", json={"name": "agent", "scopes": ["read", "write"]}
+        ).json()["token"]
+        agent = _manual(client, headers={"Authorization": f"Bearer {agent_token}"})
+        assert agent["origin"] == "agent"
+        before = {str(t["id"]) for t in _all_rows(client)}
+        qif = client.post(
+            "/import/qif",
+            json={
+                "content": (
+                    "!Account\nNChecking\nTBank\n^\n!Type:Bank\n"
+                    "D1/15/2024\nT-42.00\nPSynthetic Store\n^\n"
+                ),
+                "account_map": {"Checking": "assets.checking"},
+            },
+        )
+        assert qif.status_code == 200, qif.text
+        csv = client.post(
+            "/import/csv",
+            json={
+                "content": "Date,Payee,Amount\n2024-07-02,Synthetic Cafe,-12.00\n",
+                "account_map": {"__default__": "assets.checking"},
+            },
+        )
+        assert csv.status_code == 200, csv.text
+        imported = [t for t in _all_rows(client) if str(t["id"]) not in before]
+        assert len(imported) == 2
+        assert {t["origin"] for t in imported} == {"import"}
+        # Every one of them is uncategorized, and none needs review.
+        for row in [manual, agent, *imported]:
+            assert _detail(client, row["id"])["category_path"] == "expenses.uncategorized"
+            assert _reason(client, row["id"]) is None
+        assert _assert_one_predicate(client, db_session) == {}
+
+    def test_the_setting_off_clears_the_reason_everywhere(
+        self, seeded: dict[str, str], client: TestClient, db_session: Session
+    ) -> None:
+        feed = _feed_row(db_session)
+        db_session.commit()
+        adjustment = _adjustment(client, seeded)
+        assert _assert_one_predicate(client, db_session) == {
+            str(feed): UNCATEGORIZED,
+            adjustment: ADJUSTMENT,
+        }
+
+        resp = client.put("/config", json={"review_uncategorized": False})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["values"]["review_uncategorized"] is False
+        assert _reason(client, feed) is None
+        # The adjustment is always on.
+        assert _assert_one_predicate(client, db_session) == {adjustment: ADJUSTMENT}
+        assert review.counts(db_session)[UNCATEGORIZED] == 0
+
+        assert client.delete("/config/review_uncategorized").status_code == 200
+        assert _reason(client, feed) == UNCATEGORIZED
+
+    def test_a_pending_row_needs_review_and_its_categorized_posted_row_does_not(
+        self, seeded: dict[str, str], client: TestClient, db_session: Session
+    ) -> None:
+        from purser.feed import reconcile
+        from purser.models import Transaction
+
+        pending = _feed_row(db_session, status="pending")
+        db_session.commit()
+        assert _reason(client, pending) == UNCATEGORIZED
+
+        posted = _feed_row(db_session, category="expenses.dining")
+        row = db_session.get(Transaction, pending)
+        successor = db_session.get(Transaction, posted)
+        assert row is not None and successor is not None
+        reconcile.void_pending(db_session, row, successor=successor)
+        db_session.commit()
+        assert _detail(client, pending)["status"] == "void"
+        assert _assert_one_predicate(client, db_session) == {}
+
+    def test_a_corrected_row_that_is_still_uncategorized_still_needs_review(
+        self, seeded: dict[str, str], client: TestClient, db_session: Session
+    ) -> None:
+        """A person editing a posted bank row's description writes a
+        correction whose replacement is origin='human' with no fetch: it is
+        still that bank line, and still has no category."""
+        original = _feed_row(db_session)
+        db_session.commit()
+        resp = client.patch(f"/transactions/{original}", json={"description": "Synthetic note"})
+        assert resp.status_code == 200, resp.text
+        head = resp.json()
+        assert head["id"] != str(original)
+        assert head["origin"] == "human" and head["source_fetch_id"] is None
+        assert head["review_reason"] == UNCATEGORIZED
+        # The original and its reversal are never asked about.
+        assert _assert_one_predicate(client, db_session) == {head["id"]: UNCATEGORIZED}
+
+        categorized = client.patch(
+            f"/transactions/{head['id']}", json={"category": "expenses.dining"}
+        )
+        assert categorized.status_code == 200, categorized.text
+        assert categorized.json()["needs_review"] is False
+        assert _assert_one_predicate(client, db_session) == {}
+
+    def test_an_unlinked_clone_of_a_corrected_row_is_still_that_bank_line(
+        self, seeded: dict[str, str], client: TestClient, db_session: Session
+    ) -> None:
+        """The clone of a replacement has no fetch and the replacement's
+        origin; only the walk through the void row it carries on (and that
+        row's correction) reaches the feed row."""
+        original = _feed_row(db_session, amount="-30.00")
+        db_session.commit()
+        head = client.patch(f"/transactions/{original}", json={"description": "Synthetic"}).json()
+        incoming = client.post(
+            "/transactions",
+            json={
+                "account": "assets.savings",
+                "category": "expenses.dining",
+                "amount": "30.00",
+                "date": today().isoformat(),
+                "status": "posted",
+            },
+        ).json()
+        resp = client.post(
+            "/matching/confirm-transfer",
+            json={"outgoing_id": head["id"], "incoming_id": incoming["id"]},
+        )
+        assert resp.status_code == 200, resp.text
+        merged = resp.json()["merged_transaction_id"]
+        assert _reason(client, merged) is None  # a merged transfer never needs review
+        unlink = client.post(f"/transactions/{merged}/unlink-transfer")
+        assert unlink.status_code == 200, unlink.text
+        resurrected = unlink.json()["resurrected_ids"]
+        clone = next(
+            i for i in resurrected if _detail(client, i)["account_path"] == "assets.checking"
+        )
+        assert _detail(client, clone)["origin"] == "human"
+        assert _detail(client, clone)["source_fetch_id"] is None
+        assert _reason(client, clone) == UNCATEGORIZED
+        assert _assert_one_predicate(client, db_session) == {clone: UNCATEGORIZED}
+
+    def test_a_split_with_an_uncategorized_line_needs_review(
+        self, seeded: dict[str, str], client: TestClient, db_session: Session
+    ) -> None:
+        tx_id = _feed_row(db_session, category="expenses.dining", amount="-50.00")
+        db_session.commit()
+        assert _reason(client, tx_id) is None
+        resp = client.put(
+            f"/transactions/{tx_id}/split",
+            json={
+                "lines": [
+                    {"category": "expenses.dining", "amount": "-30.00"},
+                    {"category": "expenses.uncategorized", "amount": "-20.00"},
+                ]
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        split = str(resp.json()["transaction_id"])
+        assert _assert_one_predicate(client, db_session) == {split: UNCATEGORIZED}
+
+        resp = client.put(
+            f"/transactions/{split}/split",
+            json={
+                "lines": [
+                    {"category": "expenses.dining", "amount": "-30.00"},
+                    {"category": "expenses.groceries", "amount": "-20.00"},
+                ]
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        assert _assert_one_predicate(client, db_session) == {}
+
+    def test_never_flagged_whatever_the_origin_when_no_feed_row_is_in_its_lineage(
+        self, seeded: dict[str, str], client: TestClient, db_session: Session
+    ) -> None:
+        """Purser's own entries (origin system), rule replacements and
+        schedule-instance shaped rows carry no feed row in their lineage."""
+        for origin, status in [("system", "posted"), ("rule", "posted"), ("rule", "expected")]:
+            _shaped_row(db_session, origin=origin, status=status, from_feed=False)
+        db_session.commit()
+        assert _assert_one_predicate(client, db_session) == {}
+
+
+# --------------------------------------------------------------------------
+# Reason 2: a reconciliation adjustment
+# --------------------------------------------------------------------------
+
+
+def _adjustment(client: TestClient, ids: dict[str, str], *, balance: str = "75.00") -> str:
+    """Reconcile checking (holding nothing) to ``balance``: the adjustment
+    row's id."""
     resp = client.post(
-        "/schedules",
-        json={
-            "name": "Synthetic Gym",
-            "account": "assets.checking",
-            "rrule": "FREQ=WEEKLY",
-            "amount_type": "fixed",
-            "amount": "-30.00",
-        },
+        f"/accounts/{ids['checking']}/reconcile",
+        json={"as_of": (today() - timedelta(days=1)).isoformat(), "statement_balance": balance},
     )
-    assert resp.status_code == 201, resp.text
-    instances = [
-        t
-        for t in _all_rows(client)
-        if t["schedule_id"] == resp.json()["id"] and t["status"] == "expected"
-    ]
-    assert instances
-    assert all(t["origin"] == "rule" for t in instances)
-    return str(instances[0]["id"])
-
-
-def _import(client: TestClient, path: str, body: dict[str, object]) -> str:
-    """Run a real file import and return the one row it created."""
-    before = _ids(client)
-    resp = client.post(path, json=body)
     assert resp.status_code == 200, resp.text
-    assert resp.json()["imported"] == 1
-    (row_id,) = _ids(client) - before
-    return row_id
+    adjustment = resp.json()["adjustment_tx_id"]
+    assert adjustment is not None
+    return str(adjustment)
 
 
-# Row shapes by (origin, status, from_feed). Origins and statuses the
-# predicate distinguishes, built directly so a property run stays fast.
+def _audits(engine: Engine, action: str) -> list[dict[str, Any]]:
+    import json
+
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT before_after_enc FROM audit_log WHERE action = :a AND kind = 'change'"
+                " ORDER BY at"
+            ),
+            {"a": action},
+        ).scalars()
+        return [json.loads(crypto.decrypt(bytes(r))) for r in rows]
+
+
+class TestReconciliationAdjustment:
+    def test_an_adjustment_needs_review_until_it_is_recategorized(
+        self, seeded: dict[str, str], client: TestClient, db_session: Session
+    ) -> None:
+        adjustment = _adjustment(client, seeded)
+        assert _detail(client, adjustment)["origin"] == "system"
+        assert _assert_one_predicate(client, db_session) == {adjustment: ADJUSTMENT}
+
+        resp = client.patch(f"/transactions/{adjustment}", json={"category": "expenses.dining"})
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["needs_review"] is False
+        assert _assert_one_predicate(client, db_session) == {}
+
+    def test_a_description_edit_keeps_it_flagged_on_its_new_row(
+        self, seeded: dict[str, str], client: TestClient, db_session: Session
+    ) -> None:
+        adjustment = _adjustment(client, seeded)
+        head = client.patch(f"/transactions/{adjustment}", json={"description": "Synthetic"})
+        assert head.status_code == 200, head.text
+        assert head.json()["review_reason"] == ADJUSTMENT
+        assert _assert_one_predicate(client, db_session) == {head.json()["id"]: ADJUSTMENT}
+
+    def test_splitting_it_away_clears_it_and_a_line_left_on_it_does_not(
+        self, seeded: dict[str, str], client: TestClient, db_session: Session
+    ) -> None:
+        adjustment = _adjustment(client, seeded, balance="50.00")
+        kept = client.put(
+            f"/transactions/{adjustment}/split",
+            json={
+                "lines": [
+                    {"category": "expenses.reconciliation_adjustments", "amount": "20.00"},
+                    {"category": "income.uncategorized", "amount": "30.00"},
+                ]
+            },
+        )
+        assert kept.status_code == 200, kept.text
+        split = str(kept.json()["transaction_id"])
+        # A line still on the adjustments category: still the adjustment (an
+        # uncategorized line of a non-feed row is no reason of its own).
+        assert _assert_one_predicate(client, db_session) == {split: ADJUSTMENT}
+
+        away = client.put(
+            f"/transactions/{split}/split",
+            json={
+                "lines": [
+                    {"category": "expenses.dining", "amount": "20.00"},
+                    {"category": "expenses.groceries", "amount": "30.00"},
+                ]
+            },
+        )
+        assert away.status_code == 200, away.text
+        assert _assert_one_predicate(client, db_session) == {}
+
+    def test_accepting_it_clears_it_is_audited_and_idempotent(
+        self,
+        seeded: dict[str, str],
+        client: TestClient,
+        db_session: Session,
+        migrated_engine: Engine,
+    ) -> None:
+        adjustment = _adjustment(client, seeded)
+        first = client.post(
+            f"/transactions/{adjustment}/accept-adjustment",
+            json={"note": "Synthetic: bank fee"},
+        )
+        assert first.status_code == 200, first.text
+        body = first.json()
+        assert body["created"] is True
+        assert body["adjustment_tx_id"] == adjustment
+        assert body["accepted_by"] is not None
+        assert _assert_one_predicate(client, db_session) == {}
+
+        again = client.post(f"/transactions/{adjustment}/accept-adjustment")
+        assert again.status_code == 200, again.text
+        assert again.json()["created"] is False
+        assert again.json()["accepted_at"] == body["accepted_at"]
+
+        audits = _audits(migrated_engine, "reconciliation.adjustment_accepted")
+        assert len(audits) == 1
+        assert audits[0]["after"]["adjustment_tx_id"] == adjustment
+        assert audits[0]["after"]["note"] == "Synthetic: bank fee"
+
+        history = client.get(f"/accounts/{seeded['checking']}/reconciliations").json()
+        assert history[0]["adjustment_accepted_at"] is not None
+        assert history[0]["adjustment_accepted_by"] == body["accepted_by"]
+
+    def test_accepting_by_the_row_a_correction_left(
+        self, seeded: dict[str, str], client: TestClient, db_session: Session
+    ) -> None:
+        adjustment = _adjustment(client, seeded)
+        head = client.patch(
+            f"/transactions/{adjustment}", json={"description": "Synthetic"}
+        ).json()["id"]
+        resp = client.post(f"/transactions/{head}/accept-adjustment")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["adjustment_tx_id"] == adjustment
+        assert _assert_one_predicate(client, db_session) == {}
+
+    def test_refusals(self, seeded: dict[str, str], client: TestClient) -> None:
+        assert client.post(f"/transactions/{uuid.uuid4()}/accept-adjustment").status_code == 404
+        manual = _manual(client, category="expenses.dining")
+        refused = client.post(f"/transactions/{manual['id']}/accept-adjustment")
+        assert refused.status_code == 422
+        assert "not a reconciliation adjustment" in refused.json()["detail"]
+        too_long = client.post(
+            f"/transactions/{_adjustment(client, seeded)}/accept-adjustment",
+            json={"note": "x" * 201},
+        )
+        assert too_long.status_code == 422
+
+    def test_accepting_requires_write_scope(
+        self, seeded: dict[str, str], client: TestClient
+    ) -> None:
+        adjustment = _adjustment(client, seeded)
+        reader = client.post("/tokens", json={"name": "reader", "scopes": ["read"]}).json()
+        resp = client.post(
+            f"/transactions/{adjustment}/accept-adjustment",
+            headers={"Authorization": f"Bearer {reader['token']}"},
+        )
+        assert resp.status_code == 403
+
+    def test_an_asset_value_change_never_needs_review(
+        self, seeded: dict[str, str], client: TestClient, db_session: Session
+    ) -> None:
+        resp = client.post(
+            f"/accounts/{seeded['house']}/reconcile",
+            json={"as_of": today().isoformat(), "statement_balance": "250000.00"},
+        )
+        assert resp.status_code == 200, resp.text
+        change = resp.json()["adjustment_tx_id"]
+        assert resp.json()["category"] == "equity.revaluation"
+        assert _reason(client, change) is None
+        assert _assert_one_predicate(client, db_session) == {}
+        refused = client.post(f"/transactions/{change}/accept-adjustment")
+        assert refused.status_code == 422
+        assert "needs no review" in refused.json()["detail"]
+
+    def test_the_mcp_tool_accepts(
+        self, seeded: dict[str, str], admin_client: TestClient, live_server: Any
+    ) -> None:
+        from tests.test_mcp import _mcp_call
+
+        adjustment = _adjustment(admin_client, seeded)
+        token = admin_client.post(
+            "/tokens", json={"name": "agent", "scopes": ["read", "write"]}
+        ).json()["token"]
+        batch, accepted, again, after = _mcp_call(
+            live_server.url,
+            token,
+            [
+                ("review_batch", {}),
+                ("accept_reconciliation_adjustment", {"transaction_id": adjustment}),
+                ("accept_reconciliation_adjustment", {"transaction_id": adjustment}),
+                ("review_batch", {}),
+            ],
+        )
+        assert [(r["id"], r["reason"]) for r in batch["rows"]] == [(adjustment, ADJUSTMENT)]
+        assert set(batch["rows"][0]) == {
+            "id",
+            "date",
+            "account",
+            "payee",
+            "description",
+            "amount",
+            "status",
+            "reason",
+            "category",
+            "memories",
+        }
+        assert accepted["created"] is True and again["created"] is False
+        assert after["total"] == 0 and after["rows"] == []
+
+
+@pytest.fixture
+def live_server(migrated_engine: Engine) -> Any:
+    from tests.test_mcp import LiveServer
+
+    server = LiveServer()
+    server.start()
+    yield server
+    server.stop()
+
+
+# --------------------------------------------------------------------------
+# One predicate, every surface (#248)
+# --------------------------------------------------------------------------
+
+
+# Row shapes by (origin, status, from_feed), built directly so a property run
+# stays fast.
 _SHAPES = st.sampled_from(
     [
         ("import", "posted", True),  # feed row
         ("import", "pending", True),  # feed pending
         ("import", "posted", False),  # QIF/CSV-shaped: no source_fetch_id
-        ("system", "posted", False),  # automation (merge, reversal)
-        ("rule", "posted", False),  # rule replacement
+        ("system", "posted", False),  # Purser's own entry
+        ("rule", "posted", False),
         ("rule", "expected", False),  # schedule-instance shaped
         ("human", "posted", False),
         ("agent", "pending", False),
@@ -429,263 +683,8 @@ def _shaped_row(session: Session, *, origin: str, status: str, from_feed: bool) 
     return tx.id
 
 
-def _correct_by_automation(session: Session, tx_id: uuid.UUID) -> uuid.UUID:
-    """A system-actor recategorization: reversal + replacement (origin rule),
-    the replacement inheriting the original's review state."""
-    from purser import ledger
-    from purser.models import Transaction
-
-    tx = session.get(Transaction, tx_id)
-    assert tx is not None
-    replacement = ledger.recategorize_posted(
-        session,
-        tx=tx,
-        category_id=ledger.resolve_account(session, "expenses.dining").id,
-        token=None,
-        provenance={"source": "rule"},
-    )
-    session.flush()
-    return replacement.id
-
-
-class TestNeedsReviewFlag:
-    """The register's "needs review" badge renders `needs_review`, which the
-    server computes with review.py's one predicate (#248).
-
-    The issue blamed the SCOPE for flagging schedule instances, but the scope
-    never held them: it covers live (pending/posted) rows only. The badge was
-    computed in the browser as "no review mark", and most rows never need
-    one — so it also flagged manual, agent and QIF/CSV rows.
-    """
-
-    def test_each_kind_of_row_reports_its_own_membership(
-        self, seeded: None, client: TestClient, db_session: Session
-    ) -> None:
-        instance_id = _schedule_instance(client)
-        manual = client.post(
-            "/transactions",
-            json={
-                "account": "assets.checking",
-                "category": "expenses.dining",
-                "amount": "-10.00",
-                "date": today().isoformat(),
-                "status": "posted",
-            },
-        )
-        assert manual.status_code == 201, manual.text
-        agent_token = client.post(
-            "/tokens", json={"name": "agent", "scopes": ["read", "write"]}
-        ).json()["token"]
-        agent = client.post(
-            "/transactions",
-            headers={"Authorization": f"Bearer {agent_token}"},
-            json={
-                "account": "assets.checking",
-                "category": "expenses.dining",
-                "amount": "-11.00",
-                "date": today().isoformat(),
-            },
-        )
-        assert agent.status_code == 201, agent.text
-        assert agent.json()["origin"] == "agent"
-        qif_id = _import(
-            client,
-            "/import/qif",
-            {
-                "content": (
-                    "!Account\nNChecking\nTBank\n^\n!Type:Bank\n"
-                    "D1/15/2024\nT-42.00\nPSynthetic Store\nLDining\n^\n"
-                ),
-                "account_map": {"Checking": "assets.checking"},
-            },
-        )
-        csv_id = _import(
-            client,
-            "/import/csv",
-            {
-                "content": "Date,Payee,Amount\n2024-07-02,Synthetic Cafe,-12.00\n",
-                "account_map": {"__default__": "assets.checking"},
-            },
-        )
-        unreviewed_id = _feed_row(db_session)
-        reviewed_id = _feed_row(db_session)
-        db_session.commit()
-        resp = client.post(
-            "/transactions/mark-reviewed", json={"transaction_ids": [str(reviewed_id)]}
-        )
-        assert resp.status_code == 200, resp.text
-
-        want = {
-            instance_id: False,
-            str(manual.json()["id"]): False,
-            str(agent.json()["id"]): False,
-            qif_id: False,
-            csv_id: False,
-            str(unreviewed_id): True,
-            str(reviewed_id): False,
-        }
-        rows = {str(t["id"]): t for t in _all_rows(client)}
-        assert {i: rows[i]["needs_review"] for i in want} == want
-        # None of the rows the browser used to flag carries a mark — which is
-        # exactly why "no mark" cannot be the badge's input.
-        for i, needs in want.items():
-            if i != str(reviewed_id):
-                assert rows[i]["reviewed_at"] is None
-            assert client.get(f"/transactions/{i}").json()["needs_review"] is needs
-        # The detail view carries the mark, too (it used to report null).
-        assert client.get(f"/transactions/{reviewed_id}").json()["reviewed_at"] is not None
-        assert _assert_one_predicate(client, db_session) == {str(unreviewed_id)}
-
-    def test_a_correction_chain_is_asked_about_once_at_its_head(
-        self, seeded: None, client: TestClient, db_session: Session
-    ) -> None:
-        """An automation correction leaves the original AND its reversal live
-        and in scope (posted, unsuperseded, origins import/system). Only the
-        chain-head test keeps them out of the set — and ?reviewed=false with
-        include_collapsed used to skip that test, listing three rows where the
-        count saw one."""
-        original = _feed_row(db_session)
-        head = _correct_by_automation(db_session, original)
-        db_session.commit()
-        instance_id = _schedule_instance(client)
-        skipped = client.post(f"/transactions/{instance_id}/void")  # a skip
-        assert skipped.status_code == 200, skipped.text
-        assert skipped.json()["needs_review"] is False
-
-        posted = {str(t["id"]) for t in _all_rows(client) if t["status"] == "posted"}
-        assert len(posted) == 3 and {str(original), str(head)} <= posted  # + the reversal
-        assert _assert_one_predicate(client, db_session) == {str(head)}
-
-    @settings(
-        max_examples=10, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
-    )
-    @given(plan=st.lists(st.tuples(_SHAPES, st.booleans(), st.booleans()), min_size=1, max_size=6))
-    def test_flag_and_filter_are_one_set_for_any_ledger(
-        self,
-        seeded: None,
-        client: TestClient,
-        db_session: Session,
-        plan: list[tuple[tuple[str, str, bool], bool, bool]],
-    ) -> None:
-        """Whatever mix of origins, statuses, marks and corrections the ledger
-        holds, the per-row flag and GET ?reviewed=false never disagree (rows
-        accumulate across examples, which only widens the mix)."""
-        for (origin, status, from_feed), marked, corrected in plan:
-            tx_id = _shaped_row(db_session, origin=origin, status=status, from_feed=from_feed)
-            if marked:
-                review.mark(db_session, tx_id=tx_id, token=None, via=review.VIA_EXPLICIT)
-            if corrected and status == "posted":
-                _correct_by_automation(db_session, tx_id)
-        db_session.commit()
-        _assert_one_predicate(client, db_session)
-
-
-class TestAgedSweep:
-    def test_stale_rows_are_marked_aged_and_distinguishable(
-        self, seeded: None, db_session: Session
-    ) -> None:
-        """`via='aged'` is deliberately NOT 'explicit': an audit reader must
-        always be able to tell which rows were actually looked at."""
-        from purser.models import TransactionReview
-
-        # Dated old at CREATION: a posted row's date is immutable (migration
-        # 0005), which is the same guard this feature had to route around.
-        tx_id = _feed_row(db_session, when=today() - timedelta(days=200))
-        db_session.commit()
-
-        assert review.aged_sweep(db_session, max_age_days=90) == 1
-        db_session.commit()
-        mark_row = db_session.get(TransactionReview, tx_id)
-        assert mark_row is not None
-        assert mark_row.via == "aged"
-
-    def test_fresh_rows_are_untouched(self, seeded: None, db_session: Session) -> None:
-        _feed_row(db_session)
-        db_session.commit()
-        assert review.aged_sweep(db_session, max_age_days=90) == 0
-
-
-class TestBackendReviewer:
-    def test_is_a_no_op_without_a_provider(self, seeded: None, db_session: Session) -> None:
-        _feed_row(db_session)
-        db_session.commit()
-        assert review.ai_review_pass(db_session) == {
-            "reviewed": 0,
-            "escalated": 0,
-            "skipped": 0,
-        }
-        assert review.unreviewed_count(db_session) == 1
-
-    def test_is_a_no_op_with_a_provider_but_the_switch_off(
-        self, seeded: None, db_session: Session, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Configuring a provider must grant nothing by itself (DESIGN §11)."""
-        import purser.config
-
-        monkeypatch.setenv("PURSER_AI_PROVIDER", "openai")
-        monkeypatch.setenv("PURSER_AI_MODEL", "test-model")
-        purser.config.get_settings.cache_clear()
-        try:
-            _feed_row(db_session)
-            db_session.commit()
-            assert review.ai_review_pass(db_session)["reviewed"] == 0
-            assert review.unreviewed_count(db_session) == 1
-        finally:
-            purser.config.get_settings.cache_clear()
-
-
-# --------------------------------------------------------------------------
-# A mark follows its bank line (decision 82, #342)
-# --------------------------------------------------------------------------
-
-
-def _reviewer(session: Session) -> ApiToken:
-    from purser.models import User
-
-    user = User(email=f"reviewer_{uuid.uuid4().hex[:8]}@example.com")
-    session.add(user)
-    session.flush()
-    token = ApiToken(
-        user_id=user.id, name="reviewer", token_hash=uuid.uuid4().hex, scopes=["read", "write"]
-    )
-    session.add(token)
-    session.flush()
-    return token
-
-
-def _supersede(
-    session: Session, pending_id: uuid.UUID, successor_id: uuid.UUID, **kw: bool
-) -> None:
-    from purser.feed import reconcile
-    from purser.models import Transaction
-
-    pending = session.get(Transaction, pending_id)
-    successor = session.get(Transaction, successor_id)
-    assert pending is not None and successor is not None
-    reconcile.void_pending(session, pending, successor=successor, **kw)
-
-
-def _review_row(session: Session, tx_id: uuid.UUID) -> TransactionReview | None:
-    session.expire_all()
-    return session.get(TransactionReview, tx_id)
-
-
-def _reviewed_audits(session: Session, tx_id: uuid.UUID) -> list[dict[str, object]]:
-    from sqlalchemy import select
-
-    from purser.models import AuditLog
-
-    rows = session.execute(
-        select(AuditLog).where(
-            AuditLog.action == "transaction.reviewed", AuditLog.entity_id == tx_id
-        )
-    ).scalars()
-    return [
-        {"actor": row.actor_token_id, **(row.before_after or {}).get("after", {})} for row in rows
-    ]
-
-
-def _automation_correction(session: Session, tx_id: uuid.UUID, category: str) -> uuid.UUID:
+def _correct(session: Session, tx_id: uuid.UUID, category: str) -> uuid.UUID:
+    """A system-actor correction (reversal + replacement, origin rule)."""
     from purser import ledger
     from purser.models import Transaction
 
@@ -702,312 +701,130 @@ def _automation_correction(session: Session, tx_id: uuid.UUID, category: str) ->
     return replacement.id
 
 
-@pytest.fixture
-def carry_seeded(seeded: None, client: TestClient) -> None:
-    resp = client.post(
-        "/categories",
-        json={"name": "Groceries", "type": "category_expense", "path": "expenses.groceries"},
-    )
-    assert resp.status_code == 201, resp.text
-
-
-class TestReviewFollowsThePending:
-    """The reconciler's ``void_pending`` is where both of #342's paths — the
-    successor pairing and the identity move — supersede a pending by its
-    posted row, so this is the seam the carry is pinned at."""
-
-    def test_the_whole_mark_goes_to_the_successor(
-        self, carry_seeded: None, db_session: Session
+class TestOnePredicate:
+    def test_flag_and_filter_and_counts_for_each_kind_of_row(
+        self, seeded: dict[str, str], client: TestClient, db_session: Session
     ) -> None:
-        token = _reviewer(db_session)
+        feed = _feed_row(db_session)
         pending = _feed_row(db_session, status="pending")
-        successor = _feed_row(db_session)
-        review.mark(
-            db_session, tx_id=pending, token=token, via="explicit", note="checked", escalate=True
-        )
-        source = _review_row(db_session, pending)
-        assert source is not None
-
-        _supersede(db_session, pending, successor, identity_moved=True)
-
-        copy = _review_row(db_session, successor)
-        assert copy is not None
-        assert (copy.reviewed_by, copy.via, copy.note) == (token.id, "explicit", "checked")
-        assert (copy.reviewed_at, copy.escalated_at) == (source.reviewed_at, source.escalated_at)
-        assert copy.carried_from == pending
-        (audit,) = _reviewed_audits(db_session, successor)
-        assert audit["actor"] is None
-        assert (audit["reason"], audit["carried_from"], audit["escalated"]) == (
-            "pending_posted",
-            str(pending),
-            True,
-        )
-        assert review.needs_review_ids(db_session, [successor]) == set()
-
-    def test_an_unreviewed_pending_leaves_its_successor_unreviewed(
-        self, carry_seeded: None, db_session: Session
-    ) -> None:
-        pending = _feed_row(db_session, status="pending")
-        successor = _feed_row(db_session)
-
-        _supersede(db_session, pending, successor)
-
-        assert _review_row(db_session, successor) is None
-        assert review.needs_review_ids(db_session, [successor]) == {successor}
-
-    def test_a_successor_with_its_own_mark_keeps_it(
-        self, carry_seeded: None, db_session: Session
-    ) -> None:
-        token = _reviewer(db_session)
-        pending = _feed_row(db_session, status="pending")
-        successor = _feed_row(db_session)
-        review.mark(db_session, tx_id=pending, token=token, via="explicit", escalate=True)
-        review.mark(db_session, tx_id=successor, token=None, via="aged")
-
-        _supersede(db_session, pending, successor)
-
-        kept = _review_row(db_session, successor)
-        assert kept is not None
-        assert (kept.via, kept.reviewed_by, kept.escalated_at, kept.carried_from) == (
-            "aged",
-            None,
-            None,
-            None,
-        )
-        assert [a["via"] for a in _reviewed_audits(db_session, successor)] == ["aged"]
-
-    def test_a_category_the_person_never_saw_comes_back_for_review(
-        self, carry_seeded: None, db_session: Session
-    ) -> None:
-        """A person recategorized the pending (which reviews it); the bank's
-        posted row arrives uncategorized — payee memory reads posted rows
-        only — so it says something nobody reviewed."""
-        from purser import ledger
-
-        token = _reviewer(db_session)
-        pending = _feed_row(db_session, status="pending")
-        successor = _feed_row(db_session)
-        ledger.update_transaction(
-            db_session, tx_id=pending, token=token, category_ref="expenses.dining"
-        )
-        mark = _review_row(db_session, pending)
-        assert mark is not None and mark.via == "update"
-
-        _supersede(db_session, pending, successor)
-
-        assert _review_row(db_session, successor) is None
-        assert review.needs_review_ids(db_session, [successor]) == {successor}
-
-    def test_a_successor_corrected_first_takes_the_mark_on_its_replacement(
-        self, carry_seeded: None, db_session: Session
-    ) -> None:
-        token = _reviewer(db_session)
-        pending = _feed_row(db_session, status="pending", category="expenses.dining")
-        successor = _feed_row(db_session)
-        review.mark(db_session, tx_id=pending, token=token, via="explicit")
-        replacement = _automation_correction(db_session, successor, "expenses.dining")
-
-        _supersede(db_session, pending, successor)
-
-        assert _review_row(db_session, successor) is None  # reversed: never asked about
-        copy = _review_row(db_session, replacement)
-        assert copy is not None
-        assert (copy.reviewed_by, copy.carried_from) == (token.id, pending)
-        assert review.needs_review_ids(db_session, [successor, replacement]) == set()
-
-    def test_a_carried_mark_survives_the_post_sync_correction(
-        self, carry_seeded: None, db_session: Session
-    ) -> None:
-        """Post-sync categorization corrects the posted row the same night:
-        the replacement inherits the carried mark whole, not a NULL actor
-        stamped now()."""
-        token = _reviewer(db_session)
-        pending = _feed_row(db_session, status="pending")
-        successor = _feed_row(db_session)
-        review.mark(db_session, tx_id=pending, token=token, via="match")
-        _supersede(db_session, pending, successor)
-        carried = _review_row(db_session, successor)
-        assert carried is not None
-
-        replacement = _automation_correction(db_session, successor, "expenses.dining")
-
-        copy = _review_row(db_session, replacement)
-        assert copy is not None
-        assert (copy.reviewed_by, copy.reviewed_at, copy.via) == (
-            token.id,
-            carried.reviewed_at,
-            "match",
-        )
-        assert copy.carried_from == successor
-        (audit,) = _reviewed_audits(db_session, replacement)
-        assert (audit["reason"], audit["actor"]) == ("correction", None)
-
-    def test_unlink_copies_the_whole_mark_escalation_included(
-        self, carry_seeded: None, db_session: Session
-    ) -> None:
-        token = _reviewer(db_session)
-        void_row = _feed_row(db_session)
-        clone = _feed_row(db_session)
-        review.mark(db_session, tx_id=void_row, token=token, via="explicit", escalate=True)
-
-        review.copy_to_clone(db_session, void_id=void_row, clone_id=clone)
-
-        copy = _review_row(db_session, clone)
-        assert copy is not None
-        assert copy.reviewed_by == token.id
-        assert copy.escalated_at is not None
-        assert copy.carried_from == void_row
-        (audit,) = _reviewed_audits(db_session, clone)
-        assert audit["reason"] == "unlink"
-
-
-class TestReviewCarryProperty:
-    """Guardrail 3 for decision 82: whatever the pending's mark, the path,
-    the categories and what already happened to the successor, its live head
-    is reviewed exactly when it was pre-marked, or the pending was marked
-    and the categories are equal — and a carried mark equals its source."""
+        recategorized = _correct(db_session, _feed_row(db_session), "expenses.dining")
+        still_uncategorized = _correct(db_session, _feed_row(db_session), "expenses.uncategorized")
+        db_session.commit()
+        adjustment = _adjustment(client, seeded)
+        _manual(client)
+        flagged = _assert_one_predicate(client, db_session)
+        assert flagged == {
+            str(feed): UNCATEGORIZED,
+            str(pending): UNCATEGORIZED,
+            str(still_uncategorized): UNCATEGORIZED,
+            adjustment: ADJUSTMENT,
+        }
+        assert str(recategorized) not in flagged
 
     @settings(
-        max_examples=30, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+        max_examples=10, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
     )
     @given(
-        marked=st.booleans(),
-        via=st.sampled_from(["explicit", "match", "update", "post", "ai_review"]),
-        escalated=st.booleans(),
-        identity_moved=st.booleans(),
-        same_category=st.booleans(),
-        premarked=st.booleans(),
-        corrected_first=st.booleans(),
+        plan=st.lists(
+            st.tuples(
+                _SHAPES, st.sampled_from([None, "expenses.dining", "expenses.uncategorized"])
+            ),
+            min_size=1,
+            max_size=6,
+        )
     )
-    def test_the_head_is_reviewed_exactly_when_it_should_be(
+    def test_every_surface_agrees_for_any_ledger(
         self,
-        carry_seeded: None,
-        marked: bool,
-        via: str,
-        escalated: bool,
-        identity_moved: bool,
-        same_category: bool,
-        premarked: bool,
-        corrected_first: bool,
-    ) -> None:
-        import purser.db
-        from purser import schedules
-
-        with purser.db.get_sessionmaker()() as session:
-            token = _reviewer(session)
-            pending = _feed_row(session, status="pending", category="expenses.dining")
-            landed_in = (
-                "expenses.uncategorized"
-                if corrected_first or not same_category
-                else ("expenses.dining")
-            )
-            successor = _feed_row(session, category=landed_in)
-            if marked:
-                review.mark(session, tx_id=pending, token=token, via=via, escalate=escalated)
-            if premarked:
-                review.mark(session, tx_id=successor, token=None, via="aged")
-            if corrected_first:
-                _automation_correction(
-                    session,
-                    successor,
-                    "expenses.dining" if same_category else "expenses.groceries",
-                )
-            source = _review_row(session, pending)
-            head = schedules.chain_heads(session, [successor])[successor]
-            before = _review_row(session, head)
-            before_shape = (before.via, before.reviewed_by, before.reviewed_at) if before else None
-
-            _supersede(session, pending, successor, identity_moved=identity_moved)
-
-            after = _review_row(session, head)
-            assert (after is not None) == (premarked or (marked and same_category))
-            assert review.needs_review_ids(session, [head]) == (set() if after else {head})
-            if premarked:
-                assert after is not None
-                assert (after.via, after.reviewed_by, after.reviewed_at) == before_shape
-            elif after is not None:
-                assert source is not None
-                assert (after.reviewed_by, after.via, after.reviewed_at, after.note) == (
-                    source.reviewed_by,
-                    source.via,
-                    source.reviewed_at,
-                    source.note,
-                )
-                assert after.escalated_at == source.escalated_at
-                assert after.carried_from == pending
-            session.rollback()
-
-
-# --------------------------------------------------------------------------
-# Migration 0032 up/down (scratch database, never the suite's)
-# --------------------------------------------------------------------------
-
-
-def test_migration_0032_round_trips(database_url: str) -> None:
-    import os
-    from pathlib import Path
-
-    import sqlalchemy as sa
-    from alembic import command
-    from alembic.config import Config
-
-    import purser.config
-    from tests.conftest import TEST_ENCRYPTION_KEY
-
-    os.environ["PURSER_ENCRYPTION_KEY"] = TEST_ENCRYPTION_KEY
-    purser.config.get_settings.cache_clear()
-    admin = sa.create_engine(database_url, isolation_level="AUTOCOMMIT")
-    with admin.connect() as conn:
-        conn.execute(sa.text("DROP DATABASE IF EXISTS purser_review_carry_mig WITH (FORCE)"))
-        conn.execute(sa.text("CREATE DATABASE purser_review_carry_mig"))
-    admin.dispose()
-    scratch_url = database_url.rsplit("/", 1)[0] + "/purser_review_carry_mig"
-    root = Path(__file__).resolve().parent.parent
-    cfg = Config(str(root / "alembic.ini"))
-    cfg.set_main_option("script_location", str(root / "migrations"))
-    cfg.set_main_option("sqlalchemy.url", scratch_url)
-    engine = sa.create_engine(scratch_url)
-    on_delete = sa.text(
-        "SELECT c.confdeltype FROM pg_constraint c"
-        " JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey)"
-        " WHERE c.conrelid = 'transaction_reviews'::regclass AND c.contype = 'f'"
-        " AND a.attname = 'carried_from'"
-    )
-    try:
-        command.upgrade(cfg, "0032")
-        with engine.connect() as conn:
-            assert conn.execute(on_delete).scalar_one() == "n"  # ON DELETE SET NULL
-        command.downgrade(cfg, "-1")  # whatever 0032 is re-chained onto
-        with engine.connect() as conn:
-            columns = set(
-                conn.execute(
-                    sa.text(
-                        "SELECT column_name FROM information_schema.columns"
-                        " WHERE table_name = 'transaction_reviews'"
-                    )
-                ).scalars()
-            )
-        assert "carried_from" not in columns and "escalated_at" in columns
-    finally:
-        engine.dispose()
-
-
-class TestReviewSummary:
-    def test_routes_pending_and_posted_without_counting_manual_rows(
-        self,
-        seeded: None,
+        seeded: dict[str, str],
         client: TestClient,
         db_session: Session,
+        plan: list[tuple[tuple[str, str, bool], str | None]],
     ) -> None:
-        posted = _feed_row(db_session, when=date(2026, 10, 1))
-        _feed_row(db_session, status="pending", when=date(2026, 10, 3))
+        """Whatever mix of origins, statuses and corrections the ledger holds,
+        every surface agrees, and a row is flagged exactly when it is a live
+        head with no category whose lineage holds a feed row (rows
+        accumulate across examples, which only widens the mix)."""
+        want: dict[str, str] = {}
+        heads: list[str] = []
+        for (origin, status, from_feed), correction in plan:
+            tx_id = _shaped_row(db_session, origin=origin, status=status, from_feed=from_feed)
+            head = tx_id
+            if correction is not None and status == "posted":
+                head = _correct(db_session, tx_id, correction)
+            heads.append(str(head))
+            category = correction if head != tx_id else "expenses.uncategorized"
+            assert category is not None
+            if from_feed and category.endswith("uncategorized"):
+                want[str(head)] = UNCATEGORIZED
         db_session.commit()
-        response = client.get("/transactions/review-summary")
-        assert response.status_code == 200, response.text
-        data = response.json()
-        assert data["total"] == 2 and data["pending"] == 1
-        assert data["oldest_date"] == "2026-10-01"
-        assert data["accounts"][0]["total"] == 2
-        assert data["accounts"][0]["pending"] == 1
-        client.post("/transactions/mark-reviewed", json={"transaction_ids": [str(posted)]})
-        assert client.get("/transactions/review-summary").json()["total"] == 1
+        flagged = _assert_one_predicate(client, db_session)
+        assert {h: flagged.get(h) for h in heads} == {h: want.get(h) for h in heads}
+
+
+class TestSurfaces:
+    def test_review_batch_route_is_not_shadowed_and_is_lean(
+        self, seeded: dict[str, str], client: TestClient, db_session: Session
+    ) -> None:
+        tx_id = _feed_row(db_session, days_ago=1)
+        newer = _feed_row(db_session)
+        db_session.commit()
+        resp = client.get("/transactions/review-batch", params={"limit": 1})
+        assert resp.status_code == 200, resp.text
+        payload = resp.json()
+        assert set(payload) == {"total", "rows", "remaining"}
+        assert payload["total"] == 2 and payload["remaining"] == 1
+        (row,) = payload["rows"]
+        assert row["id"] == str(newer)  # newest first
+        assert row["reason"] == UNCATEGORIZED
+        assert row["category"] == "expenses.uncategorized"
+        assert row["account"] == "assets.checking" and row["amount"] == "-25.0000"
+        by_account = client.get(
+            "/transactions/review-batch", params={"account": "assets.savings"}
+        ).json()
+        assert by_account["total"] == 0
+        assert client.get(f"/transactions/{tx_id}").status_code == 200
+
+    def test_removed_surfaces_are_gone(self, seeded: dict[str, str], client: TestClient) -> None:
+        assert client.post(
+            "/transactions/mark-reviewed", json={"transaction_ids": []}
+        ).status_code in (
+            404,
+            405,
+            422,
+        )
+        refused = client.get("/transactions", params={"q": "is:unreviewed"})
+        assert refused.status_code == 422
+        assert "needs-review" in refused.json()["detail"]
+        row = _manual(client)
+        assert "reviewed_at" not in row and "escalated_at" not in row
+
+    def test_summary_counts_by_reason_and_account(
+        self, seeded: dict[str, str], client: TestClient, db_session: Session
+    ) -> None:
+        _feed_row(db_session, days_ago=3)
+        _feed_row(db_session, status="pending", days_ago=2)
+        _feed_row(db_session, account="assets.savings", category="income.uncategorized", amount="5")
+        db_session.commit()
+        _adjustment(client, seeded)
+        data = client.get("/transactions/review-summary").json()
+        assert data["total"] == 4
+        assert data["uncategorized"] == 3 and data["reconciliation_adjustments"] == 1
+        assert data["pending"] == 1
+        assert data["oldest_date"] == (today() - timedelta(days=3)).isoformat()
+        by_path = {a["path"]: a for a in data["accounts"]}
+        assert by_path["assets.checking"]["total"] == 3
+        assert by_path["assets.checking"]["uncategorized"] == 2
+        assert by_path["assets.checking"]["reconciliation_adjustments"] == 1
+        assert by_path["assets.checking"]["pending"] == 1
+        assert by_path["assets.savings"]["total"] == 1
+
+    def test_the_headline_names_both_reasons(self) -> None:
+        assert review.headline({"total": 0}) is None
+        assert (
+            review.headline({"total": 3, UNCATEGORIZED: 2, ADJUSTMENT: 1})
+            == "3 transactions need review (2 with no category, 1 reconciliation adjustment)"
+        )
+        assert (
+            review.headline({"total": 1, UNCATEGORIZED: 1, ADJUSTMENT: 0})
+            == "1 transaction needs review (1 with no category)"
+        )

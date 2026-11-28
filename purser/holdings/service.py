@@ -149,8 +149,8 @@ def require_manual(account: Account) -> None:
     if account.holdings_source != "manual":
         raise LedgerError(
             f"{account.path} takes its holdings from the feed. An admin switches it to "
-            "holdings_source 'manual' (PATCH /accounts/{id}) before positions are recorded "
-            "by hand; positions recorded earlier stay read-only until then."
+            "holdings_source 'manual' (PATCH /accounts/{id}) before positions are entered in "
+            "Purser; positions entered earlier stay read-only until then."
         )
     if account.closed_at is not None:
         raise LedgerError(f"account {account.path} is closed (read-only)")

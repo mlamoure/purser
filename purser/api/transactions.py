@@ -6,7 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -16,9 +16,11 @@ from purser.admin.auth import ReadToken, WriteToken
 from purser.api.disclosure import NOTHING, Emits, disclose
 from purser.core import ledger as core
 from purser.db import get_session
-from purser.models import Posting, Transaction, TransactionReview
+from purser.models import Posting, Transaction
 
 DbSession = Annotated[Session, Depends(get_session)]
+# Why a row needs review (decision 141); review.REASONS.
+ReviewReason = Literal["uncategorized", "reconciliation_adjustment"]
 
 router = APIRouter(prefix="/transactions", tags=["transactions"])
 
@@ -95,19 +97,24 @@ class TransactionOut(BaseModel):
     has_linked_originals: bool = False  # voided bank rows hang off this row (unlink-able)
     # 'deterministic' | 'ai' — filled only with ?with_category_provenance=true
     category_source: str | None = None
-    # Review marks live in a side table, so they ride along rather than
-    # being columns on the row (#175, DESIGN §4).
-    reviewed_at: datetime | None = None
-    escalated_at: datetime | None = None
-    # Membership of the unreviewed set, computed by review.py's one predicate
-    # (#248). A missing mark does NOT mean "needs review": expected schedule
-    # instances, manual, agent and QIF/CSV rows carry none and are not in the
-    # set — so clients render this, never `reviewed_at is null`.
+    # Computed by review.py's one predicate (#248, decision 141): clients
+    # render these, never re-derive them from origin or category.
     needs_review: bool = Field(
         description=(
-            "true when the row is in the unreviewed set (#175): the same test "
-            "as GET /transactions?reviewed=false and the review count"
+            "true when the row needs review (decision 141): the same test as "
+            "GET /transactions?needs_review=true and the review counts"
         )
+    )
+    review_reason: ReviewReason | None = Field(
+        default=None,
+        description=(
+            "why the row needs review, null when it does not: uncategorized (a bank-sync "
+            "row with no category, or a split line with none; clears when it is "
+            "categorized) or reconciliation_adjustment (the difference a reconcile "
+            "posted; clears when it is recategorized or split away from "
+            "expenses.reconciliation_adjustments, or accepted with "
+            "POST /transactions/{id}/accept-adjustment)"
+        ),
     )
     # Schedule instances (#231): the rule this row fills a slot of, and
     # whether a human/agent edit pinned it (exempt from rule refresh).
@@ -155,8 +162,7 @@ class TransactionOut(BaseModel):
         perspective_account_id: uuid.UUID | None = None,
         has_linked_originals: bool = False,
         category_source: str | None = None,
-        review: TransactionReview | None = None,
-        needs_review: bool,
+        review_reason: str | None = None,
         balance: Decimal | None = None,
         securities_trade_locked: bool | None = None,
         balance_adjustment: bool = False,
@@ -219,9 +225,8 @@ class TransactionOut(BaseModel):
             # through removing the split.
             has_linked_originals=has_linked_originals and is_transfer,
             category_source=category_source,
-            reviewed_at=review.reviewed_at if review else None,
-            escalated_at=review.escalated_at if review else None,
-            needs_review=needs_review,
+            needs_review=review_reason is not None,
+            review_reason=review_reason,
             schedule_id=t.schedule_id,
             schedule_pinned=t.schedule_pinned_at is not None,
             securities_trade=(trade := ledger.is_securities_trade(t.postings)),
@@ -278,8 +283,7 @@ class TransactionDetail(TransactionOut):
         t: Transaction,
         *,
         has_linked_originals: bool = False,
-        review: TransactionReview | None = None,
-        needs_review: bool,
+        review_reason: str | None = None,
         split_lines: list[dict[str, Any]] | None = None,
         securities_trade_locked: bool | None = None,
         balance_adjustment: bool = False,
@@ -287,8 +291,7 @@ class TransactionDetail(TransactionOut):
         base = TransactionOut.from_model(
             t,
             has_linked_originals=has_linked_originals,
-            review=review,
-            needs_review=needs_review,
+            review_reason=review_reason,
             securities_trade_locked=securities_trade_locked,
             balance_adjustment=balance_adjustment,
         )
@@ -370,6 +373,14 @@ class SearchPage(BaseModel):
     total: int
     limit: int
     offset: int
+    did_you_mean: str | None = Field(
+        default=None,
+        description=(
+            "on a search of one word that matched nothing: the query with that word "
+            "replaced by a word one typo away that does occur (the search itself "
+            "stays exact; `word~` asks for typo tolerance)"
+        ),
+    )
 
 
 def _handle(exc: ledger.LedgerError) -> HTTPException:
@@ -386,8 +397,7 @@ def _detail(session: Session, tx_id: uuid.UUID) -> TransactionDetail:
     return TransactionDetail.from_model_detail(
         tx,
         has_linked_originals=transfers.has_linked_originals(session, tx.id),
-        review=session.get(TransactionReview, tx.id),
-        needs_review=tx.id in review_service.needs_review_ids(session, [tx.id]),
+        review_reason=review_service.review_reasons(session, [tx.id]).get(tx.id),
         split_lines=splits.describe_lines(session, tx) if tx.split_account_id else None,
         securities_trade_locked=tx.id in locked,
         balance_adjustment=tx.id in adjusted,
@@ -460,7 +470,7 @@ def create_transfer(
         disclose(
             Emits(
                 payee=True,
-                description=("items[].description",),
+                description=("items[].description", "did_you_mean"),
                 amount=(
                     "items[].amount",
                     "items[].remainder_amount",
@@ -473,6 +483,7 @@ def create_transfer(
     ],
 )
 def search_transactions(
+    request: Request,
     token: ReadToken,
     session: DbSession,
     account: Annotated[str | None, Query()] = None,
@@ -485,11 +496,12 @@ def search_transactions(
         Query(
             description=(
                 "search: words all found in payee, description or memo "
-                '("a phrase", -word excludes; payee:, desc:, memo: scope one; '
+                '("a phrase", -word excludes, word~ allows one typo; payee:, desc:, memo: '
+                "scope one; "
                 "payee:py_... is that payee), plus account:, category:, "
                 "amount:>100 (magnitude; is:debit or is:credit for direction), "
                 "amount:10..20, date:2026-10, date:2026-01..2026-03, "
-                "status:pending,posted, is:unreviewed. A malformed clause is a 422."
+                "status:pending,posted, is:needs-review. A malformed clause is a 422."
             )
         ),
     ] = None,
@@ -500,9 +512,13 @@ def search_transactions(
     with_category_provenance: Annotated[
         bool, Query(description="fill category_source from the audit trail (register badges)")
     ] = False,
-    reviewed: Annotated[
+    needs_review: Annotated[
         bool | None,
-        Query(description="false = the unreviewed set (#175); true = its complement"),
+        Query(
+            description="true = the rows that need review (decision 141: a bank-sync row "
+            "with no category, an unaccepted reconciliation adjustment); false = every "
+            "other row"
+        ),
     ] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -529,7 +545,7 @@ def search_transactions(
             end=end,
             statuses=status_in,
             include_collapsed=include_collapsed,
-            reviewed=reviewed,
+            needs_review=needs_review,
             limit=limit,
             offset=offset,
         )
@@ -559,20 +575,10 @@ def search_transactions(
             ).scalars()
             if row_id is not None
         }
-    reviews: dict[uuid.UUID, TransactionReview] = {}
-    if rows:
-        reviews = {
-            r.transaction_id: r
-            for r in session.execute(
-                select(TransactionReview).where(
-                    TransactionReview.transaction_id.in_([t.id for t in rows])
-                )
-            ).scalars()
-        }
-    # The badge's truth, from the same clause as ?reviewed=false (#248).
+    # The badge's truth, from the same predicate as ?needs_review=true (#248).
     from purser import review as review_service
 
-    unreviewed = review_service.needs_review_ids(session, [t.id for t in rows])
+    reasons = review_service.review_reasons(session, [t.id for t in rows])
     provenance: dict[str, str] = {}
     if with_category_provenance and rows:
         # One grouped audit read. Pending in-place categorizations audit the
@@ -608,6 +614,13 @@ def search_transactions(
             if target in id_strs:
                 provenance[target] = source
     locked, adjusted = _trade_flags(session, rows)
+    suggestion = None
+    disclosure = getattr(request.state, "disclosure", None)
+    withheld = disclosure.requested if disclosure is not None else frozenset()
+    if q and total == 0 and not withheld & {"payee", "description"}:
+        # A word from the ledger's own text: never offered to a caller that
+        # withholds payees or descriptions.
+        suggestion = ledger.did_you_mean(session, q)
     return SearchPage(
         items=[
             TransactionOut.from_model(
@@ -615,8 +628,7 @@ def search_transactions(
                 perspective_account_id=perspective_account_id,
                 has_linked_originals=t.id in linked,
                 category_source=provenance.get(str(t.id)),
-                review=reviews.get(t.id),
-                needs_review=t.id in unreviewed,
+                review_reason=reasons.get(t.id),
                 balance=balances_map.get(t.id),
                 securities_trade_locked=t.id in locked,
                 balance_adjustment=t.id in adjusted,
@@ -626,72 +638,74 @@ def search_transactions(
         total=total,
         limit=limit,
         offset=offset,
+        did_you_mean=suggestion,
     )
 
 
-# NOTE: these two literal paths MUST be declared before /{tx_id} below.
+# NOTE: these literal paths MUST be declared before /{tx_id} below.
 # FastAPI matches routes in registration order, so /transactions/review-batch
 # declared after it is swallowed by the parameterized route and 422s trying
 # to parse "review-batch" as a UUID.
-class MarkReviewed(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    transaction_ids: list[uuid.UUID]
-    note: str | None = None
-    # Reviewed, but handed back for a human look. The row still LEAVES the
-    # unreviewed set — this is an escape hatch, not a second review tier.
-    escalate: bool = False
-
-
-@router.post("/mark-reviewed")
-def mark_reviewed(body: MarkReviewed, token: WriteToken, session: DbSession) -> dict[str, int]:
-    """Bulk, idempotent. A review mark has no draft state, like
-    confirm_transfer and match (#175, decision 47)."""
-    from purser import review as review_service
-
-    marked = 0
-    already = 0
-    for tx_id in body.transaction_ids:
-        created = review_service.mark(
-            session,
-            tx_id=tx_id,
-            token=token,
-            via=review_service.VIA_EXPLICIT,
-            note=body.note,
-            escalate=body.escalate,
-        )
-        if created:
-            marked += 1
-        else:
-            already += 1
-    session.commit()
-    return {"marked": marked, "already_reviewed": already}
-
-
 class ReviewAccountSummary(BaseModel):
     account_id: uuid.UUID
     path: str
     name: str
-    total: int
-    pending: int
-    agent_pending: int
+    total: int = Field(description="rows on this account that need review")
+    uncategorized: int = Field(description="of them, bank-sync rows with no category")
+    reconciliation_adjustments: int = Field(
+        description="of them, reconciliation adjustments nobody has explained or accepted"
+    )
+    pending: int = Field(description="of them, pending rows")
+    agent_pending: int = Field(description="an agent's pending rows on this account")
 
 
 class ReviewSummary(BaseModel):
-    total: int
-    pending: int
-    agent_pending: int
-    oldest_date: date_type | None
-    accounts: list[ReviewAccountSummary]
+    total: int = Field(description="rows that need review, each counted once")
+    uncategorized: int = Field(description="of them, bank-sync rows with no category")
+    reconciliation_adjustments: int = Field(
+        description="of them, reconciliation adjustments nobody has explained or accepted"
+    )
+    pending: int = Field(description="of them, pending rows")
+    agent_pending: int = Field(
+        description="an agent's pending rows: a separate count, not a review reason"
+    )
+    oldest_date: date_type | None = Field(description="the oldest row that needs review")
+    accounts: list[ReviewAccountSummary] = Field(
+        description="per real account; a transfer counts on both, so these must not be summed"
+    )
 
 
 @router.get("/review-summary", dependencies=[disclose(NOTHING)])
 def review_summary(token: ReadToken, session: DbSession) -> ReviewSummary:
-    """Review counts and register destinations. Transfers count once globally,
-    but appear on both accounts; per-account totals must not be summed."""
+    """How many transactions need review, by reason (decision 141: a
+    bank-sync row with no category, a reconciliation adjustment nobody has
+    explained or accepted), and on which accounts. Transfers count once
+    globally but appear on both accounts; per-account totals must not be
+    summed."""
     from purser import review as review_service
 
     return ReviewSummary(**review_service.summary(session))
+
+
+class ReviewBatchRow(BaseModel):
+    id: uuid.UUID
+    date: date_type
+    account: str | None
+    payee: str | None
+    description: str | None
+    amount: Decimal | None = Field(description="the account leg (negative = money out)")
+    status: str
+    reason: ReviewReason
+    category: str | None = Field(description="the category path; null for a split")
+    memories: list[dict[str, Any]] = Field(
+        description="financial notes linked to the row's account or payee, and global ones"
+    )
+
+
+class ReviewBatch(BaseModel):
+    total: int = Field(description="rows that need review (on the account, when given)")
+    rows: list[ReviewBatchRow]
+    remaining: int
 
 
 @router.get(
@@ -701,8 +715,8 @@ def review_summary(token: ReadToken, session: DbSession) -> ReviewSummary:
             Emits(
                 payee=True,
                 narrative=True,
-                description=("rows[].description", "escalated[].description"),
-                amount=("rows[].amount", "escalated[].amount"),
+                description=("rows[].description",),
+                amount=("rows[].amount",),
             )
         )
     ],
@@ -712,16 +726,14 @@ def review_batch(
     session: DbSession,
     limit: Annotated[int, Query(ge=1, le=25)] = 10,
     account: Annotated[str | None, Query()] = None,
-    include_guidance: Annotated[bool, Query()] = True,
-) -> dict[str, Any]:
-    """The same payload the MCP tool serves — one service function, so REST
-    and MCP can never disagree about what a reviewer sees."""
+) -> ReviewBatch:
+    """The rows that need review, newest first, with their reason and what it
+    takes to fix them — the same payload as the MCP tool `review_batch`, from
+    one service function."""
     from purser import review as review_service
 
     try:
-        return review_service.batch(
-            session, limit=limit, account_ref=account, include_guidance=include_guidance
-        )
+        return ReviewBatch(**review_service.batch(session, limit=limit, account_ref=account))
     except ledger.LedgerError as exc:  # unknown (404) or malformed (422, #214) account
         raise _handle(exc) from exc
 
@@ -1064,6 +1076,62 @@ def void_transaction(tx_id: uuid.UUID, token: WriteToken, session: DbSession) ->
         raise _handle(exc) from exc
     session.commit()
     return _detail(session, tx.id)
+
+
+class AcceptAdjustmentIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    note: str | None = Field(
+        default=None, max_length=200, description="why the adjustment is right (audit only)"
+    )
+
+
+class AcceptAdjustmentOut(BaseModel):
+    """A reconciliation adjustment's acceptance (decision 141)."""
+
+    reconciliation_id: uuid.UUID
+    account_id: uuid.UUID
+    adjustment_tx_id: uuid.UUID = Field(description="the row the reconcile posted")
+    accepted_at: datetime
+    accepted_by: uuid.UUID | None = Field(description="the token that accepted it")
+    created: bool = Field(
+        description="true when this call recorded the acceptance; false when it was "
+        "already accepted (the call is idempotent)"
+    )
+
+
+@router.post("/{tx_id}/accept-adjustment")
+def accept_adjustment(
+    tx_id: uuid.UUID,
+    token: WriteToken,
+    session: DbSession,
+    body: AcceptAdjustmentIn | None = None,
+) -> AcceptAdjustmentOut:
+    """Accept a reconciliation adjustment as it is, so it no longer needs
+    review (decision 141). `tx_id` is the adjustment a reconcile posted, or
+    the row a correction of it left. Idempotent: an accepted adjustment
+    answers `created: false`. Audited `reconciliation.adjustment_accepted`
+    with the optional `note`. To explain the difference instead, recategorize
+    or split the row (PATCH / PUT .../split). 404 for an unknown row; 422 for
+    a row that is no reconciliation adjustment (an asset's value change
+    included: it never needs review)."""
+    from purser import reconciliation
+
+    try:
+        accepted = reconciliation.accept_adjustment(
+            session, tx_id=tx_id, token=token, note=body.note if body else None
+        )
+    except ledger.LedgerError as exc:
+        raise _handle(exc) from exc
+    session.commit()
+    return AcceptAdjustmentOut(
+        reconciliation_id=accepted.reconciliation_id,
+        account_id=accepted.account_id,
+        adjustment_tx_id=accepted.adjustment_tx_id,
+        accepted_at=accepted.accepted_at,
+        accepted_by=accepted.accepted_by,
+        created=accepted.created,
+    )
 
 
 @router.post("/{tx_id}/reset-instance")

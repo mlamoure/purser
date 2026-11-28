@@ -1,7 +1,7 @@
 #!/bin/bash
 # Give a Mac a Docker runtime for Purser: Colima, the Docker CLI and Compose.
 #
-#   curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.6/scripts/install-docker-macos.sh
+#   curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.7/scripts/install-docker-macos.sh
 #   bash install-docker-macos.sh
 #
 # Purser runs in Linux containers, and macOS has no container runtime of its

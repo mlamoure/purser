@@ -8,9 +8,9 @@ compatible MCP clients. Grafana provides broader reporting over a stable read
 schema, so your data remains available to dashboards outside the app. Three dashboards ship in the repository under
 [`grafana/dashboards/`](https://github.com/mlamoure/purser/tree/main/grafana/dashboards):
 
-- **Purser - Monthly cash flow by category** (`purser-cash-flow`)
-- **Purser - Net worth over time** (`purser-net-worth`)
-- **Purser - Upcoming bills & forecast** (`purser-upcoming-bills`)
+- **Purser · Monthly cash flow by category** (`purser-cash-flow`)
+- **Purser · Net worth over time** (`purser-net-worth`)
+- **Purser · Upcoming bills & forecast** (`purser-upcoming-bills`)
 
 ## The stable read schema
 
@@ -30,9 +30,11 @@ stay current as new data lands.
 
 ## Add a datasource and import
 
-1. Create a **read-only** PostgreSQL role on the Purser database (the dashboards
-   describe their input as a `purser_read` connection). Reporting should never
-   hold write access to the ledger.
+1. Enable the **read-only** PostgreSQL role Purser created, `purser_read` (it
+   reads the `readmodel` schema only, and starts without a login):
+   `ALTER ROLE purser_read LOGIN PASSWORD 'CHANGE_ME';`.
+   A role you create yourself lacks its grants. Reporting should never hold
+   write access to the ledger.
 2. In Grafana, add a **PostgreSQL** datasource pointing at the Purser database
    with that role.
 3. Import each JSON file from `grafana/dashboards/`. On import Grafana prompts

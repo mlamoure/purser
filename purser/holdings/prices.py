@@ -20,6 +20,7 @@ nothing for (before a listing, a weekend after a sell-out, an unknown
 ticker) is asked for once, while a gap between answered ranges still is.
 """
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
@@ -35,22 +36,35 @@ from sqlalchemy.orm import Session
 from purser import appsettings, audit, balances, clock, events
 from purser.core import holdings as core
 from purser.holdings import overlay, projection
-from purser.holdings.providers import TIINGO, PriceFetchError, PriceProvider, TiingoProvider
+from purser.holdings.providers import (
+    EODHD,
+    TIINGO,
+    EodhdProvider,
+    PriceFetchError,
+    PriceProvider,
+    TiingoProvider,
+)
 from purser.holdings.service import checked, symbol_of
 from purser.ledger import LedgerError
 from purser.logging import get_logger
 from purser.models import (
     Account,
     ApiToken,
+    AuditLog,
     Event,
     Position,
     SecurityPrice,
+    SecuritySetting,
 )
 
 log = get_logger(__name__)
 
 STALE_EVENT = "price.stale"
 FETCH_FAILED_EVENT = "price.fetch_failed"
+# The daily job's time, in UTC (decision 89): after the 06:30 sync, before
+# the 07:30 net-worth materialization. The scheduler registers the job from
+# it, and the status reports the next run from it.
+FETCH_HOUR_UTC, FETCH_MINUTE_UTC = 6, 40
 UNPRICED_EVENT = "holding.unpriced"  # a feed position valued at 0 with no stored close (#392)
 # A switched-back account whose manual period no fetch has ended (#422).
 PERIOD_OPEN_EVENT = "holding.period_open"
@@ -266,6 +280,45 @@ def fetch_needs(session: Session, *, today: date) -> dict[str, list[core.Range]]
     return {symbol: core.needed_ranges(found) for symbol, found in spans.items()}
 
 
+def feed_needs(session: Session, *, today: date) -> dict[str, list[core.Range]]:
+    """Per ticker, the dates the zero-valued feed rows need closes for
+    (#680): each row is valued from the close in effect on its own date
+    (decision 92), so each row's date is a one-day span, widened by
+    ``core.needed_ranges`` to the week before it and merged."""
+    return {
+        symbol: core.needed_ranges((day, day) for day in days)
+        for symbol, days in overlay.priced_dates(session, today=today).items()
+    }
+
+
+def all_needs(
+    session: Session, *, today: date
+) -> tuple[dict[str, list[core.Range]], frozenset[str]]:
+    """What the price job asks a provider for: the manual positions' needs
+    (``fetch_needs``) and the zero-valued feed rows' (``feed_needs``),
+    merged per symbol; and the symbols only feed rows need, whose
+    not-found is quiet (``_store_symbol``). A symbol set to skip the
+    providers (``security_settings.price_by_hand``, #686) is never asked."""
+    by_hand = {s for s, setting in symbol_settings(session).items() if setting.price_by_hand}
+    manual = {s: r for s, r in fetch_needs(session, today=today).items() if s not in by_hand}
+    feed = {s: r for s, r in feed_needs(session, today=today).items() if s not in by_hand}
+    needs = {symbol: list(ranges) for symbol, ranges in manual.items()}
+    for symbol, ranges in feed.items():
+        needs[symbol] = _merge(needs.get(symbol, []), ranges)
+    return needs, frozenset(set(feed) - set(manual))
+
+
+def _merge(a: list[core.Range], b: list[core.Range]) -> list[core.Range]:
+    """Two symbols' needed ranges as one sorted, merged list."""
+    out: list[core.Range] = []
+    for first, last in sorted([*a, *b]):
+        if out and first <= out[-1][1] + timedelta(days=1):
+            out[-1] = (out[-1][0], max(out[-1][1], last))
+        else:
+            out.append((first, last))
+    return out
+
+
 def _answered(session: Session, source: str, symbols: list[str]) -> dict[str, list[core.Range]]:
     """Per symbol, the date ranges ``source`` has answered for good
     (inclusive; Postgres keeps a daterange half-open, so the upper bound is
@@ -300,19 +353,178 @@ def _record_answered(
     )
 
 
+@dataclass(frozen=True)
+class ProbeResult:
+    """A provider key test (#682): whether the provider answered closes for
+    its probe symbol, and if not, the HTTP status and a fixed reason phrase
+    (never the key or a provider message)."""
+
+    ok: bool
+    provider: str
+    status: int | None = None
+    reason: str | None = None
+
+
+PROBE_DAYS = 10  # a window that holds trading days whatever the calendar
+
+
+def make_provider(name: str, key: str, *, client: httpx.Client | None = None) -> PriceProvider:
+    """The provider class for ``name`` with ``key``."""
+    if name == TIINGO:
+        return TiingoProvider(key, client=client)
+    if name == EODHD:
+        return EodhdProvider(key, client=client)
+    raise ValueError(f"unknown price provider {name!r}")
+
+
+def stored_key(name: str) -> str | None:
+    """The stored key entered for provider ``name`` (#686), whichever slot
+    holds it, else None: a key never reaches a provider it was not entered
+    for (#698), whatever the provider settings say now."""
+    return appsettings.price_key_for(name)
+
+
+def probe_provider(
+    name: str | None = None,
+    key: str | None = None,
+    *,
+    client: httpx.Client | None = None,
+    today: date | None = None,
+) -> ProbeResult:
+    """Ask a provider for its probe symbol's last ``PROBE_DAYS`` of closes
+    (#682): with ``key`` (one being entered, never stored here) or the stored
+    key, and ``name`` or the configured provider. Stores nothing, writes no
+    audit row: it changes nothing. A refused key is a ``PriceFetchError``
+    like any fetch failure, so its status and fixed reason are all that is
+    reported."""
+    today = today or clock.ledger_today()
+    name = name or appsettings.effective().price_provider
+    if name == "none":
+        return ProbeResult(False, name, None, "no price provider is selected")
+    key = key or stored_key(name)
+    if not key:
+        return ProbeResult(False, name, None, "no API key is set")
+    try:
+        provider = make_provider(name, key, client=client)
+        closes = provider.closes(provider.probe_symbol, today - timedelta(days=PROBE_DAYS), today)
+    except PriceFetchError as exc:
+        return ProbeResult(False, name, exc.status, exc.reason)
+    except Exception as exc:  # never the message: it could carry request data
+        return ProbeResult(False, name, None, type(exc).__name__)
+    if not closes:
+        return ProbeResult(False, name, 200, "no closes returned")
+    return ProbeResult(True, name)
+
+
 def configured_provider(
     *, client: httpx.Client | None = None
 ) -> tuple[PriceProvider | None, str | None]:
     """The provider the config selects, or None with the reason."""
-    name = appsettings.effective().price_provider
+    return _provider(appsettings.effective().price_provider, "provider", client)
+
+
+def configured_fallback(
+    *, client: httpx.Client | None = None
+) -> tuple[PriceProvider | None, str | None]:
+    """The fallback provider the config selects (#686), or None with the
+    reason (None, None when no fallback is selected)."""
+    name = appsettings.effective().price_fallback_provider
+    if name == "none":
+        return None, None
+    return _provider(name, "fallback provider", client)
+
+
+def _provider(
+    name: str, role: str, client: httpx.Client | None
+) -> tuple[PriceProvider | None, str | None]:
     if name == "none":
         return None, "no price provider is configured"
-    if name == TIINGO:
-        key = appsettings.price_api_key()
-        if not key:
-            return None, "the tiingo provider has no API key (Settings, Prices)"
-        return TiingoProvider(key, client=client), None
-    return None, f"unknown price provider {name!r}"
+    if name not in (TIINGO, EODHD):
+        return None, f"unknown price provider {name!r}"
+    key = stored_key(name)
+    if not key:
+        return None, f"the {name} {role} has no API key (Settings, Market data)"
+    return make_provider(name, key, client=client), None
+
+
+def symbol_settings(session: Session) -> dict[str, SecuritySetting]:
+    """Per-symbol price settings (#686): aliases and price-by-hand."""
+    return {s.symbol: s for s in session.execute(select(SecuritySetting)).scalars()}
+
+
+# A provider's spelling of a ticker: letters, digits and the separators
+# exchanges and share classes use (VOD.LSE, BRK-B.US, RY.TO), bounded.
+ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.\-_^=]{0,31}$")
+
+
+def set_symbol_settings(
+    session: Session,
+    *,
+    symbol: str,
+    skip_providers: bool,
+    aliases: dict[str, str],
+    token: ApiToken | None,
+) -> SecuritySetting | None:
+    """Set one symbol's price settings (#686, decision 139): its ticker as
+    each provider spells it, and whether the providers are skipped for it
+    (its closes are entered by hand; stored as ``price_by_hand``). A
+    provider whose alias changed forgets what it answered for the symbol
+    (its ``price_answered`` row), so the corrected ticker is asked again.
+    Settings back at their defaults delete the row (None is returned).
+    Audited ``price.symbol_settings``."""
+    normalized = symbol_of(symbol)
+    clean: dict[str, str] = {}
+    for provider, alias in aliases.items():
+        if provider not in (TIINGO, EODHD):
+            raise LedgerError(f"unknown price provider {provider!r}")
+        alias = alias.strip()
+        if not alias:
+            continue
+        if not ALIAS_PATTERN.match(alias):
+            raise LedgerError(
+                f"the {provider} ticker must be 1-32 letters, digits or . - _ ^ = (e.g. VOD.LSE)"
+            )
+        clean[provider] = alias
+    row = session.get(SecuritySetting, normalized, with_for_update=True)
+    before = (
+        {"symbol": normalized, "skip_providers": row.price_by_hand, "aliases": dict(row.aliases)}
+        if row is not None
+        else None
+    )
+    previous = dict(row.aliases) if row is not None else {}
+    changed = {p for p in (TIINGO, EODHD) if previous.get(p) != clean.get(p)}
+    if changed:
+        session.execute(
+            text("DELETE FROM price_answered WHERE symbol = :symbol AND source = ANY(:sources)"),
+            {"symbol": normalized, "sources": sorted(changed)},
+        )
+    default = not skip_providers and not clean
+    if default:
+        if row is not None:
+            session.delete(row)
+        result = None
+    else:
+        if row is None:
+            row = SecuritySetting(symbol=normalized)
+            session.add(row)
+        row.price_by_hand = skip_providers
+        row.aliases = clean
+        row.updated_at = datetime.now(UTC)
+        result = row
+    audit.record(
+        session,
+        actor_token_id=token.id if token else None,
+        action="price.symbol_settings",
+        entity_type="price",
+        before=before,
+        after=(
+            {"symbol": normalized, "skip_providers": skip_providers, "aliases": clean}
+            if not default
+            else None
+        ),
+    )
+    session.flush()
+    return result
 
 
 # Rows per INSERT: a backfill of years is a few statements, well inside
@@ -490,7 +702,13 @@ class _Answer:
     failure: PriceFetchError | None
 
 
-def _ask(provider: PriceProvider, symbol: str, windows: list[core.Range]) -> list[_Answer]:
+def _ask(
+    provider: PriceProvider,
+    symbol: str,
+    windows: list[core.Range],
+    *,
+    ticker: str | None = None,
+) -> list[_Answer]:
     """Ask ``provider`` for each of ``symbol``'s windows, newest first, with
     no database transaction open (#404). Whatever a call raises fails that
     window only (decision 89); only the exception's class is kept, since a
@@ -498,7 +716,8 @@ def _ask(provider: PriceProvider, symbol: str, windows: list[core.Range]) -> lis
     answers: list[_Answer] = []
     for start, end in windows:
         try:
-            answers.append(_Answer(start, end, provider.closes(symbol, start, end), None))
+            closes = provider.closes(symbol, start, end, ticker=ticker)
+            answers.append(_Answer(start, end, closes, None))
         except Exception as exc:  # isolation is per window (decision 89)
             failure = (
                 exc
@@ -517,9 +736,24 @@ def _store_symbol(
     *,
     today: date,
     failed: list[dict[str, Any]],
+    feed_only: bool = False,
+    not_covered: list[str] | None = None,
+    handed_off: bool = False,
 ) -> list[date]:
     """Store what the provider answered for ``symbol``'s windows, in the
     caller's transaction. Returns the dates of the closes inserted.
+
+    ``handed_off``: a fallback provider is asked for the windows this one
+    failed (#686, decision 139). Such a window is not recorded as answered
+    (some provider must answer it), and a not-found is no failure here: a
+    coverage gap is what the fallback is for. Any other failure (a refused
+    key, say) is still reported.
+
+    ``feed_only``: only zero-valued feed rows need the symbol (#680). A
+    not-found then is no failure: a plan-only fund no provider prices is
+    what such a row usually holds, and its close is recorded by hand. The
+    window counts as answered (asked once), and the symbol is reported in
+    ``not_covered`` instead of ``failed`` and ``price.fetch_failed``.
 
     Each window is stored and recorded on its own, in its own savepoint: one
     the provider refused, or whose store fails, is reported and asked again
@@ -540,6 +774,20 @@ def _store_symbol(
 
     for answer in answers:
         start, end = answer.start, answer.end
+        if answer.failure is not None and handed_off:
+            if answer.failure.status != 404:
+                report(answer.failure)
+            continue
+        if answer.failure is not None and feed_only and answer.failure.status == 404:
+            try:
+                with session.begin_nested():
+                    _record_answered(session, symbol, provider, start, end)
+            except SQLAlchemyError:
+                log.exception("price.store_failed", symbol=symbol)
+                report(PriceFetchError(symbol, None, "store failed"))
+            if not_covered is not None and symbol not in not_covered:
+                not_covered.append(symbol)
+            continue
         if answer.failure is not None:
             report(answer.failure)
             if answer.failure.status == 404 and core.settled(end, today):
@@ -578,40 +826,66 @@ def _store_symbol(
     return inserted_dates
 
 
+@dataclass(frozen=True)
+class _Store:
+    """One provider's answers for one symbol, to store (``_commit_symbol``)."""
+
+    provider: str
+    answers: list[_Answer]
+    handed_off: bool = False
+
+
 def _commit_symbol(
     session: Session,
-    provider: str,
     symbol: str,
-    answers: list[_Answer],
+    stores: list[_Store],
     *,
     today: date,
     failed: list[dict[str, Any]],
     actor_token_id: uuid.UUID | None,
+    feed_only: bool = False,
+    not_covered: list[str] | None = None,
 ) -> list[date]:
-    """One symbol's short write transaction (#404): its closes, the
-    ``price.closes`` audit row recording them (committed together, #405), its
-    failures, and — last, just before the commit, so the watermark is held
-    for one statement and never across a provider call — net worth marked
-    dirty from its earliest new close where a feed row valued from stored
-    closes holds it (decision 92, ``overlay.first_revalued``)."""
-    inserted = _store_symbol(session, provider, symbol, answers, today=today, failed=failed)
-    if inserted:
-        audit.record(
+    """One symbol's short write transaction (#404): each provider's closes
+    (the provider, then a fallback's for what it failed, #686), a
+    ``price.closes`` audit row per provider recording them (committed
+    together, #405), its failures, and — last, just before the commit, so
+    the watermark is held for one statement and never across a provider
+    call — net worth marked dirty from its earliest new close where a feed
+    row valued from stored closes holds it (decision 92,
+    ``overlay.first_revalued``)."""
+    inserted: list[date] = []
+    for store in stores:
+        mine = _store_symbol(
             session,
-            actor_token_id=actor_token_id,
-            action="price.closes",
-            entity_type="price",
-            after={
-                "provider": provider,
-                "symbols": {
-                    symbol: {
-                        "inserted": len(inserted),
-                        "first": min(inserted).isoformat(),
-                        "last": max(inserted).isoformat(),
-                    }
-                },
-            },
+            store.provider,
+            symbol,
+            store.answers,
+            today=today,
+            failed=failed,
+            feed_only=feed_only,
+            not_covered=not_covered,
+            handed_off=store.handed_off,
         )
+        if mine:
+            audit.record(
+                session,
+                actor_token_id=actor_token_id,
+                action="price.closes",
+                entity_type="price",
+                after={
+                    "provider": store.provider,
+                    "symbols": {
+                        symbol: {
+                            "inserted": len(mine),
+                            "first": min(mine).isoformat(),
+                            "last": max(mine).isoformat(),
+                        }
+                    },
+                },
+            )
+        inserted.extend(mine)
+    if inserted:
         dirty_from = overlay.first_revalued(session, {symbol: min(inserted)})
         if dirty_from is not None:
             balances.mark_dirty(session, dirty_from, networth_only=True)
@@ -622,6 +896,8 @@ def _commit_symbol(
 @dataclass
 class FetchResult:
     provider: str
+    fallback: str = "none"  # the fallback provider (#686)
+    fallback_skipped: str | None = None  # why the fallback was not asked, when selected
     skipped: str | None = None  # why nothing was fetched, when nothing was
     symbols: int = 0
     fetched: int = 0  # closes inserted
@@ -631,6 +907,9 @@ class FetchResult:
     stale: list[dict[str, str | None]] = field(default_factory=list)
     # Feed positions the feed values at 0 with no stored close (decision 92).
     unpriced: list[dict[str, str]] = field(default_factory=list)
+    # Tickers only zero-valued feed rows need that the provider does not
+    # know (#680): recorded by hand, never a failure.
+    not_covered: list[str] = field(default_factory=list)
     open_periods: list[str] = field(default_factory=list)
 
 
@@ -673,7 +952,8 @@ def run_fetch(
 ) -> FetchResult:
     """The daily price job's body, also run by an admin's fetch-now.
 
-    1. Read what each symbol needs (``fetch_needs``, the answered ranges) and
+    1. Read what each symbol needs (``all_needs``: manual positions and
+       zero-valued feed rows, #680; the answered ranges) and
        end that transaction. Then, one symbol at a time, ask the provider
        through one shared HTTP client with no transaction open, and store
        the answers in that symbol's own short transaction
@@ -701,41 +981,68 @@ def run_fetch(
 
     today = today or clock.ledger_today()
     settings = appsettings.effective()
-    result = FetchResult(provider=settings.price_provider)
+    result = FetchResult(
+        provider=settings.price_provider, fallback=settings.price_fallback_provider
+    )
     maker = get_sessionmaker()
 
     shared = client if client is not None else httpx.Client(timeout=TiingoProvider.TIMEOUT)
     try:
         with maker() as session:
-            needs = fetch_needs(session, today=today)
+            needs, feed_only = all_needs(session, today=today)
             result.symbols = len(needs)
             provider, reason = configured_provider(client=shared)
             result.skipped = reason
+            fallback, fallback_reason = (
+                configured_fallback(client=shared) if provider is not None else (None, None)
+            )
+            result.fallback_skipped = fallback_reason
+            aliases = {s: dict(v.aliases or {}) for s, v in symbol_settings(session).items()}
             windows: dict[str, list[core.Range]] = {}
+            answered_fallback: dict[str, list[core.Range]] = {}
             if provider is not None:
                 answered = _answered(session, provider.name, sorted(needs))
+                if fallback is not None:
+                    # A window either provider answered is done (decision 139).
+                    answered_fallback = _answered(session, fallback.name, sorted(needs))
                 windows = {
-                    symbol: core.fetch_windows(needs[symbol], answered.get(symbol, []))
+                    symbol: core.fetch_windows(
+                        needs[symbol],
+                        answered.get(symbol, []) + answered_fallback.get(symbol, []),
+                    )
                     for symbol in sorted(needs)
                 }
             session.rollback()  # read only: end the transaction before any provider call
 
         if provider is not None:
             for symbol, symbol_windows in windows.items():
-                answers = _ask(provider, symbol, symbol_windows)
+                names = aliases.get(symbol, {})
+                answers = _ask(provider, symbol, symbol_windows, ticker=names.get(provider.name))
                 if not answers:
                     continue
+                stores = [_Store(provider.name, answers, handed_off=fallback is not None)]
+                if fallback is not None:
+                    failed_windows = [(a.start, a.end) for a in answers if a.failure is not None]
+                    retry = core.fetch_windows(failed_windows, answered_fallback.get(symbol, []))
+                    if retry:
+                        stores.append(
+                            _Store(
+                                fallback.name,
+                                _ask(fallback, symbol, retry, ticker=names.get(fallback.name)),
+                            )
+                        )
                 failed_before = len(result.failed)
                 try:
                     with maker() as session:
                         inserted = _commit_symbol(
                             session,
-                            provider.name,
                             symbol,
-                            answers,
+                            stores,
                             today=today,
                             failed=result.failed,
                             actor_token_id=actor_token_id,
+                            feed_only=symbol in feed_only,
+                            not_covered=result.not_covered,
                         )
                 except Exception:
                     # The whole symbol rolled back: nothing of it is stored,
@@ -743,7 +1050,12 @@ def run_fetch(
                     log.exception("price.store_failed", symbol=symbol)
                     del result.failed[failed_before:]
                     _report_rolled_back(
-                        maker, provider.name, symbol, answers, today=today, failed=result.failed
+                        maker,
+                        provider.name,
+                        symbol,
+                        [a for store in stores for a in store.answers],
+                        today=today,
+                        failed=result.failed,
                     )
                     continue
                 result.fetched += len(inserted)
@@ -792,6 +1104,8 @@ def run_fetch(
             entity_type="price",
             after={
                 "provider": result.provider,
+                "fallback": result.fallback,
+                "fallback_skipped": result.fallback_skipped,
                 "skipped": result.skipped,
                 "symbols": result.symbols,
                 "fetched": result.fetched,
@@ -800,6 +1114,7 @@ def run_fetch(
                 "accounts_failed": result.accounts_failed,
                 "stale": result.stale,
                 "unpriced": result.unpriced,
+                "not_covered": result.not_covered,
                 "open_periods": result.open_periods,
             },
         )
@@ -836,9 +1151,17 @@ class SymbolPrice:
     stale: bool
 
 
+def next_run_at(now: datetime) -> datetime:
+    """The daily job's next run after ``now`` (FETCH_HOUR_UTC:FETCH_MINUTE_UTC UTC)."""
+    now = now.astimezone(UTC)
+    run = now.replace(hour=FETCH_HOUR_UTC, minute=FETCH_MINUTE_UTC, second=0, microsecond=0)
+    return run if run > now else run + timedelta(days=1)
+
+
 def status(session: Session, *, today: date | None = None) -> dict[str, Any]:
-    """What Settings, Prices shows: the provider, the newest provider fetch,
-    each open symbol's close in effect today, and the last failure."""
+    """What Settings, Market data shows: the provider, the newest provider
+    fetch, the last and next run of the daily job, each open symbol's close
+    in effect today, and the last failure."""
     today = today or clock.ledger_today()
     settings = appsettings.effective()
     books = watched_books(session, today=today)
@@ -860,13 +1183,19 @@ def status(session: Session, *, today: date | None = None) -> dict[str, Any]:
     last_fetched: datetime | None = session.execute(
         select(func.max(SecurityPrice.fetched_at)).where(SecurityPrice.source != core.SOURCE_MANUAL)
     ).scalar_one_or_none()
+    last_run: datetime | None = session.execute(
+        select(func.max(AuditLog.at)).where(AuditLog.action == "price.fetch")
+    ).scalar_one_or_none()
     failure = session.execute(
         select(Event).where(Event.type == FETCH_FAILED_EVENT).order_by(Event.at.desc()).limit(1)
     ).scalar_one_or_none()
     return {
         "provider": settings.price_provider,
+        "fallback_provider": settings.price_fallback_provider,
         "stale_days": settings.price_stale_days,
         "last_fetched_at": last_fetched,
+        "last_run_at": last_run,
+        "next_run_at": next_run_at(clock.ledger_now()),
         "symbols": rows,
         "last_failure": (
             {

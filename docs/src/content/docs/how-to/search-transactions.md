@@ -3,9 +3,10 @@ title: Search transactions
 description: One search syntax for the register's search box, the REST q parameter and the agent's search_transactions tool — words, phrases, field scopes, amounts, dates and statuses.
 ---
 
-The search box above every register, the `q` parameter of
-`GET /transactions` and the `q` argument of the MCP tool `search_transactions`
-all read the same syntax. Every part of a search must match; there is no `OR`
+The search box above every register, the **Search** page (every account at
+once, with the search in the address so you can bookmark it), the `q` parameter
+of `GET /transactions` and the `q` argument of the MCP tool
+`search_transactions` all read the same syntax. Every part of a search must match; there is no `OR`
 (run two searches instead).
 
 ## Words and phrases
@@ -21,6 +22,22 @@ all read the same syntax. Every part of a search must match; there is no `OR`
 Case, accents and punctuation are ignored: `cafe` finds "Café", and `7-eleven`
 and `7 eleven` are the same search. Letters and digits of every script are
 kept, so a search in any language works.
+
+## Typos
+
+Searches are exact, so a count never changes behind your back. Ask for typo
+tolerance on one word with a tilde: `starbuks~` also finds words one typo away
+("starbucks": a letter missing, extra or wrong, or two letters swapped). It
+works on words of 3 to 32 letters without digits, alone or after a field
+(`payee:costko~`).
+
+When a search of a single word finds nothing, Purser may answer "Did you mean
+…?" with the query rewritten to a word one typo away that does occur in your
+transactions. Agents receive it as `did_you_mean`, except when they withhold
+payees or descriptions, because the suggestion is a word from your own text.
+
+A search can be up to 1,000 characters and 40 terms long; a longer one is
+refused with a message saying so.
 
 ## Look in one field
 
@@ -52,7 +69,7 @@ in quotes (`"paye:x"`) to search the text itself.
 | `date:>=2026-01-01` | from that day on (also `>`, `<`, `<=`) |
 | `date:2026-01..2026-03` | from the start of January to the end of March |
 | `status:pending` | one status, or several: `status:pending,posted` |
-| `is:unreviewed` | rows nobody has reviewed yet (`is:reviewed` for the rest) |
+| `is:needs-review` | rows that [need review](../../how-to/review-new-transactions/): a bank-sync row with no category, or a reconciliation adjustment |
 
 `amount:` compares the size of the amount, so it takes no minus sign; combine
 it with `is:debit` or `is:credit` for the direction. In a register (or with
@@ -79,8 +96,11 @@ with the date fields beside the box.
 withheld, the tool returns references such as `py_8k2mq4x7ra`: search by one
 with `payee:py_8k2mq4x7ra` (or the reference on its own) to get exactly that
 payee's rows. An unknown reference, or a malformed clause, is a tool error
-that says how to write it. Totals stay exact; for sums use `spending_summary`,
-not the rows.
+that says how to write it. A one-word search that finds nothing may carry
+`did_you_mean` (the query with a word one typo away that does occur); retry
+with it, or add `~` to the word. It is left out when the call withholds payees
+or descriptions. Totals stay exact; for sums use `spending_summary`, not the
+rows.
 
 Searching never changes what a response contains: withheld fields stay
 withheld (see [Privacy and agents](../../explanation/privacy-and-agents/)).

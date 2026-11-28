@@ -27,7 +27,7 @@ does not disable the rule.
 
 - **`describe()`** returns the active-note count and a bounded set of pinned notes.
 - **`list_memories`** retrieves notes, optionally filtered by account, category or payee.
-- **The review loop** attaches notes relevant to the transaction being reviewed.
+- **`review_batch`** attaches notes relevant to each transaction that needs review.
 - **Optional AI categorization**, when configured, receives relevant notes as prompt context.
 
 ## Relevance
@@ -77,6 +77,6 @@ accounts are closed or hidden, Purser flags it as stale for review.
 ## See also
 
 - [Write deterministic rules](../../how-to/rules/)
-- [Review new transactions](../../how-to/review-new-transactions/)
+- [Transactions that need review](../../how-to/review-new-transactions/)
 - [`DESIGN.md`](https://github.com/mlamoure/purser/blob/main/DESIGN.md)
   section 3.6 and decision 48

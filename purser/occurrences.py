@@ -73,13 +73,17 @@ def amount_of(tx: Transaction, schedule: Schedule) -> Decimal:
 def rule_states(schedule: Schedule) -> tuple[str, str]:
     # Accepting a detected pattern is not evidence of a particular obligation.
     inferred = schedule.source == "detected"
+    # A card payment sized from its statement cycle is an estimate (#674).
+    cycle = schedule.payment_amount is not None
     return (
-        "estimated" if inferred or schedule.amount_type == "estimated" else "confirmed",
+        "estimated" if inferred or cycle or schedule.amount_type == "estimated" else "confirmed",
         "estimated" if inferred or schedule.date_type == "estimated" else "confirmed",
     )
 
 
 def _basis(schedule: Schedule) -> str:
+    if schedule.payment_amount is not None:
+        return "statement_cycle"  # a card payment sized from its statement cycle (#674)
     return schedule.estimate_basis or ("history" if schedule.source == "detected" else "fixed")
 
 
@@ -576,7 +580,7 @@ def _projected_amount(session: Session, schedule: Schedule, slot: date) -> Decim
         raise LedgerError(f"{slot} is beyond the {schedules.FORECAST_MAX_DAYS}-day forecast")
     if not forecasting.expand_rrule(schedule.rrule, dtstart=schedule.dtstart, start=slot, end=slot):
         raise LedgerError(f"{slot} is not a slot of this schedule's rule")
-    amount = schedules.instance_amount(session, schedule)
+    amount = schedules.slot_amount(session, schedule, slot)
     if amount == 0:
         raise LedgerError("the rule estimates no amount yet, so the slot is not projected")
     return amount

@@ -21,13 +21,13 @@ image.
 
 ```bash
 mkdir purser && cd purser
-curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.6/docker-compose.yml
+curl -fsSLO https://raw.githubusercontent.com/mlamoure/purser/v2026.11.7/docker-compose.yml
 PURSER_ENCRYPTION_KEY=keygen docker compose pull
-docker run --rm ghcr.io/mlamoure/purser:v2026.11.6 keygen
+docker run --rm ghcr.io/mlamoure/purser:v2026.11.7 keygen
 ```
 
-The compose file belongs to the latest release, 2026.11.6, and names its image,
-`ghcr.io/mlamoure/purser:v2026.11.6` (linux/amd64 and linux/arm64). Every
+The compose file belongs to the latest release, 2026.11.7, and names its image,
+`ghcr.io/mlamoure/purser:v2026.11.7` (linux/amd64 and linux/arm64). Every
 release publishes its own at the same address under its tag (`vYYYY.M.PATCH`).
 The temporary `keygen` value satisfies Compose interpolation for the pull.
 The last command generates a key without starting the app or connecting

@@ -21,14 +21,14 @@ from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
 import purser.clock
-from purser import clock, db, digest, ledger, matching, review, schedules
+from purser import clock, db, digest, ledger, matching, schedules
 from purser.core import ledger as core
 from purser.holdings import prices
 from purser.models import Event, Match, Transaction
 from tests import conftest
 from tests.conftest import PinnedClock, now, today
 from tests.test_feed_overlay import _feed_account
-from tests.test_ledger_day import _expected_bill, _system_row
+from tests.test_ledger_day import _expected_bill
 
 TESTS = Path(__file__).parent
 
@@ -206,15 +206,14 @@ def world(admin_client: TestClient) -> TestClient:
 def test_every_ledger_day_surface_turns_over_at_midnight(
     world: TestClient, migrated_engine: Engine, pinned_clock: PinnedClock, midnight: datetime
 ) -> None:
-    """A bill and an unreviewed row dated the last day before midnight: one
-    second later they are a day old everywhere at once, with nothing rebuilt."""
+    """A bill dated the last day before midnight: one second later it is a
+    day old everywhere at once, with nothing rebuilt."""
     client = world
     day, next_day = _cross(pinned_clock, midnight)
     assert today() == day
     bill_id = _expected_bill(client, day)
-    _system_row(migrated_engine, day)
 
-    def surfaces() -> tuple[int, bool, int | None, str]:
+    def surfaces() -> tuple[int, bool, str]:
         with db.get_sessionmaker()() as session:
             unmatched = {
                 str(r["transaction_id"]): r
@@ -224,14 +223,13 @@ def test_every_ledger_day_surface_turns_over_at_midnight(
             return (
                 unmatched[bill_id]["aging_days"],
                 bill_id in {str(item["transaction_id"]) for item in upcoming},
-                review.oldest_unreviewed_days(session),
                 client.get("/networth").json()["as_of"],
             )
 
-    assert surfaces() == (0, True, 0, day.isoformat())
+    assert surfaces() == (0, True, day.isoformat())
     pinned_clock.set(midnight + timedelta(seconds=1))
     assert today() == next_day
-    assert surfaces() == (1, False, 1, next_day.isoformat())
+    assert surfaces() == (1, False, next_day.isoformat())
 
 
 def test_a_schedule_made_before_midnight_still_matches_a_line_posted_after(

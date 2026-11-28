@@ -89,7 +89,7 @@ jobs:
       - name: Upgrade from the previous public release and restore its backup
         run: |
           uv run --group e2e python tests/e2e/run_upgrade.py \
-            --old-image ghcr.io/mlamoure/purser:v2026.11.5 --new-image purser:qualification
+            --old-image ghcr.io/mlamoure/purser:v2026.11.6 --new-image purser:qualification
 
   build:
     needs: qualify

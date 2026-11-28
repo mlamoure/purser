@@ -14,6 +14,21 @@ Connect any MCP client to `https://<purser-host>/mcp` (streamable HTTP) with
 Recommended agent scopes: `read + write`. Call `describe` first in every
 fresh session; a running instance also serves this guide at `GET /llms.txt`.
 
+## accept_reconciliation_adjustment
+
+Accept a reconciliation adjustment as it is (write scope), so it no
+longer needs review: use it when the difference a reconcile posted is
+right and nothing explains it better (otherwise recategorize or split the
+row). transaction_id is the adjustment (review_batch reason
+reconciliation_adjustment). note (200 characters or fewer) says why and
+goes on the audit record. Idempotent: created=false when it was already
+accepted. A row that is no reconciliation adjustment is refused.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `transaction_id` | string | yes | — |
+| `note` | string \| null | no | `null` |
+
 ## account_balance
 
 Point-in-time balance of one real account (UUID or path). Open
@@ -76,6 +91,26 @@ withhold: fields to leave out of this answer — any of payee (payees become sta
 | `period` | string | no | `"90d"` |
 | `start` | string \| null | no | `null` |
 | `end` | string \| null | no | `null` |
+| `withhold` | array of string \| null | no | `null` |
+
+## card_statement_cycle
+
+A credit card's statement cycle (path or id): statement_close_day (the
+day of the month its statement closes, or null), suggested_close_day
+with suggestion_source and suggestion_detail (history: the day whose
+closing balance equals most of the card's full payments; statement: the
+day of the latest recorded statement date; none: too few payments), and
+the latest statements (close date, amount owed at the close) once a
+closing day is set. Use it before setting statement_close_day with
+update_account: confirm the suggestion with the user, or take the day
+from a statement. Card payments sized from the statement cycle read
+these statements.
+
+withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
+
+| Parameter | Type | Required | Default |
+| --- | --- | --- | --- |
+| `account` | string | yes | — |
 | `withhold` | array of string \| null | no | `null` |
 
 ## confirm_transfer
@@ -164,6 +199,17 @@ the instance amount, both sides within 3 days of the instance — also when
 the sides post on different days), and the merged transfer settles the
 instance once.
 
+A payment to a CREDIT CARD that has a statement closing day
+(update_account statement_close_day) can be sized from the statement
+cycle: payment_amount = statement_balance (what the statement showed,
+less credits since), minimum_due (a recorded statement's minimum, else
+amount), fixed (amount, never more than the statement) or
+current_balance; later_estimate sizes the payments after the next =
+statement_average (the average of the last later_window statements,
+default 6), same_cycle_last_year or fixed (amount). An estimated payment
+to a card with a closing day defaults to statement_balance and
+statement_average.
+
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
 | `account` | string | yes | — |
@@ -181,6 +227,9 @@ instance once.
 | `counterparty_account` | string \| null | no | `null` |
 | `note` | string \| null | no | `null` |
 | `propose` | boolean | no | `false` |
+| `payment_amount` | string \| null | no | `null` |
+| `later_estimate` | string \| null | no | `null` |
+| `later_window` | integer \| null | no | `null` |
 
 ## create_transaction
 
@@ -344,10 +393,14 @@ mean false); the daily resource carries full evidence and original values.
 An event with basis
 'statement' carries a card statement balance someone recorded
 (record_statement_balance) and one with 'override' an amount the user
-set; without basis the amount is the schedule's own (fixed or an
-estimate — a card payment's default is the card's current balance,
-not its statement). An estimated event may carry range {low, high}: the
-min and max of its schedule's newest six settled amounts and its own;
+set; 'statement_close' is a card payment whose statement has closed
+(what remains of it after credits since) and 'cycle_projection' the next
+statement projected to its close (a card with a statement_close_day
+whose payment schedule sets payment_amount). Without basis the amount is
+the schedule's own (fixed or an estimate — later card payments sized
+from the cycle are the average of past statements). An estimated event
+may carry range {low, high}: the min and max of its schedule's newest
+six settled amounts and its own;
 low.range {low, high, low_date} is the projected low with every ranged
 event at its worst and at its best, and the headline names what could
 take the account under its floor. days is 1..365. events lists
@@ -477,7 +530,7 @@ heavier on tokens; the bare path list is usually enough.
 
 Brokerage holdings: each open brokerage account's newest snapshot set
 — what its value adds on top of its cash in net worth — with its source
-(feed: the bank's snapshots; manual: positions recorded by hand and
+(feed: the bank's snapshots; manual: positions entered in Purser and
 priced daily), the set's date and total, how many positions it holds and
 how many of those sit on a stale close (stale_price) or have no price at
 all (no_price: market_value null, adding nothing — never a silent 0), or
@@ -521,9 +574,10 @@ list_awards.
 
 ## list_lots
 
-A hand-tracked position's tax lots (read scope), oldest first, a page
-at a time, with its lot summary: shares held, shares in lots,
-unallocated shares (outside every lot), shares whose lot has no basis,
+A position's tax lots, on an account whose holdings are entered in
+Purser (read scope), oldest first, a page at a time, with its lot
+summary: shares held, shares in lots, unallocated shares (outside every
+lot), shares whose lot has no basis,
 and cost_basis — the lots' basis, null unless every share has one (never
 an average). capture says when the broker's lots were last captured
 (as_of, captured_at, completeness): capture freshness, distinct from
@@ -718,19 +772,6 @@ bank's account ids and balances are never shown.
 | --- | --- | --- | --- |
 | `accounts` | array of object \| null | no | `null` |
 | `dry_run` | boolean | no | `false` |
-
-## mark_reviewed
-
-Mark reviewed transactions as reviewed (write scope). Bulk and
-idempotent. Set escalate=true to clear the row but flag it for the user —
-use that when the evidence is ambiguous rather than guessing, for example
-when more than one row could be a transfer's pair.
-
-| Parameter | Type | Required | Default |
-| --- | --- | --- | --- |
-| `transaction_ids` | array of string | yes | — |
-| `note` | string \| null | no | `null` |
-| `escalate` | boolean | no | `false` |
 
 ## match
 
@@ -940,8 +981,10 @@ converts it to ledger sign (cards are negative when owed), and
 every other amount in the answer is ledger sign. basis is posted (default)
 or pending_inclusive (posted plus pending); as_of is YYYY-MM-DD, today or
 earlier. Purser posts ONE adjustment for the difference to a system
-category, and it lands in the review set; when the ledger already matches
-nothing is posted and the clean reconcile is still recorded. dry_run=true
+category; it needs review until it is recategorized or split to what it
+was, or accepted (accept_reconciliation_adjustment). When the ledger
+already matches nothing is posted and the clean reconcile is still
+recorded. dry_run=true
 answers the same without writing. Retrying the same date and balance
 returns created=false while it still holds; once a backdated change has
 moved the balance on that date it fails with the difference.
@@ -1031,13 +1074,14 @@ the cent) land on the account's cash on trade_date, the day the shares
 leave the holdings (settle_date posts them on a later settlement date
 instead), booked against the system account equity.securities — never
 income. proceeds_to='none' records the sale without cash (shares
-withheld for tax). If the account already shows a posted row of exactly
-that amount around the settlement date (the broker's own "SOLD" cash),
-the call is refused with cash_already_recorded naming that row: when it
-is the sale's cash, call again with transaction_id set to that row's id
-to link it (a linked row must hold exactly the net proceeds, to the
-cent); when it is a different payment of the same amount, call again
-with force_cash=true to post the sale's cash as well (audited). When the
+withheld for tax). If the account already shows a pending or posted row
+of exactly that amount around the settlement date (the broker's own
+"SOLD" cash), the call is refused with cash_already_recorded naming that
+row: when it is the sale's cash, call again with transaction_id set to
+that row's id to link it (a linked row must be posted, so link a pending
+one once it posts, and hold exactly the net proceeds, to the cent);
+when it is a different payment of the same amount, call again with
+force_cash=true to post the sale's cash as well (audited). When the
 broker's own row of exactly that cash arrives AFTER the sale, the import
 links it in place of Purser's row by itself: nothing to repair. A sale
 that would leave the position below zero on
@@ -1127,8 +1171,16 @@ One call: the card's live payment instance due nearest due_date (within
 card's current balance, which card-payment schedules estimate from by
 default, no longer moves it. forecast_balance shows that event with
 basis 'statement'. Recording again replaces the figure; reset_instance
-hands the payment back to the current-balance estimate. Credit cards
-only: for a loan payment or any other bill, use override_instance.
+hands the payment back to the rule's estimate. Credit cards only: for a
+loan payment or any other bill, use override_instance.
+
+minimum_due is the statement's minimum payment, when it prints one: a
+schedule whose payment_amount is minimum_due pays it, and one that pays
+a fixed sum pays at most the statement. Pass statement_date whenever the
+statement gives it: when its day differs from the card's
+statement_close_day, close_day_hint in the result says what to set with
+update_account; nothing is changed for you. On a card with no closing day
+the date feeds card_statement_cycle's suggestion.
 
 withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
@@ -1138,11 +1190,12 @@ withhold: fields to leave out of this answer — any of payee (payees become sta
 | `account` | string | yes | — |
 | `due_date` | string | yes | — |
 | `statement_date` | string \| null | no | `null` |
+| `minimum_due` | string \| null | no | `null` |
 | `withhold` | array of string \| null | no | `null` |
 
 ## record_transfer_out
 
-Record shares that left a hand-tracked position with no price and no
+Record shares that left a position entered in Purser with no price and no
 cash (write scope): a transfer to another broker, or a decrease the
 broker shows that is not a sale you can price. Never use it for a sale
 (record_sale). On a position that tracks lots, name the lots: lots
@@ -1308,11 +1361,11 @@ linked row gets its category back). Then record the right event. Refused
 when the remaining history would leave the position below zero on some
 date, when the event is already reversed or is itself a reversal, and
 when the position is closed: a closed position is reopened first (REST
-PATCH /positions/{id} with closed=false). A trade's cash row in
-review_batch (flag securities_trade) is corrected this way, never with
-update_transaction or confirm_transfer. Reversing a split (record_split)
-reverses its cash-in-lieu sale with it; that sale is never reversed
-alone. note says why (optional).
+PATCH /positions/{id} with closed=false). A trade's cash row (a
+securities trade a recorded trade holds) is corrected this way, never
+with update_transaction or confirm_transfer. Reversing a split
+(record_split) reverses its cash-in-lieu sale with it; that sale is
+never reversed alone. note says why (optional).
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -1324,7 +1377,7 @@ alone. note says why (optional).
 Undo a change in a hand-valued asset's value (write scope): one made
 with record_value_change or posted by reconcile_account on a property
 account. transaction_id is the change's id (search_transactions on the
-account shows it; a row flagged value_change in review_batch is one).
+account shows it).
 Purser corrects it through a reversal pair, so the history keeps both;
 amount in the answer is what was taken back and balance the asset's value
 now. Record the right figure afterwards if there is one.
@@ -1338,21 +1391,15 @@ withhold: fields to leave out of this answer — any of payee (payees become sta
 
 ## review_batch
 
-The review loop: the next unreviewed transactions with everything you
-need to judge them INLINE — current category and how it was assigned, any
-transfer already on the row, raw-vs-friendly payee, what automation did —
-plus the checklist to review against. No per-row round-trips.
-
-Check `context` before clearing rows: it says which surfaces were actually
-available. If one you needed was absent, escalate rather than clear.
-Rows the backend reviewer handed back appear under `escalated` first.
-Fix what is wrong with update_transaction/confirm_transfer, then
-mark_reviewed — except a row flagged securities_trade with `locked`:
-it names the trade (event_id, position_id) whose cash it is, and the
-guidance says how such a row is corrected. securities_trade without
-`locked` was marked by a person, an agent or a rule (a category changes
-it back); balance_adjustment is Purser's brokerage cash true-up. Set include_guidance=false on
-later pages.
+The transactions that need review, newest first (at most 25), with
+`total` and `remaining`. A row needs review for one `reason`:
+uncategorized (a bank-sync row with no category: categorize it with
+update_transaction, and propose_rule when the payee will recur) or
+reconciliation_adjustment (the difference a reconcile posted: recategorize
+or split it to what it really was, or accept_reconciliation_adjustment
+when it is right as it is). Each row carries its account, payee,
+description, amount, status, category and the financial notes linked to
+its account or payee. A fixed row leaves the list by itself.
 
 withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
@@ -1360,7 +1407,6 @@ withhold: fields to leave out of this answer — any of payee (payees become sta
 | --- | --- | --- | --- |
 | `limit` | integer | no | `10` |
 | `account` | string \| null | no | `null` |
-| `include_guidance` | boolean | no | `true` |
 | `withhold` | array of string \| null | no | `null` |
 
 ## search_docs
@@ -1395,11 +1441,12 @@ carries `split` — its number of lines (categories and [account] lines)
 — and no `category`, and is never a transfer; get_transaction lists its
 lines, split_transaction edits them.
 
-q: words, all found in payee, description or memo ("a phrase"; -word
-excludes; payee:, desc:, memo: scope one; payee:py_... is that payee),
-plus account:, category:, amount:>100 (magnitude; is:debit|credit for
-direction), amount:10..20, date:2026-10 or date:2026-01..2026-03,
-status:pending,posted, is:unreviewed.
+q: words all found in payee, description or memo ("phrase"; -word
+excludes; word~ allows one typo; payee: desc: memo: scope one;
+payee:py_... is that payee), plus account:, category:, amount:>100 or
+10..20 (magnitude; is:debit|credit), date:2026-10 or 2026-01..2026-03,
+status:pending,posted, is:needs-review. One word with no hits may add
+did_you_mean.
 
 withhold: fields to leave out of this answer — any of payee (payees become stable references such as py_8k2mq4x7ra), description, amount (single amounts; totals stay exact). Pass it when the question or action does not need them; nothing is withheld otherwise. The response names what it withheld in `withheld`.
 
@@ -1426,7 +1473,7 @@ about three months of transactions and nothing from before them.
 You pass only the account. Purser takes the bank's figure, date, sign and
 basis, and posts ONE entry for the difference against the system account
 equity.opening_balances (neither income nor spending), dated the day
-before the account's earliest transaction; it lands in the review set.
+before the account's earliest transaction.
 Afterwards the comparison's difference is zero. Purser keeps the entry in
 step by itself: when older history is imported it gives way by exactly
 those rows, so do not correct it. Mapping a new account in the UI does
@@ -1576,6 +1623,14 @@ min_balance="" clears the floor and stops the warnings. Checking,
 savings, cash and credit-card accounts only. Categories are renamed in
 the app, not here, and moving an account to another path is done in the
 app too.
+statement_close_day, on a credit card, is the day of the month its
+statement closes (1..31; a day past a month's end means its last day; 0
+clears it). With it, payments to the card whose schedule sets
+payment_amount are sized from the statement cycle and resized at once:
+what remains of the last statement, then a projection, then the average
+of past statements. card_statement_cycle suggests the day from the
+card's history; set it only when the user confirms or a statement says
+so.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -1588,6 +1643,7 @@ app too.
 | `secured_by` | string \| null | no | `null` |
 | `revalue_after_days` | integer \| null | no | `null` |
 | `balance_true_up` | boolean \| null | no | `null` |
+| `statement_close_day` | integer \| null | no | `null` |
 
 ## update_award_vest
 
@@ -1643,7 +1699,9 @@ A new payee or memo relabels every live instance, pinned ones too, whose
 description or payee still equals the old one (`relabeled` counts them);
 labels set by hand stay. category and counterparty_account are mutually
 exclusive: sending one switches the schedule's shape between flat and
-transfer.
+transfer. payment_amount, later_estimate and later_window size a card
+payment from the statement cycle (see create_schedule);
+payment_amount=off turns that off.
 
 | Parameter | Type | Required | Default |
 | --- | --- | --- | --- |
@@ -1660,6 +1718,9 @@ transfer.
 | `category` | string \| null | no | `null` |
 | `autopost_policy` | string \| null | no | `null` |
 | `counterparty_account` | string \| null | no | `null` |
+| `payment_amount` | string \| null | no | `null` |
+| `later_estimate` | string \| null | no | `null` |
+| `later_window` | integer \| null | no | `null` |
 
 ## update_transaction
 
@@ -1731,7 +1792,7 @@ that the broker no longer lists is counted as due: record it.
 ## upsert_lots
 
 Bulk, idempotent input of a broker's tax lots as of a day (write
-scope) on a hand-tracked brokerage account. positions: [{symbol, lots:
+scope) on a brokerage account whose holdings are entered in Purser. positions: [{symbol, lots:
 [{acquired_on, quantity (shares REMAINING on as_of), external_ref (the
 broker's lot reference, when shown: the lot's identity), plan,
 ordinal (when lots of one date and plan have no reference: 1, 2, ...
@@ -1804,7 +1865,7 @@ positions the feed sends with no value that no recorded close prices
 (unpriced_holdings; record_price under the ticker values one, except
 one marked unpriceable: its feed symbol is no ticker, so no close can
 value it), brokerage accounts switched back to the feed whose
-hand-tracked set still counts because no fetch has arrived since
+holdings entered in Purser still count because no fetch has arrived since
 (open_manual_periods: check the connection or the account mapping),
 the week's expected bills, sync failures, and bank feed problems open
 now (feed: logins that need the user to log in again at the bank,

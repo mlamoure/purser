@@ -23,6 +23,8 @@ Every suggestion has a `kind`, and the kind decides what its draft is:
 | `transfer_link` | a `transfer_link` [rule](../../how-to/rules/#a-pair-scoped-to-a-payee) for one account pair, scoped to a payee | the rule as a **draft**, which links nothing until you activate it |
 | `match` | an expected row and the bank row the matcher proposed for it, with both amounts and the variance | the confirmed **match**: the bill is paid by that row |
 | `transfer_pair` | two bank rows of exactly opposite amounts on two of your accounts, close in date, that nothing links on its own | the **transfer**: one transaction in place of the two rows |
+| `split` | a new bank row and the lines of the payee's last split on that account, with the amount difference on the largest category line | the **split**: the row split into those lines |
+| `trade_rule` | a securities-trade [rule](../../how-to/brokerage-trades/) for one brokerage account, matching rows like the one you marked (their text and direction) | the rule as a **draft**, which marks nothing until you activate it |
 
 ## Where suggestions come from
 
@@ -110,25 +112,28 @@ it does not prove a missed payment. A paused schedule can retain an explicitly
 confirmed or pinned occurrence; inspect it before deciding what to do.
 
 Suggestions are collapsed into **Payment matches**, **Possible transfers**,
-**Recurring schedules** and **Transfer rules**. Filter by account (either side
+**Split like last time**, **Scheduled transactions**, **Transfer rules** and
+**Securities trade rules**. Filter by account (either side
 of a transfer), choose oldest first or strongest pattern first, then expand a
 group. Pages contain ten suggestions. Pattern strength is a heuristic evidence
 score, not a probability; "checked" counts detector runs, not transactions.
 Evidence dates link to the underlying records.
 
 The action names state what they do: **Confirm payment match**, **Link as
-transfer**, **Create schedule**, or **Create draft rule**. Inspect the records
+transfer**, **Split like this**, **Create scheduled transaction**, or
+**Create draft rule**. Inspect the records
 before confirming. A schedule editor offers monthly, weekly, two-week and
 four-week choices and preserves custom recurrence rules. A created schedule
 can be edited or paused in Scheduled transactions; matches and transfers can be undone in
 the register. A transfer rule still requires its separate activation preview.
 
-**Transaction review** shows per-account links for posted and pending rows.
-In a register, select posted transactions and choose **Review selected** to
-preview their dates, payees, amounts and categories before confirming the
-review marks. Pending rows and other pages are excluded. Global counts count
-a transfer once; account counts include both sides. Agent proposals are shown
-separately. The REST summary is `GET /transactions/review-summary` (read scope).
+**Transactions that need review** counts, per account, the transactions that
+[need review](../../how-to/review-new-transactions/), with how many have no
+category and how many are reconciliation adjustments, and links to each
+register filtered to them. A row leaves the count when it is categorized, or when an adjustment is
+recategorized, split or accepted. Global counts count a transfer once; account
+counts include both sides. Agent proposals are shown separately. The REST
+summary is `GET /transactions/review-summary` (read scope).
 
 A failed check shows an incomplete-results message and Retry. **All clear**
 appears only after every attention check succeeds and every group is empty.
@@ -180,8 +185,9 @@ A transfer-link suggestion never links anything by itself, and accepting it
 does not either. Accepting creates the rule as a **draft** and returns
 `projected_links`: how many of your past pairs the rule would link if you
 activated it now. Activation is the rule's own confirm step — the Dashboard
-card asks it right after you accept, the Rules page offers it for every draft,
-and over REST it is `POST /rules/{rule_id}/state` with
+card asks it right after you accept, the Rules page
+(**Settings -> Categories -> Rules**) offers it for every draft, and over
+REST it is `POST /rules/{rule_id}/state` with
 `{"state": "active", "confirm_links": N}`. An agent can accept with
 `decide_suggestion`, but there is no MCP tool to activate the rule: the count
 confirm happens on the Dashboard card, the Rules page or over REST. See
@@ -201,13 +207,15 @@ account, from the same list as the register.
 `?status=withdrawn` shows the cards Purser closed on its own;
 `GET /suggestions/counts` says how many of each kind are open (snoozed ones
 left out), and `GET /suggestions/{id}` adds the full evidence. A match card shows the
-expected row against the bank row and the variance, with Accept, Snooze and
-Reject. A transfer pair card shows where the money left and arrived, both
-dates and both bank texts, with Link as transfer, Snooze and Not a transfer.
+expected row against the bank row and the variance, with **Confirm payment
+match**, **Snooze 30d** and **Reject** (then **Not this row**). A transfer pair
+card shows where the money left and arrived, both dates and both bank texts,
+with **Link as transfer**, **Snooze 30d** and **Reject** (then **Not a
+transfer**).
 Transfer pairs, transfer links and agent proposals carry no confidence, so
 they sort after everything Purser scored. The Dashboard therefore shows each
-kind on its own, under its total ("2 transfer pairs to review"), ten cards at
-a time with **Show more** for the rest, so no kind is ever hidden behind
+kind on its own, its group title beside its count, ten cards at a time with a
+button such as **Show 10 more of 14** for the rest, so no kind is ever hidden behind
 another. MCP `list_suggestions` (with an optional `kind`) returns the same
 rows with a one-line `headline`, the draft, an evidence summary (count,
 first/last, amount range, cadence, and an agent's `note`) and the confidence,

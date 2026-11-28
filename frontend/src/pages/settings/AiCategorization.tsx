@@ -1,7 +1,9 @@
 import { useId, useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { api, errorDetail } from "../../lib/api";
+import { configQuery } from "../../lib/config";
 import type { components } from "../../api/schema";
+import { QueryState } from "../../components/QueryState";
 import { Badge, Button, Card, CardTitle, ErrorText, Input, Label } from "../../components/ui";
 import { Saved, selectClass, useSaveConfig, type ConfigOut, type ConfigUpdate } from "./saveConfig";
 
@@ -74,9 +76,94 @@ function parseTimeout(typed: string): number | null {
   return Number.isInteger(n) && n >= TIMEOUT_MIN && n <= TIMEOUT_MAX ? n : null;
 }
 
-/** The optional provider that categorizes new transactions. Settings ->
- * Categories shows it to admins (#542): it decides how new rows get the
- * categories that page manages. A local model is its own choice (#640,
+/** Settings -> Categories -> AI categorization (#694), an admin-only tab:
+ * everything in it is GET/PUT /config. */
+export default function AiCategorization() {
+  const config = useQuery(configQuery);
+  if (!config.data) return <QueryState query={config} what="the AI categorization settings" />;
+  return (
+    <div className="space-y-6">
+      <AiCard initial={config.data} />
+      <MinConfidenceCard initial={config.data} />
+    </div>
+  );
+}
+
+/** A stored confidence (0 to 1) as the percentage people read, to a tenth. */
+export function confidencePercent(value: number): string {
+  return String(Math.round(value * 1000) / 10);
+}
+
+/** A typed percentage as the stored 0..1 value, or null when it is not a
+ * number from 0 to 100 with at most one decimal place. */
+export function parseConfidencePercent(typed: string): number | null {
+  const t = typed.trim().replace(/%$/, "").trim();
+  if (!/^\d{1,3}(\.\d)?$/.test(t)) return null;
+  const percent = Number(t);
+  return percent <= 100 ? Math.round(percent * 10) / 1000 : null;
+}
+
+/** `ai_min_confidence` (decision 141): how sure the model must be before its
+ * category is applied. Shown and typed as a percentage, stored 0 to 1. */
+function MinConfidenceCard({ initial }: { initial: ConfigOut }) {
+  const [typed, setTyped] = useState(confidencePercent(initial.values.ai_min_confidence));
+  const [error, setError] = useState<string | null>(null);
+  const save = useSaveConfig(setError);
+  const id = useId();
+
+  return (
+    <Card>
+      <CardTitle>Minimum confidence</CardTitle>
+      <p className="mb-4 text-sm text-muted-foreground">
+        A guess below this is not applied: the transaction stays uncategorized, so it is flagged
+        for review.
+      </p>
+      <div className="flex flex-wrap items-end gap-2">
+        <div className="space-y-1">
+          <Label htmlFor={`${id}-floor`}>Minimum confidence</Label>
+          <div className="flex items-center gap-1">
+            <Input
+              id={`${id}-floor`}
+              className="w-24"
+              inputMode="decimal"
+              aria-describedby={`${id}-floor-help`}
+              value={typed}
+              onChange={(e) => setTyped(e.target.value)}
+            />
+            <span className="text-sm text-muted-foreground">%</span>
+          </div>
+        </div>
+        <Button
+          disabled={save.isPending}
+          onClick={() => {
+            setError(null);
+            const value = parseConfidencePercent(typed);
+            if (value === null) {
+              setError("Minimum confidence must be a percentage from 0 to 100.");
+              return;
+            }
+            save.mutate({ ai_min_confidence: value });
+          }}
+        >
+          Save
+        </Button>
+      </div>
+      <p id={`${id}-floor-help`} className="mt-1 text-xs text-muted-foreground">
+        0 to 100 (70 by default). A guess that a transaction is a transfer to one of your
+        accounts needs at least 85 whatever this says. Raise it when a small model guesses too
+        freely.
+        {initial.values.ai_provider === "none" &&
+          " AI categorization is off, so this applies once you choose a provider."}
+      </p>
+      <Saved visible={save.isSuccess} />
+      <ErrorText>{error}</ErrorText>
+    </Card>
+  );
+}
+
+/** The optional provider that categorizes new transactions, on Settings ->
+ * Categories' AI categorization tab (#542, #694): it decides how new rows
+ * get the categories the section manages. A local model is its own choice (#640,
  * decision 133): no cloud default, an optional key, a model list from the
  * server, a connection test and wording that says the data stays home. */
 export function AiCard({ initial }: { initial: ConfigOut }) {

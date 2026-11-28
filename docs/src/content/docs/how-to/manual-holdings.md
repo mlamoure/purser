@@ -1,6 +1,6 @@
 ---
-title: Track holdings by hand
-description: Record what a brokerage account holds when its feed sends cash but no holdings, keep those positions priced, and see how they reach balances and net worth.
+title: Enter holdings in Purser
+description: Enter what a brokerage account holds when SimpleFIN sends its cash but no holdings, keep those positions priced with Market data, and see how they reach balances and net worth.
 ---
 
 Some brokerages send an account's cash through SimpleFIN but no holdings. An
@@ -8,21 +8,21 @@ employee stock plan is the usual case: the shares sit at the broker, the feed
 shows only the cash that leaves. Without holdings, the account reports its cash
 alone and net worth leaves the shares out.
 
-Purser can track such an account's holdings by hand. You (or your agent)
-record what the account holds, Purser prices it every day, and the value
+Purser can hold such an account's holdings itself. You (or your agent)
+enter what the account holds, Market data prices it every day, and the value
 reaches the account's balance and net worth exactly like a feed snapshot would.
 
 An account whose holdings come from the feed needs none of this: its buy and
 sell rows are marked as securities trades instead, and its cash is kept in step
 with the broker's balance after each sync (see
-[Mark brokerage buys and sells](../../how-to/brokerage-trades/)). On a hand-tracked
-account, record the trade and link its bank row; marking a row there is
+[Mark brokerage buys and sells](../../how-to/brokerage-trades/)). On an account whose holdings
+are entered in Purser, record the trade and link its bank row; marking a row there is
 refused.
 
 ## Switch the account to manual holdings
 
 An account's holdings come from one source at a time: the feed (the default) or
-positions recorded by hand. An admin switches a brokerage account, once:
+positions entered in Purser. An admin switches a brokerage account, once:
 
 ```bash
 curl -X PATCH https://purser.example.com/accounts/<id> \
@@ -39,23 +39,23 @@ In the admin UI the switch is the **Holdings** selector on the account page
   `holdings_skipped_manual` in the sync result, and they stay in the archived
   fetch.
 - Feed snapshots recorded before the switch stay as history. The first
-  hand-tracked snapshot is dated the day after the last feed one, so no date
+  snapshot of holdings entered in Purser is dated the day after the last feed one, so no date
   mixes the two sources.
 - Switching back to `feed` needs the account to be mapped to a feed account
-  (a 422 otherwise) and changes no snapshot: the hand-tracked holdings stay
+  (a 422 otherwise) and changes no snapshot: the holdings entered in Purser stay
   in effect, so the account keeps its value, until the first sync after the
-  switch ends the hand-tracked period. From that sync's date the account
+  switch ends the manual period. From that sync's date the account
   holds what the feed reports, and a position the feed does not report ends
   there (all of them, for a feed that sends only cash). The sync result counts
   what it ended (`manual_period_tombstones`), and the audit log records it as
-  `account.manual_period_end`. The hand-tracked history before stays, and so
+  `account.manual_period_end`. The history entered in Purser before stays, and so
   do your positions and their events, read-only, until the account is
   switched to manual again. Unmapping or closing the account before that sync
   ends the period the same day; remapping it onto another feed account does
   not (that mapping's first sync ends it). If no sync of the account arrives
   for the price staleness threshold (7 days by default), the daily price job
   reports it once (`holding.period_open`, and a `whats_new` line): the
-  hand-tracked holdings are still counted, unpriced by anything new, so check
+  holdings entered in Purser are still counted, unpriced by anything new, so check
   the connection or the account's mapping.
 
 Only brokerage accounts take a holdings source.
@@ -243,8 +243,8 @@ curl -X POST https://purser.example.com/positions/<position id>/events \
   never count as income or spending, and net worth does not move: by default
   the cash posts on the trade date, the day the shares leave the holdings. (A
   later `settle_on`, or a linked bank row dated after the trade, leaves net
-  worth short by the sale's value until that date; see below.) The row waits for review like any
-  other row Purser posts, and the register shows it as **Securities trade**.
+  worth short by the sale's value until that date; see below.) The register
+  shows it as **Securities trade**.
 - `proceeds_to: "none"` records a sale without cash, such as shares withheld
   for tax.
 - Trade cash is in US dollars only (`equity.securities` is a USD account, and
@@ -384,16 +384,38 @@ and recording a close does not change it; correct the count instead.
 
 ### Configure a provider
 
-**Settings -> Prices** sets the provider, its API key and the staleness
-threshold:
+**Settings -> Market data** sets the provider, its API key and the staleness
+threshold. Market data prices the holdings of every account that isn't
+connected through SimpleFIN; SimpleFIN accounts are valued by the bank on
+each sync. The page shows when the daily job last ran and runs next, and
+names the symbols whose price is stale or missing. Every holding of every
+brokerage account, with its price, is on the **Holdings** page
+(`GET /holdings/portfolio`); a price entered by hand is marked
+**manual price** (`manual_price`). The settings:
 
-- **Provider**: `none` (the default: record closes by hand) or `tiingo`
-  (end-of-day closes; a free key is enough). The provider sees ticker symbols
-  only, never quantities, accounts or values.
+- **Provider**: `none` (the default: no provider; enter closes by hand), `tiingo` or
+  `eodhd`, both end-of-day closes with a free key from the provider's site.
+  Tiingo covers US stocks, ETFs and mutual funds. EODHD covers exchanges
+  worldwide (`VOD.LSE`, `SHOP.TO`) and US mutual funds; its free key allows
+  20 requests a day and one year of history, and a paid plan lifts both.
+  London (`.LSE`) closes are in pence. The provider sees ticker symbols
+  only, never share counts, accounts or values.
+- **Fallback provider**: optional, the other provider, with its own key. A
+  date range the provider does not know a ticker for, or fails to answer
+  (a refused key, its daily limit), is asked of the fallback, and counts as
+  answered once either provider answered it. A provider's not-found is no
+  failure when a fallback is set; any other provider failure is still
+  reported.
 - **API key**: write-only and encrypted in Purser's database. There is no
   environment variable for it, and it never appears in a response or a log.
   A key with a space, a line break or a non-ASCII character is refused when
-  you save it.
+  you save it. A new key is tested before it is saved: Purser asks the
+  provider for a few recent closes of one well-known symbol, and a key the
+  provider refuses is not saved. **Test connection** tests the saved key the
+  same way (`POST /prices/test`, admin; nothing is stored). A key goes only to
+  the provider you entered it for: after you choose another provider, enter
+  that provider's key. Swapping the provider and the fallback keeps each key
+  with its own provider.
 - **Stale after**: a position whose newest close is older than this many days
   (default 7) is flagged `stale`.
 
@@ -409,15 +431,30 @@ failing date range, never blocks the others: it records a
 `price.fetch_failed` event and the rest carry on.
 
 Tiingo spells share classes with a dash, so a position recorded as `BRK.B` is
-fetched as `BRK-B`.
+fetched as `BRK-B`. EODHD adds the exchange: a bare ticker is a US listing
+(`AAPL` is fetched as `AAPL.US`, `BRK.B` as `BRK-B.US`), and a symbol with
+a longer suffix is taken as `TICKER.EXCHANGE` already (`VOD.LSE`).
+
+### Symbol settings
+
+**Symbol settings** on the same page (`PUT /prices/symbols/{symbol}`, write
+scope; `GET /prices/symbols`) covers what a provider's own spelling cannot:
+
+- **A ticker per provider**: the symbol as that provider spells it, such as
+  `VOD.LSE` at EODHD for a position recorded as `VOD`. Changing a ticker
+  makes that provider ask for the symbol's dates again.
+- **Don't fetch prices for this symbol** (`skip_providers`): the symbol is
+  never sent to a provider. Use it for a plan-only fund or a ticker no
+  provider carries, so the daily job does not ask for it; enter its closes
+  by hand as below.
 
 ## Price a plan-only fund
 
 Some plans' feeds send a fund they hold but cannot value: an employer
 plan's collective trust, say, which no market-data provider prices. The
 feed reports the shares with a market value of `0`, or with none at all, so
-the position would add nothing to the balance. You do not need to track that account by hand
-for it: record the fund's unit price, and Purser values the feed's row from
+the position would add nothing to the balance. You do not need to enter that account's
+holdings in Purser for it: record the fund's unit price, and Purser values the feed's row from
 it on read.
 
 ```text
@@ -447,18 +484,22 @@ curl -X POST https://purser.example.com/prices \
 - Recording a price for an earlier date re-values the account's history
   from that date; net worth heals by itself.
 - Weekly is enough: the newest price carries forward, and once it is older
-  than the staleness threshold (Settings, Prices) the fund is reported stale
-  like a hand-tracked one: `stale` in `list_holdings`, a `price.stale`
-  event, Settings -> Prices and `whats_new`'s `stale_prices`.
+  than the staleness threshold (Settings, Market data) the fund is reported stale
+  like a position entered in Purser: `stale` in `list_holdings`, a `price.stale`
+  event, Settings -> Market data and `whats_new`'s `stale_prices`.
 - Until a price exists, the position shows **no price** (`no_price` in
   `list_holdings`, `market_value` null), never a silent 0, and `whats_new`
   reports it once (`unpriced_holdings`).
-- No provider is asked for such a symbol: the price comes from the plan's
-  site.
+- With a provider configured, the daily job asks it for the fund's ticker
+  too: the close in effect on each such row's date. An ordinary fund or ETF
+  the feed reports at 0 is then priced without typing anything. A ticker the
+  provider does not know (a plan-only collective trust, say) is not an
+  error: the run lists it under `not_covered`, and its price comes from the
+  plan's site, recorded as above.
 
 ## Tax lots and equity awards
 
-A hand-tracked position can also track its tax lots (acquisition date,
+A position entered in Purser can also track its tax lots (acquisition date,
 remaining shares, basis), and the account its equity awards and vest
 schedule. A position's basis then comes from its lots, never an average, and
 a sale names the lots it draws on. Lot lists and award schedules load in bulk
@@ -467,7 +508,7 @@ with a previewed, idempotent capture. See
 
 ## Where the value shows up
 
-Hand-tracked positions are written into the same `holdings_snapshots` table
+Positions entered in Purser are written into the same `holdings_snapshots` table
 the feed fills, so everything that reads holdings picks them up unchanged:
 
 - the account's balance is its cash plus its holdings' market value
@@ -483,7 +524,7 @@ the feed fills, so everything that reads holdings picks them up unchanged:
 - `whats_new` reports symbols whose price turned stale (`stale_prices`) and
   feed positions no price values yet (`unpriced_holdings`);
 - the account page in the admin interface shows a **Holdings** table for
-  every brokerage account, hand-tracked or fed by the bank: each holding's
+  every brokerage account, entered in Purser or from SimpleFIN: each holding's
   value, unrealized gain and share of the account, a cash row and the total
   (the account's balance), with stale, unpriced and in-transit lines marked.
   It reads `GET /accounts/{id}/holdings/summary`, which computes every figure

@@ -405,6 +405,7 @@ def _read_calls(seeded: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
         ("net_worth", {"period": "90d"}),
         ("balance_history", {"account": "assets.checking", "period": "30d"}),
         ("forecast_balance", {"account": "assets.checking", "days": 30}),
+        ("card_statement_cycle", {"account": "liabilities.card"}),
         ("list_recurring", {}),
         ("whats_new", {}),
         ("list_memories", {}),

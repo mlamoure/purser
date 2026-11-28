@@ -21,7 +21,6 @@ EXPECTED_JOB_IDS = {
     "webhooks.delivery",
     "sessions.cleanup",
     "audit.prune_daily",
-    "review.aged_sweep",
 }
 
 

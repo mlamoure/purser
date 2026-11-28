@@ -73,7 +73,8 @@ On the card:
 - **Create draft rule** creates the rule as a draft and says how many rows in
   your history it matches today. A draft marks nothing.
 - **Activate** turns it on for new rows. To mark past rows, use the rule's
-  apply to history on the Rules page, which previews first.
+  apply to history on the Rules page (**Settings -> Categories -> Rules**),
+  which previews first.
 - **Reject** remembers the proposal; **Never for this account** stops trade
   rule proposals for the account.
 
@@ -125,13 +126,13 @@ feed, and it never fires on data it cannot trust:
   that day is adjusted only while its holdings (symbols, share counts and
   values) still match that set; a price that moved during the day waits for
   the next day's first sync;
-- the account is closed, its holdings are tracked by hand, or the switch is
+- the account is closed, its holdings are entered in Purser, or the switch is
   off;
 - the same sync already adjusted the account.
 
 Each adjustment is audited (`account.balance_true_up`), emits an
 `account.balance_adjusted` [event](../../reference/events-webhooks/), and
-waits in [review](../../how-to/review-new-transactions/) flagged `balance_adjustment`.
+shows in the register as a balance adjustment.
 If you know what the gap was (a fee, say), recategorize the entry. A buy row
 the broker sends later is matched by the next sync's adjustment.
 

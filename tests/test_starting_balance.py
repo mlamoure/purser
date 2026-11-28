@@ -659,7 +659,7 @@ class TestRoutes:
         assert resp.status_code == 422
         assert resp.json()["detail"]["code"] == "not_connected"
 
-    def test_the_entry_is_not_edited_and_review_names_it(self, harness: FeedHarness) -> None:
+    def test_the_entry_is_not_edited_and_never_needs_review(self, harness: FeedHarness) -> None:
         _mapped(harness, starting=True)
         [entry] = _starting_rows(harness.client)
 
@@ -670,13 +670,7 @@ class TestRoutes:
         assert "starting balance" in resp.text and "set_starting_balance" in resp.text
         resp = harness.client.patch(f"/transactions/{entry['id']}", json={"amount": "1.00"})
         assert resp.status_code == 422
-        with db.get_sessionmaker()() as session:
-            from purser import review
-
-            tx = session.get(Transaction, uuid.UUID(entry["id"]))
-            assert tx is not None
-            payload = review._row_payload(session, tx, claimed=None)
-        assert "starting_balance" in payload["flags"] and "locked" not in payload
+        assert entry["needs_review"] is False and entry["review_reason"] is None
 
 
 class TestOlderHistory:

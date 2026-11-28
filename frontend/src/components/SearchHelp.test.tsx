@@ -15,4 +15,13 @@ describe("SearchHelp", () => {
     expect(screen.getByText("amount:>100")).toBeVisible();
     expect(screen.getByText(/Every part must match/)).toBeVisible();
   });
+
+  it("documents is:needs-review, not the retired review terms (#694)", async () => {
+    const user = userEvent.setup();
+    render(<SearchHelp />);
+    await user.click(screen.getByLabelText("Search syntax"));
+    expect(screen.getByText("is:needs-review")).toBeVisible();
+    expect(screen.getByText(/no category, or a reconciliation adjustment/)).toBeVisible();
+    expect(screen.queryByText(/is:unreviewed|is:reviewed/)).not.toBeInTheDocument();
+  });
 });

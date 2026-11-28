@@ -1582,10 +1582,9 @@ def test_a_dry_run_leaves_the_balance_watermark_alone(db_session) -> None:
     assert "balances_dirty" not in db_session.info
 
 
-def test_review_batch_marks_trade_cash_locked(db_session) -> None:
-    """Agents reviewing rows are steered to update_transaction and
-    confirm_transfer, both wrong for a trade's cash: the row says it is
-    locked and names the trade's event; the guidance says what to do."""
+def test_a_trades_cash_never_needs_review(db_session) -> None:
+    """Purser's own cash row for a sale is no bank-sync row and books to
+    equity.securities: no reason to review it (decision 141)."""
     from purser import review
 
     account = _broker(db_session)
@@ -1599,21 +1598,15 @@ def test_review_batch_marks_trade_cash_locked(db_session) -> None:
         price=Decimal("10"),
         token=None,
     )
-    batch = review.batch(db_session, limit=50, account_ref=str(account.id))
-    (row,) = [r for r in batch["rows"] if r["id"] == str(event.transaction_id)]
-    assert "securities_trade" in row["flags"]
-    assert row["locked"] == {"event_id": str(event.id), "position_id": str(position.id)}
-    assert any("reverse_position_event" in line for line in batch["guidance"])
-    quiet = review.batch(db_session, limit=50, account_ref=str(account.id), include_guidance=False)
-    (row,) = [r for r in quiet["rows"] if r["id"] == str(event.transaction_id)]
-    assert "reverse_position_event" not in repr(row)
+    assert event.transaction_id is not None
+    assert review.review_reasons(db_session, [event.transaction_id]) == {}
 
 
-def test_an_escalated_bank_row_a_trade_linked_is_locked(db_session) -> None:
-    """The backend reviewer escalates a feed SOLD row; a sale then links it.
-    The escalated list still shows the corrected original — it is the trade's
-    cash all the same, so it is locked and names the trade."""
-    from purser import crypto, review
+def test_a_bank_row_a_trade_links_no_longer_needs_review(db_session) -> None:
+    """A feed SOLD row with no category needs review; once a sale links it
+    as its cash, the row it lives on books to equity.securities and the
+    reason is gone — read from the row, nothing to clear."""
+    from purser import crypto, lineage, review
     from purser.feed import importer
     from purser.models import Connection, RawFetch
 
@@ -1643,8 +1636,8 @@ def test_an_escalated_bank_row_a_trade_linked_is_locked(db_session) -> None:
         source_fetch_id=fetch.id,
         content_hash=f"test-{uuid.uuid4().hex}",
     )
-    review.mark(db_session, tx_id=bank.id, token=None, via=review.VIA_AI_REVIEW, escalate=True)
-    event = service.record_event(
+    assert review.review_reasons(db_session, [bank.id]) == {bank.id: review.REASON_UNCATEGORIZED}
+    service.record_event(
         db_session,
         position_id=position.id,
         kind="sell",
@@ -1654,10 +1647,9 @@ def test_an_escalated_bank_row_a_trade_linked_is_locked(db_session) -> None:
         transaction_id=bank.id,
         token=_commit_token(db_session),
     )
-    page = review.batch(db_session, limit=25, account_ref=str(account.id))
-    (row,) = [r for r in page["escalated"] if r["id"] == str(bank.id)]
-    assert "securities_trade" in row["flags"]
-    assert row["locked"] == {"event_id": str(event.id), "position_id": str(position.id)}
+    head = lineage.current_rows(db_session, [bank.id])[bank.id]
+    assert head != bank.id
+    assert review.review_reasons(db_session, [bank.id, head]) == {}
 
 
 # ---------------------------------------------------------------------------
